@@ -13,6 +13,7 @@ jobs:
         env:
           SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
+          SYNC_TOKEN="$(printf %s "$SYNC_TOKEN" | tr -d '[:space:]')"   # strip stray spaces/newlines
           for i in 1 2 3 4; do
             code=$(curl -s -o /tmp/out -w "%{http_code}" -m 90 -X POST \
               -H "X-Cron-Token: $SYNC_TOKEN" -H "X-Requested-With: tcd" \

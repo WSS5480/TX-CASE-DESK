@@ -3,7 +3,7 @@ const URL_ = (process.env.APP_URL || "https://tx-case-desk.onrender.com") + "/ap
 (async () => {
   for (let i = 1; i <= 5; i++) {
     try {
-      const r = await fetch(URL_, { method: "POST", headers: { "X-Cron-Token": process.env.SYNC_TOKEN || "", "X-Requested-With": "tcd" }, signal: AbortSignal.timeout(90000) });
+      const r = await fetch(URL_, { method: "POST", headers: { "X-Cron-Token": (process.env.SYNC_TOKEN || "").trim(), "X-Requested-With": "tcd" }, signal: AbortSignal.timeout(90000) });
       const body = await r.text();
       console.log(`attempt ${i}: ${r.status} ${body}`);
       if (r.ok) process.exit(0);

@@ -11,7 +11,7 @@ class CLError extends Error { constructor(msg, status) { super(msg); this.status
 
 async function clFetch(path, { auth = false } = {}) {
   const headers = { Accept: "application/json", "User-Agent": "TX-Case-Desk/1.0" };
-  const token = process.env.COURTLISTENER_TOKEN;
+  const token = (process.env.COURTLISTENER_TOKEN || "").trim();
   if (token) headers.Authorization = "Token " + token;
   else if (auth) throw new CLError("Opening full opinions needs a CourtListener API token (set COURTLISTENER_TOKEN on the server).", 503);
   let res;

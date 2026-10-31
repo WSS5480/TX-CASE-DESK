@@ -2,7 +2,7 @@
 const crypto = require("crypto");
 
 function key() {
-  const k = process.env.CRED_KEY;
+  const k = (process.env.CRED_KEY || "").trim();
   if (!k) throw new Error("CRED_KEY is not set — court logins can't be stored.");
   const buf = Buffer.from(k, "base64");
   if (buf.length !== 32) throw new Error("CRED_KEY must be 32 bytes, base64-encoded.");

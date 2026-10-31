@@ -331,8 +331,8 @@ app.delete("/api/court-logins/:id", requireAuth, wrap(async (req, res) => {
 // Hourly wake-up ping (free GitHub Actions schedule; scripts/hourly-ping.js works for a Render cron too). Needs SYNC_TOKEN.
 let lastHourly = 0;
 app.post("/api/cron/hourly", wrap(async (req, res) => {
-  const tok = process.env.SYNC_TOKEN;
-  const given = String(req.get("X-Cron-Token") || "");
+  const tok = (process.env.SYNC_TOKEN || "").trim(); // ignore stray spaces/newlines from copy-paste
+  const given = String(req.get("X-Cron-Token") || "").trim();
   if (!tok || given.length !== tok.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(tok))) return res.status(403).json({ error: "Forbidden" });
   if (Date.now() - lastHourly < 50 * 60e3) return res.json({ skipped: "ran recently" });
   lastHourly = Date.now();
