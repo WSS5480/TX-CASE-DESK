@@ -1,0 +1,22 @@
+{
+  "name": "tx-case-desk",
+  "version": "1.0.0",
+  "description": "Texas Case Desk — pending cases by county + Texas case law for attorneys",
+  "main": "server.js",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "connect-pg-simple": "^10.0.0",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "express-session": "^1.18.1",
+    "helmet": "^8.0.0",
+    "otplib": "^12.0.1",
+    "pg": "^8.13.1",
+    "qrcode": "^1.5.4"
+  }
+}

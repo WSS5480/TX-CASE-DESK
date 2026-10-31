@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TX Case Desk</title>
+<style>
+:root{--bg:#f5f4f0;--card:#fff;--ink:#1d2433;--mute:#667085;--line:#e4e2db;--acc:#7a2e2e;--acc2:#a8443f;--ok:#1f7a4d;--warn:#b7791f;--bad:#b42318;--chip:#efece4}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--ink);color:#fff;padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+header h1{font-size:17px;margin:0;font-family:Georgia,serif;letter-spacing:.3px}
+header .who{margin-left:auto;font-size:13px;opacity:.85}
+nav{display:flex;gap:4px;padding:8px 12px;background:#fff;border-bottom:1px solid var(--line);flex-wrap:wrap;position:sticky;top:0;z-index:5}
+nav button{border:0;background:none;padding:8px 12px;border-radius:8px;font-size:14px;color:var(--mute);cursor:pointer}
+nav button.on{background:var(--chip);color:var(--ink);font-weight:600}
+main{max-width:860px;margin:0 auto;padding:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}
+.full{grid-column:1/-1}
+label{font-size:12px;color:var(--mute);display:block;margin-bottom:3px}
+input,select,textarea{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:15px;background:#fff;font-family:inherit}
+textarea{min-height:110px}
+.btn{border:0;background:var(--acc);color:#fff;padding:9px 14px;border-radius:8px;font-size:14px;cursor:pointer}
+.btn:disabled{opacity:.6}
+.btn.ghost{background:var(--chip);color:var(--ink)}
+.btn.danger{background:#fde4e1;color:var(--bad)}
+.btn.sm{padding:6px 10px;font-size:13px}
+.chip{display:inline-block;background:var(--chip);border-radius:999px;padding:4px 10px;font-size:13px;margin:3px 4px 3px 0;cursor:pointer;user-select:none}
+.chip.sel{background:var(--acc);color:#fff}
+.tag{font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;padding:2px 8px;border-radius:6px;display:inline-block}
+.g{background:#e3f4ea;color:var(--ok)}.y{background:#fdf1d8;color:var(--warn)}.r{background:#fde4e1;color:var(--bad)}.n{background:#e8eefc;color:#2f4fa8}
+h2{font-size:18px;margin:4px 0 10px;font-family:Georgia,serif}
+h3{font-size:15px;margin:0 0 4px}
+.mute{color:var(--mute);font-size:13px}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:6px 12px;margin-top:8px;font-size:13px}
+.kv b{display:block;font-size:11px;color:var(--mute);font-weight:500}
+a.link{color:var(--acc2);font-weight:600;cursor:pointer;text-decoration:underline}
+.narrow{max-width:400px;margin:30px auto}
+.err{color:var(--bad);font-size:13px;min-height:18px;margin:6px 0}
+.stat{font-size:22px;font-weight:700}
+hr{border:0;border-top:1px solid var(--line);margin:12px 0}
+.optext{white-space:pre-wrap;font-family:Georgia,serif;font-size:15px;line-height:1.6;max-height:70vh;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:12px;background:#fdfcf9}
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--ink);color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;display:none;z-index:9;max-width:90vw}
+.qr{display:block;margin:10px auto;width:200px;height:200px}
+.secret{font-family:monospace;word-break:break-all;background:var(--chip);padding:6px 8px;border-radius:6px;font-size:13px}
+details summary{cursor:pointer;font-weight:600}
+.counties{max-height:260px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:6px}
+</style>
+</head>
+<body>
+<header><h1>⚖️ TX Case Desk</h1><span class="who" id="who"></span></header>
+<nav id="nav" hidden></nav>
+<main id="app"><div class="card mute">Loading…</div></main>
+<div class="toast" id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
