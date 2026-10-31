@@ -90,16 +90,18 @@ async function courtView() {
   $("#app").innerHTML = `<div class="card"><h2>Court logins</h2>
    <p class="mute">Your cases are pulled from each county portal under <b>your</b> login and <b>your</b> bar # (${esc(me.bar_number || "not set")}) — only for counties you picked. Pulls run when you sign in, nightly, and when you tap Sync now. Passwords are encrypted and never shown again.</p>
    ${d.bar_ok ? "" : `<p class="err">Your account needs an 8-digit bar # before cases can be pulled.</p>`}</div>
-   <div class="card"><h2>📨 re:SearchTX alerts</h2>
-   ${!ea.configured ? `<p class="mute">Email alerts aren't switched on for this app yet (admin setup pending).</p>` : `
-   <p class="mute">Forward your re:SearchTX alert emails to your private address. Each alert is matched to your cases by cause number and shows on the case.</p>
-   <label>Your forwarding address</label><div class="row"><div class="secret" style="flex:1">${esc(ea.address)}</div><button class="btn sm" id="cpAddr">Copy</button></div>
-   ${ea.confirm ? `<div class="card" style="background:#fff4d6;margin:10px 0 0"><b>Gmail forwarding confirmation received.</b><div class="mute">Enter this in Gmail (or open the link) to finish setup:</div><div class="secret" style="margin-top:6px">${esc(ea.confirm.code)}</div></div>` : ""}
-   <details style="margin-top:10px"><summary>How to set it up (5 min)</summary><ol style="padding-left:18px;font-size:14px">
-     <li>Sign in at <a class="link" href="https://research.txcourts.gov" target="_blank" rel="noopener">research.txcourts.gov</a> (same login as eFileTexas), claim your attorney record, and turn on alerts for your cases.</li>
-     <li><b>Gmail:</b> Settings → See all settings → Forwarding and POP/IMAP → Add a forwarding address → paste your address above. The confirmation code will appear right here — enter it in Gmail. Then create a filter: From contains <code>tylertech</code> or <code>txcourts</code> → Forward to your address.</li>
-     <li><b>Outlook:</b> Settings → Mail → Rules → Add rule: From contains <code>tylertech</code> → Forward to your address.</li>
-     <li>Tip: forward one existing re:SearchTX email by hand to test it — it should show below within a minute.</li></ol></details>
+   <div class="card"><h2>📨 Court updates (re:SearchTX)</h2>
+   ${!ea.configured ? `<p class="mute">Court updates aren't switched on for this app yet.</p>` : `
+   <p style="margin-top:0">Get filing and hearing updates on your cases automatically — no email settings to change.</p>
+   ${ea.emails.some(m => /re:?search|tylertech/i.test(m.from_addr + m.subject)) ? `<p><span class="tag g">Connected</span> <span class="mute">re:SearchTX is sending to this app.</span></p>` : `<p><span class="tag n">Not connected yet</span></p>`}
+   <ol style="padding-left:20px;font-size:15px;line-height:1.6">
+     <li><b>Copy your app address:</b><div class="row" style="margin:4px 0"><div class="secret" style="flex:1">${esc(ea.address)}</div><button class="btn sm" id="cpAddr">Copy</button></div></li>
+     <li>Go to <a class="link" href="https://research.txcourts.gov" target="_blank" rel="noopener">research.txcourts.gov</a> → <b>Register</b> → use that address as the email.</li>
+     <li>Come back here. The <b>Activate Account</b> email shows below → tap <b>View email</b> → tap the activation link.</li>
+     <li>Sign in to re:SearchTX with that address → search each case by cause # → turn on <b>alerts</b>.</li>
+   </ol>
+   <p class="mute" style="margin:0">That's it — updates appear on your matching cases in Pending Cases. Keep your State Bar eService email as your real inbox; don't change it.</p>
+   <details style="margin-top:8px"><summary class="mute">Already get re:SearchTX emails at your own address?</summary><p class="mute" style="font-size:14px">You can forward any of them to the address above (one at a time, or with a Gmail/Outlook rule) and they'll match the same way.</p></details>
    <h3 style="margin-top:12px">Recent alerts</h3>
    ${ea.emails.length ? ea.emails.map(m => `<div style="border-top:1px solid var(--line);padding:8px 0"><b>${esc(m.subject || "(no subject)")}</b><div class="mute">${new Date(m.received_at).toLocaleString()} · ${esc(m.from_addr)}</div>
      <div class="mute">${(m.matched_case_ids || []).length} matched case(s)${m.unmatched.length ? ` · not in your list yet: ${m.unmatched.map(esc).join(", ")}` : ""}</div>
