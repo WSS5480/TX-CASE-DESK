@@ -39,7 +39,14 @@ async function redeem(firmId, firmName, code) {
 async function refresh(firm, force = false) {
   if (!enabled()) return firm;
   if (!force && firm.plan_checked && Date.now() - new Date(firm.plan_checked) < 3600e3) return firm;
-  try { const p = await call("/api/v1/plan", { tenant: tenantKey(firm.id) }); await save(firm.id, p); return { ...firm, plan: p.plan, plan_expires: p.expires_on, plan_source: p.source, trial_over: p.trial_over }; }
+  try {
+    let p = await call("/api/v1/plan", { tenant: tenantKey(firm.id) });
+    // Firms that existed before subscriptions were switched on have no record yet: give them the normal trial instead of locking them out.
+    if (p.plan === "free" && !p.source && !p.expires_on) {
+      const { rows } = await q("SELECT name FROM firms WHERE id=$1", [firm.id]);
+      p = await call("/api/v1/trial", { tenant: tenantKey(firm.id), tenantName: rows[0]?.name || "Firm " + firm.id });
+    }
+    await save(firm.id, p); return { ...firm, plan: p.plan, plan_expires: p.expires_on, plan_source: p.source, trial_over: p.trial_over }; }
   catch (e) { console.error("[myapps] plan refresh failed", e.message); return firm; }
 }
 function active(firm) {
