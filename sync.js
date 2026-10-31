@@ -76,6 +76,28 @@ function startScheduler() {
   setInterval(tick, 60 * 60e3);
 }
 
+// Case-law watch: once a day per ticked case, look for new Texas opinions on its issues (1 search each).
+async function lawWatch() {
+  const analysis = require("./analysis");
+  const { rows } = await q(`SELECT id, issues, law_checked_at, created_at FROM cases
+    WHERE law_watch AND issues IS NOT NULL AND issues <> '' AND (law_checked_at IS NULL OR law_checked_at < now() - interval '24 hours')
+    ORDER BY law_checked_at NULLS FIRST LIMIT 20`);
+  let n = 0;
+  for (const c of rows) {
+    const since = (c.law_checked_at || new Date(Date.now() - 7 * 864e5)).toISOString();
+    try {
+      const r = await analysis.newSince(c.issues, since);
+      if (r.results.length) {
+        const names = r.results.map(o => `${o.case_name} (${o.court}, ${o.date_filed})`).join("; ");
+        await q("UPDATE cases SET law_alert=$2, law_alert_at=now() WHERE id=$1", [c.id, `${r.results.length} new Texas opinion(s) on your issues: ${names}`]);
+      }
+      await q("UPDATE cases SET law_checked_at=now() WHERE id=$1", [c.id]);
+      n++;
+    } catch (e) { console.error("[lawWatch]", c.id, e.message); if (e.status === 429) break; }
+  }
+  return n;
+}
+
 // Hourly: re-check court dates on watched cases (light), plus any full pull that's over 24h old.
 let hourlyRunning = false;
 async function hourly() {
@@ -89,6 +111,7 @@ async function hourly() {
     for (const r of w.rows) { await runSync(r.id, "hourly", { watchOnly: true }); summary.watch_checks++; }
     const f = await q("SELECT l.id FROM court_logins l JOIN users u ON u.id=l.user_id WHERE u.active AND (l.last_sync IS NULL OR l.last_sync < now() - interval '24 hours') LIMIT 10");
     for (const r of f.rows) { await runSync(r.id, "scheduled"); summary.full_pulls++; }
+    summary.law_checks = await lawWatch();
   } finally { hourlyRunning = false; }
   console.log("[sync] hourly done", JSON.stringify(summary));
   return summary;

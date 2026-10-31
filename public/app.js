@@ -171,6 +171,9 @@ async function casesView() {
     el.querySelector("[data-a=law]").onclick = () => { law.q = (c.case_type || "").replace(/^.*– /, ""); law.results = null; law.open = null; tab = "law"; renderNav(); lawView(true); };
     el.querySelector("[data-a=edit]").onclick = () => { el.innerHTML = caseForm(c); bindCaseForm(el.querySelector("form"), c); };
     el.querySelector("[data-a=watch]").onchange = async e => { try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { watch_dates: e.target.checked } }); c.watch_dates = e.target.checked; toast(e.target.checked ? "Watching court dates" : "Stopped watching"); } catch (err) { fail(err); } };
+    el.querySelector("[data-a=analyze]").onclick = () => analysisView(c);
+    el.querySelector("[data-a=lawwatch]").onchange = async e => { if (e.target.checked && !c.issues) { e.target.checked = false; return toast("Add the case's issues first (Edit → Issues)"); } try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { law_watch: e.target.checked } }); toast(e.target.checked ? "Watching for new case law" : "Stopped"); } catch (err) { fail(err); } };
+    const lack = el.querySelector("[data-a=lawack]"); if (lack) lack.onclick = async () => { await api(`/api/cases/${c.id}/law-ack`, { method: "POST" }); casesView(); };
     const ack = el.querySelector("[data-a=ack]"); if (ack) ack.onclick = async () => { await api(`/api/cases/${c.id}/ack`, { method: "POST" }); casesView(); };
     el.querySelector("[data-a=hist]").onclick = async () => { const out = el.querySelector("[data-a=histOut]"); const ch = (await api(`/api/cases/${c.id}/changes`)).changes;
       out.innerHTML = ch.length ? ch.map(x => `<div class="mute">${new Date(x.at).toLocaleDateString()}: ${esc(x.old_value || "none")} → ${esc(x.new_value)}</div>`).join("") : `<div class="mute">No date changes recorded yet.</div>`; };
@@ -183,11 +186,14 @@ function caseCard(c) {
    <div class="kv"><div><b>Cause #</b>${esc(c.cause_no)}</div><div><b>Type</b>${esc(c.case_type || "—")}</div><div><b>Filed</b>${c.filed_date ? String(c.filed_date).slice(0, 10) : "—"}</div>
    <div><b>Next</b>${esc(c.next_setting || "—")}</div><div><b>Appeals to</b>${esc(META.appeals[c.county] || "—")}</div><div><b>Attorney</b>${esc(c.attorney || "—")}</div></div>
    ${c.date_alert ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4;margin:10px 0 0;padding:10px"><b>⚠ Court date changed</b><div>${esc(c.date_alert)}</div><div class="mute">${c.date_alert_at ? new Date(c.date_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="ack" style="margin-top:6px">Got it</button></div>` : ""}
+   ${c.law_alert ? `<div class="card" style="background:#e8eefc;border-color:#c9d6f5;margin:10px 0 0;padding:10px"><b>📚 New case law</b><div style="font-size:14px">${esc(c.law_alert)}</div><button class="btn sm" data-a="lawack" style="margin-top:6px">Got it</button></div>` : ""}
+   ${c.issues ? `<p class="mute" style="margin:8px 0 0">Issues: ${esc(c.issues)}</p>` : ""}
    ${c.notes ? `<p class="mute" style="margin:8px 0 0">${esc(c.notes)}</p>` : ""}
    ${c.source === "county_sync" ? `<p class="mute" style="margin:6px 0 0">↻ Pulled from county portal${c.last_synced ? " · " + new Date(c.last_synced).toLocaleString() : ""}</p>` : ""}
    ${c.external_url ? `<a class="btn sm ghost" style="margin-top:8px;display:inline-block;text-decoration:none" href="${esc(c.external_url)}" target="_blank" rel="noopener">Open on county portal ↗</a>` : ""}
-   <div class="row" style="margin-top:10px"><button class="btn sm ghost" data-a="edit">Edit</button><button class="btn sm ghost" data-a="track">${c.tracked ? "★ Untrack" : "☆ Track"}</button><button class="btn sm ghost" data-a="law">Research case law</button></div>
+   <div class="row" style="margin-top:10px"><button class="btn sm ghost" data-a="edit">Edit</button><button class="btn sm ghost" data-a="track">${c.tracked ? "★ Untrack" : "☆ Track"}</button><button class="btn sm" data-a="analyze">Analyze case law</button><button class="btn sm ghost" data-a="law">Search case law</button></div>
    <label style="margin-top:10px;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink)"><input type="checkbox" data-a="watch" style="width:auto" ${c.watch_dates ? "checked" : ""}> Watch court dates (alert me when the setting changes)</label>
+   <label style="margin-top:4px;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink)"><input type="checkbox" data-a="lawwatch" style="width:auto" ${c.law_watch ? "checked" : ""}> Watch for new case law on these issues (checked daily)</label>
    <a class="link mute" data-a="hist" style="font-size:13px">Date history</a><div data-a="histOut"></div></div>`;
 }
 function caseForm(c) {
@@ -202,6 +208,7 @@ function caseForm(c) {
    <div><label>Filed</label><input name="filed_date" type="date" value="${c?.filed_date ? String(c.filed_date).slice(0, 10) : ""}"></div>
    <div><label>Status</label><input name="status" value="${v("status")}" placeholder="Discovery"></div>
    <div class="full"><label>Next setting</label><input name="next_setting" value="${v("next_setting")}" placeholder="2026-11-18 – Hearing on MTC"></div>
+   <div class="full"><label>Issues (comma-separated — used for case-law analysis)</label><input name="issues" value="${v("issues")}" placeholder="slip and fall, constructive notice, grocery store"></div>
    <div class="full"><label>Notes</label><input name="notes" value="${v("notes")}"></div>
    ${c ? "" : `<div class="full"><label><input type="checkbox" name="tracked" style="width:auto"> Track this case</label></div>`}
   </div><div class="err"></div><div class="row"><button class="btn">${c ? "Save" : "Add case"}</button>${c ? `<button type="button" class="btn ghost" data-a="cancel">Cancel</button><button type="button" class="btn danger" data-a="del">Delete</button>` : ""}</div></form>`;
@@ -217,6 +224,45 @@ function bindCaseForm(form, c) {
   const cancel = form.querySelector("[data-a=cancel]"); if (cancel) cancel.onclick = casesView;
   const del = form.querySelector("[data-a=del]");
   if (del) del.onclick = async () => { if (del.dataset.sure) { try { await api(`/api/cases/${c.id}`, { method: "DELETE" }); toast("Deleted"); casesView(); } catch (e) { fail(e); } } else { del.dataset.sure = 1; del.textContent = "Tap again to delete"; } };
+}
+
+// ---------------- case analysis (rule-based) ----------------
+async function analysisView(c) {
+  window.scrollTo(0, 0);
+  $("#app").innerHTML = `<button class="btn sm ghost" id="bk">← Back to cases</button>
+   <div class="card" style="margin-top:10px"><h2>Case-law analysis</h2><div class="mute">${esc(c.cause_no)} · ${esc(c.style || "")} · ${esc(c.county)} County</div>
+   <label style="margin-top:10px">Issues (comma-separated)</label><input id="iss" value="${esc(c.issues || "")}" placeholder="slip and fall, constructive notice, grocery store">
+   <div class="row" style="margin-top:10px"><button class="btn" id="run">Run analysis</button>
+   <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink)"><input type="checkbox" id="lw" style="width:auto" ${c.law_watch ? "checked" : ""}> Watch for new case law (daily)</label></div>
+   <p class="mute" style="margin-bottom:0">Takes about a minute. Uses public Texas opinions only — no AI.</p></div><div id="ar"></div>`;
+  $("#bk").onclick = () => casesView();
+  $("#lw").onchange = async e => { if (e.target.checked && !$("#iss").value.trim()) { e.target.checked = false; return toast("Enter issues first"); }
+    try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { law_watch: e.target.checked, issues: $("#iss").value } }); c.law_watch = e.target.checked; c.issues = $("#iss").value; toast(e.target.checked ? "Watching for new case law" : "Stopped"); } catch (err) { fail(err); } };
+  $("#run").onclick = async () => {
+    const btn = $("#run"); btn.disabled = true; btn.textContent = "Analyzing…";
+    $("#ar").innerHTML = `<div class="card mute">Searching Texas opinions and counting outcomes…</div>`;
+    try { const r = await api(`/api/cases/${c.id}/analyze`, { method: "POST", body: { issues: $("#iss").value } }); c.issues = r.issues; renderAnalysis(r.result, r.created_at); }
+    catch (e) { $("#ar").innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
+    btn.disabled = false; btn.textContent = "Run again";
+  };
+  try { const a = (await api(`/api/cases/${c.id}/analysis`)).analysis; if (a) { renderAnalysis(a.result, a.created_at); $("#run").textContent = "Run again"; } } catch (e) {}
+}
+function renderAnalysis(r, at) {
+  const bar = pct => `<div style="background:var(--chip);border-radius:6px;height:8px;margin-top:6px"><div style="width:${pct}%;background:var(--ok);height:8px;border-radius:6px"></div></div>`;
+  const op = o => `<a class="link" data-c="${o.cluster_id}">${esc(o.case_name)}</a> <span class="mute">${esc(o.citation || "")} · ${esc(o.court)} · ${esc(o.date_filed || "")}</span>`;
+  const ranked = r.paths.filter(p => p.enough), thin = r.paths.filter(p => !p.enough);
+  $("#ar").innerHTML = `
+  <div class="card"><div class="mute">Run ${new Date(at).toLocaleString()} · ${r.total_opinions.toLocaleString()} Texas opinions (last 10 yrs) match: ${esc(r.mode)}</div>
+   ${r.trend ? `<p style="margin:8px 0 0"><b>Trend:</b> ${esc(r.trend.path)} — ${r.trend.recentRate ?? "–"}% upheld in the last 3 years (${r.trend.recentN} cases) vs ${r.trend.olderRate ?? "–"}% before (${r.trend.olderN}). <b>${esc(r.trend.direction)}</b>.</p>` : ""}</div>
+  <div class="card"><h3>Ways forward — ranked</h3><p class="mute">How often Texas appeals courts upheld each path in cases on these issues.</p>
+   ${ranked.map((p, i) => `<div style="border-top:1px solid var(--line);padding:10px 0"><div class="row"><span class="tag ${i === 0 ? "g" : "n"}">#${i + 1}</span><b>${esc(p.label)}</b></div>
+     <div style="font-size:14px;margin-top:4px">Upheld <b>${p.rate}%</b> — ${p.upheld} upheld, ${p.reversed} reversed (${p.n} cases)</div>${bar(p.rate)}
+     ${p.examples?.length ? `<div style="margin-top:8px;font-size:14px">${p.examples.map(op).join("<br>")}</div>` : ""}</div>`).join("") || `<p class="mute">Not enough appellate cases on these issues to rank paths. Try broader issues.</p>`}
+   ${thin.length ? `<p class="mute" style="margin-bottom:0">Too few cases to rank: ${thin.map(p => `${esc(p.label)} (${p.n})`).join(", ")}</p>` : ""}</div>
+  <div class="card"><h3>Top authorities</h3><p class="mute">Ranked by court (Texas Supreme Court first), how recent, and how often cited.</p>
+   ${r.authorities.map((o, i) => `<div style="margin:10px 0">${i + 1}. ${op(o)}<div class="mute">${esc(o.binding)} · cited ${o.cite_count}×</div>${o.snippet ? `<div style="font-size:13px">${esc(o.snippet)}…</div>` : ""}</div>`).join("") || `<p class="mute">No opinions found.</p>`}</div>
+  <div class="card mute" style="font-size:13px"><b>How this works:</b> ${esc(r.method)}<br>Search used: <code>${esc(r.query)}</code></div>`;
+  $$("#ar [data-c]").forEach(a => a.onclick = () => { law.open = +a.dataset.c; tab = "law"; renderNav(); opinionView(law.open); window.scrollTo(0, 0); });
 }
 
 // ---------------- case law ----------------

@@ -10,6 +10,7 @@ const path = require("path");
 const QRCode = require("qrcode");
 const { authenticator } = require("otplib");
 const { pool, q, migrate } = require("./db");
+const analysis = require("./analysis");
 const cl = require("./courtlistener");
 const { COUNTIES, APPEALS, CONNECTORS } = require("./counties");
 const sync = require("./sync");
@@ -190,7 +191,7 @@ app.patch("/api/firm/users/:id", requireAuth, requireAdmin, wrap(async (req, res
 
 // ---------- pending cases ----------
 // Rule: attorneys only see/add cases in the counties they practice in — plus cases they explicitly track.
-const CASE_COLS = ["county", "cause_no", "court", "style", "case_type", "filed_date", "status", "next_setting", "notes", "tracked", "watch_dates"];
+const CASE_COLS = ["county", "cause_no", "court", "style", "case_type", "filed_date", "status", "next_setting", "notes", "tracked", "watch_dates", "issues", "law_watch"];
 function cleanCase(b) {
   const o = {};
   for (const k of CASE_COLS) if (b[k] !== undefined) o[k] = typeof b[k] === "string" ? b[k].trim().slice(0, 500) : b[k];
@@ -198,6 +199,8 @@ function cleanCase(b) {
   if (o.filed_date && !/^\d{4}-\d{2}-\d{2}$/.test(o.filed_date)) o.filed_date = null;
   if ("tracked" in o) o.tracked = !!o.tracked;
   if ("watch_dates" in o) o.watch_dates = !!o.watch_dates;
+  if ("law_watch" in o) o.law_watch = !!o.law_watch;
+  if (typeof b.issues === "string") o.issues = b.issues.trim().slice(0, 1000);
   return o;
 }
 app.get("/api/cases", requireAuth, wrap(async (req, res) => {
@@ -206,13 +209,13 @@ app.get("/api/cases", requireAuth, wrap(async (req, res) => {
   let where = "c.firm_id=$1 AND (c.county = ANY($2) OR c.tracked)";
   if (view === "mine") { params.push(req.user.id); where += ` AND c.user_id=$${params.length}`; }
   if (view === "tracked") where += " AND c.tracked";
-  if (view === "alerts") where += " AND c.date_alert IS NOT NULL";
+  if (view === "alerts") where += " AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL)";
   if (view === "watched") where += " AND c.watch_dates";
   if (req.query.attorney) { params.push(+req.query.attorney); where += ` AND c.user_id=$${params.length}`; }
   if (county) { params.push(county); where += ` AND c.county=$${params.length}`; }
   if (type) { params.push(type); where += ` AND c.case_type=$${params.length}`; }
-  const { rows } = await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} ORDER BY (c.date_alert IS NOT NULL) DESC, c.filed_date DESC NULLS LAST, c.id DESC LIMIT 500`, params);
-  const al = await q("SELECT count(*)::int n FROM cases WHERE firm_id=$1 AND (county = ANY($2) OR tracked) AND date_alert IS NOT NULL" + (req.user.role === "paralegal" || req.user.role === "admin" ? "" : " AND user_id=$3"), req.user.role === "paralegal" || req.user.role === "admin" ? [req.user.firm_id, req.user.counties || []] : [req.user.firm_id, req.user.counties || [], req.user.id]);
+  const { rows } = await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} ORDER BY (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL) DESC, c.filed_date DESC NULLS LAST, c.id DESC LIMIT 500`, params);
+  const al = await q("SELECT count(*)::int n FROM cases WHERE firm_id=$1 AND (county = ANY($2) OR tracked) AND (date_alert IS NOT NULL OR law_alert IS NOT NULL)" + (req.user.role === "paralegal" || req.user.role === "admin" ? "" : " AND user_id=$3"), req.user.role === "paralegal" || req.user.role === "admin" ? [req.user.firm_id, req.user.counties || []] : [req.user.firm_id, req.user.counties || [], req.user.id]);
   res.json({ cases: rows, alerts: al.rows[0].n });
 }));
 app.post("/api/cases", requireAuth, wrap(async (req, res) => {
@@ -240,6 +243,27 @@ app.post("/api/cases/:id/ack", requireAuth, wrap(async (req, res) => {
   await q("UPDATE cases SET date_alert=NULL WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]);
   await audit(req, "date_change_ack", { id: +req.params.id });
   res.json({ ok: true });
+}));
+// Case-law analysis (rule-based, no AI)
+app.post("/api/cases/:id/analyze", requireAuth, rateLimit({ windowMs: 60e3, max: 3, message: { error: "One analysis at a time — try again in a minute." } }), wrap(async (req, res) => {
+  const { rows } = await q("SELECT * FROM cases WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]);
+  const c = rows[0]; if (!c) return res.status(404).json({ error: "Not found" });
+  const issues = typeof req.body?.issues === "string" ? req.body.issues.trim().slice(0, 1000) : c.issues;
+  if (issues !== c.issues) await q("UPDATE cases SET issues=$2 WHERE id=$1", [c.id, issues]);
+  let result;
+  try { result = await analysis.analyze({ issues, county: c.county, appeals: APPEALS[c.county] }); }
+  catch (e) { return res.status(e.status || 502).json({ error: e.message }); }
+  const ins = await q("INSERT INTO analyses(case_id,user_id,issues,result) VALUES($1,$2,$3,$4) RETURNING id, created_at", [c.id, req.user.id, issues, result]);
+  await q("UPDATE cases SET law_checked_at=now() WHERE id=$1", [c.id]);
+  await audit(req, "case_analyzed", { case_id: c.id });
+  res.json({ id: ins.rows[0].id, created_at: ins.rows[0].created_at, issues, result });
+}));
+app.get("/api/cases/:id/analysis", requireAuth, wrap(async (req, res) => {
+  const { rows } = await q("SELECT a.id, a.issues, a.result, a.created_at FROM analyses a JOIN cases c ON c.id=a.case_id WHERE a.case_id=$1 AND c.firm_id=$2 ORDER BY a.created_at DESC LIMIT 1", [+req.params.id, req.user.firm_id]);
+  res.json({ analysis: rows[0] || null });
+}));
+app.post("/api/cases/:id/law-ack", requireAuth, wrap(async (req, res) => {
+  await q("UPDATE cases SET law_alert=NULL WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true });
 }));
 app.get("/api/cases/:id/changes", requireAuth, wrap(async (req, res) => {
   const { rows } = await q("SELECT ch.* FROM case_changes ch JOIN cases c ON c.id=ch.case_id WHERE ch.case_id=$1 AND c.firm_id=$2 ORDER BY ch.at DESC LIMIT 50", [+req.params.id, req.user.firm_id]);
