@@ -588,5 +588,5 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-migrate().then(() => app.listen(PORT, () => { console.log("TX Case Desk on :" + PORT); sync.startScheduler();
+migrate().then(() => app.listen(PORT, () => { console.log("TX Case Desk on :" + PORT); console.log(`Outlook connect: ${mail.configured().microsoft ? "ON" : "OFF"} (MS_CLIENT_ID ${process.env.MS_CLIENT_ID ? "set" : "missing"}, MS_CLIENT_SECRET ${process.env.MS_CLIENT_SECRET ? "set" : "missing"})`); sync.startScheduler();
   if (process.env.NODE_ENV === "production") setTimeout(() => sync.MODULES.odyssey.probe(CONNECTORS.Hidalgo.url).catch(() => {}), 5000); })).catch(e => { console.error("DB migrate failed", e); process.exit(1); });
