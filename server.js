@@ -392,6 +392,11 @@ app.get("/api/email-alerts", requireAuth, wrap(async (req, res) => {
   res.json({ address: inbound.addressFor(token), configured: !!inbound.addressFor(token), confirm: confirm ? { code: confirm.confirm_code, at: confirm.received_at } : null,
     emails: rows.filter(r => r.kind !== "forward_confirm").map(r => ({ ...r, unmatched: (r.causes || []).filter(c => !known.includes(c)) })) });
 }));
+app.get("/api/email-alerts/:id", requireAuth, wrap(async (req, res) => {
+  const { rows } = await q("SELECT id, from_addr, subject, body, received_at FROM inbound_emails WHERE id=$1 AND user_id=$2", [+req.params.id, req.user.id]);
+  if (!rows[0]) return res.status(404).json({ error: "Not found" });
+  res.json({ email: rows[0] });
+}));
 app.post("/api/cases/:id/filing-ack", requireAuth, wrap(async (req, res) => {
   await q("UPDATE cases SET filing_alert=NULL WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true });
 }));

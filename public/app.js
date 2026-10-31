@@ -102,7 +102,8 @@ async function courtView() {
      <li>Tip: forward one existing re:SearchTX email by hand to test it — it should show below within a minute.</li></ol></details>
    <h3 style="margin-top:12px">Recent alerts</h3>
    ${ea.emails.length ? ea.emails.map(m => `<div style="border-top:1px solid var(--line);padding:8px 0"><b>${esc(m.subject || "(no subject)")}</b><div class="mute">${new Date(m.received_at).toLocaleString()} · ${esc(m.from_addr)}</div>
-     <div class="mute">${(m.matched_case_ids || []).length} matched case(s)${m.unmatched.length ? ` · not in your list yet: ${m.unmatched.map(esc).join(", ")}` : ""}</div></div>`).join("") : `<p class="mute">No alert emails received yet.</p>`}`}</div>
+     <div class="mute">${(m.matched_case_ids || []).length} matched case(s)${m.unmatched.length ? ` · not in your list yet: ${m.unmatched.map(esc).join(", ")}` : ""}</div>
+     <button class="btn sm ghost" data-view="${m.id}" style="margin-top:6px">View email</button><div data-body="${m.id}"></div></div>`).join("") : `<p class="mute">No alert emails received yet.</p>`}`}</div>
    ${d.available.length ? "" : `<div class="card mute">None of your counties has an automatic feed yet. Live now: ${esc(Object.entries(META.connectors).filter(([, v]) => v.status !== "blocked").map(([k]) => k).join(", ") || "none")}. Add one under My Counties.</div>`}
    ${d.available.map(c => { const l = byCounty[c.county];
      const st = !l ? "" : l.status === "ok" ? `<span class="tag g">Synced</span>` : l.status === "error" ? `<span class="tag r">Error</span>` : `<span class="tag y">${l.status === "syncing" ? "Pulling cases…" : "Starting…"}</span>`;
@@ -128,6 +129,13 @@ async function courtView() {
     const ed = card.querySelector("[data-a=edit]"); if (ed) ed.onclick = () => { form.hidden = false; };
     const del = card.querySelector("[data-a=del]");
     del.onclick = async () => { if (!del.dataset.sure) { del.dataset.sure = 1; del.textContent = "Tap again to remove"; return; } await api(`/api/court-logins/${l.id}`, { method: "DELETE" }); courtView(); };
+  });
+  const linkify = t => esc(t).replace(/(https?:\/\/[^\s<]+)/g, u => `<a class="link" href="${u}" target="_blank" rel="noopener">${u.length > 70 ? u.slice(0, 70) + "…" : u}</a>`);
+  $$("[data-view]").forEach(b => b.onclick = async () => {
+    const box = $(`[data-body="${b.dataset.view}"]`);
+    if (box.innerHTML) { box.innerHTML = ""; b.textContent = "View email"; return; }
+    try { const m = (await api(`/api/email-alerts/${b.dataset.view}`)).email;
+      box.innerHTML = `<div class="optext" style="font-family:inherit;font-size:14px;margin-top:8px;max-height:50vh">${linkify(m.body || "(empty)")}</div>`; b.textContent = "Hide email"; } catch (e) { fail(e); }
   });
   const cpa = $("#cpAddr"); if (cpa) cpa.onclick = async () => { try { await navigator.clipboard.writeText(ea.address); toast("Address copied"); } catch (e) { toast(ea.address); } };
   const insp = $("#insp");

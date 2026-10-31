@@ -45,7 +45,10 @@ async function handle(msg) {
   if (!u) return { ignored: "unknown tag" };
   const from = msg.FromFull?.Email || msg.From || "";
   const subject = String(msg.Subject || "").slice(0, 300);
-  const body = (msg.TextBody && msg.TextBody.trim() ? msg.TextBody : strip(msg.HtmlBody)).slice(0, 50000);
+  let body = (msg.TextBody && msg.TextBody.trim() ? msg.TextBody : strip(msg.HtmlBody)).slice(0, 50000);
+  // keep real link targets (activation / verify links often live only in the HTML)
+  const hrefs = [...new Set([...String(msg.HtmlBody || "").matchAll(/href=["']([^"']+)["']/gi)].map(m => m[1].replace(/&amp;/g, "&")).filter(u => /^https?:\/\//i.test(u)))].slice(0, 30);
+  if (hrefs.length) body += "\n\nLinks in this email:\n" + hrefs.join("\n");
   let kind = "other", confirm = null;
   if (/forwarding-noreply@google\.com/i.test(from) || /forwarding confirmation/i.test(subject)) {
     kind = "forward_confirm";
