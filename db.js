@@ -164,6 +164,22 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   created_at TIMESTAMPTZ DEFAULT now(),
   UNIQUE (user_id, provider)
 );
+-- firm-wide email connection (Microsoft 365 admin consent / Google Workspace domain-wide delegation)
+CREATE TABLE IF NOT EXISTS firm_mail (
+  firm_id INT PRIMARY KEY REFERENCES firms(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,          -- microsoft | google
+  tenant TEXT,                     -- Microsoft tenant id
+  domain TEXT NOT NULL,            -- e.g. garzalaw.com
+  status TEXT DEFAULT 'ok',
+  last_sync TIMESTAMPTZ,
+  last_error TEXT,
+  stats JSONB,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS mail_cursor (
+  user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  last_seen TIMESTAMPTZ
+);
 -- Texas case law loaded from CourtListener bulk files (one row per opinion; a cluster = one decision)
 CREATE TABLE IF NOT EXISTS tx_opinions (
   opinion_id BIGINT PRIMARY KEY,

@@ -133,7 +133,8 @@ async function emailView(id) {
 let courtPoll;
 async function courtView() {
   clearTimeout(courtPoll);
-  let d, ea, mb; try { [d, ea, mb] = await Promise.all([api("/api/court-logins"), api("/api/email-alerts"), api("/api/mail")]); } catch (e) { return fail(e); }
+  let d, ea, mb, det; try { [d, ea, mb, det] = await Promise.all([api("/api/court-logins"), api("/api/email-alerts"), api("/api/mail"), api("/api/mail/detect")]); } catch (e) { return fail(e); }
+  const order = det.provider === "google" ? ["google", "microsoft"] : ["microsoft", "google"];
   const byCounty = Object.fromEntries(d.logins.map(l => [l.county, l]));
   const ago = t => t ? new Date(t).toLocaleString() : "never";
   $("#app").innerHTML = `<div class="card"><h2>Court logins</h2>
@@ -141,7 +142,9 @@ async function courtView() {
    ${d.bar_ok ? "" : `<p class="err">Your account needs an 8-digit bar # before cases can be pulled.</p>`}</div>
    <div class="card"><h2>📬 Connect your email</h2>
    <p style="margin-top:0">You already get court emails — eFileTexas service notices, clerk notices, hearing settings. Connect your email once and TX Case Desk reads <b>only those court emails</b>, adds new cases, and updates your existing ones automatically.</p>
-   ${["microsoft", "google"].map(p => { const m = mb.mailboxes.find(x => x.provider === p);
+   ${det.domain ? `<p class="mute" style="margin:0 0 6px">Your email <b>${esc(det.domain)}</b> is hosted by <b>${esc(det.host || "unknown")}</b>.${det.provider ? " Use the button below." : " Connect isn't available for that host yet — use the forwarding option further down, or ask us to add it."}</p>` : ""}
+   ${order.map((p, i) => { const m = mb.mailboxes.find(x => x.provider === p);
+     if (!m && det.provider && p !== det.provider) return i === 1 ? `<p class="mute" style="font-size:13px;margin:4px 0">Use a different email? <a class="link" href="/api/mail/connect/${p}">Connect ${p === "microsoft" ? "Outlook" : "Gmail"} instead</a>${mb.configured[p] ? "" : " (coming soon)"}</p>` : "";
      if (m) return `<div style="border-top:1px solid var(--line);padding:10px 0"><div class="row"><b>${esc(mb.names[p])}</b>
        <span class="tag ${m.status === "ok" ? "g" : m.status === "syncing" ? "y" : "r"}">${m.status === "ok" ? "Connected" : m.status === "syncing" ? "Checking…" : m.status === "reconnect" ? "Reconnect needed" : "Error"}</span></div>
        <div class="mute">${esc(m.email || "")}${m.last_sync ? " · last checked " + new Date(m.last_sync).toLocaleString() : ""}${m.stats ? ` · ${m.stats.added} new court emails, ${m.stats.created} cases added` : ""}</div>
@@ -452,7 +455,23 @@ function countiesView() {
 async function firmView() {
   $("#app").innerHTML = `<div class="card mute">Loading…</div>`;
   let us; try { us = (await api("/api/firm/users")).users; } catch (e) { return fail(e); }
-  $("#app").innerHTML = `<div class="card"><h2>${esc(me.firm_name)} – seats</h2>${us.map(u => `<div style="border-top:1px solid var(--line);padding:10px 0" data-u="${u.id}">
+  let fm = null; try { fm = await api("/api/firm/mail"); } catch (e) {}
+  const fmCard = !fm ? "" : `<div class="card"><h2>📬 Firm email — connect everyone at once</h2>
+   ${fm.firm ? `<div class="row"><span class="tag ${fm.firm.status === "ok" ? "g" : "r"}">${fm.firm.status === "ok" ? "Connected" : fm.firm.status === "reconnect" ? "Approve again" : "Error"}</span><b>${esc(fm.firm.provider === "microsoft" ? "Microsoft 365" : "Google Workspace")}</b> · @${esc(fm.firm.domain)}</div>
+     <div class="mute" style="margin-top:4px">${fm.firm.last_sync ? "Last checked " + new Date(fm.firm.last_sync).toLocaleString() : "First check running…"}${fm.firm.stats ? ` · ${fm.firm.stats.people} attorneys · ${fm.firm.stats.added} new court emails · ${fm.firm.stats.created} cases added` : ""}</div>
+     ${fm.firm.last_error ? `<p class="err">${esc(fm.firm.last_error)}</p>` : ""}
+     <p class="mute">Covers every TX Case Desk user with an @${esc(fm.firm.domain)} email (${fm.covered.length}): ${fm.covered.map(u => esc(u.name)).join(", ") || "none yet"}. They don't need to do anything.</p>
+     <div class="row"><button class="btn sm" id="fmSync">Check now</button><button class="btn sm danger" id="fmDel">Disconnect firm</button></div>`
+   : fm.detect.personal || !fm.detect.domain ? `<p class="mute">Firm-wide connect needs a firm email domain. Your login email is a personal address — attorneys can still connect their own email under Court Updates.</p>`
+   : fm.detect.provider === "microsoft" ? `<p>Your firm's email (@${esc(fm.detect.domain)}) is on <b>Microsoft 365</b>. Your Microsoft 365 admin approves TX Case Desk once, and every attorney here with an @${esc(fm.detect.domain)} email is covered automatically — read-only, court emails only.</p>
+       ${fm.configured.microsoft ? `<a class="btn" href="/api/firm/mail/microsoft" style="display:block;text-align:center;text-decoration:none;padding:14px">Approve for the whole firm (Microsoft 365 admin)</a>
+       <p class="mute" style="font-size:13px">Must be done by a Microsoft 365 Global Admin (or Privileged Role Admin). Not your admin? Send them this page's link after they sign in to TX Case Desk as a firm admin.</p>` : `<button class="btn ghost" disabled style="width:100%;padding:14px">Approve for the whole firm — coming soon</button>`}`
+   : fm.detect.provider === "google" ? `<p>Your firm's email (@${esc(fm.detect.domain)}) is on <b>Google Workspace</b>. Your Workspace admin authorizes TX Case Desk once in the Google Admin console:</p>
+       ${fm.google_sa_client_id ? `<ol style="padding-left:18px;font-size:14px"><li>Open <a class="link" href="https://admin.google.com/ac/owl/domainwidedelegation" target="_blank" rel="noopener">Google Admin → Security → API controls → Domain-wide delegation</a> → <b>Add new</b>.</li>
+       <li>Client ID:<div class="secret">${esc(fm.google_sa_client_id)}</div></li><li>OAuth scope:<div class="secret">https://www.googleapis.com/auth/gmail.readonly</div></li><li>Tap <b>Authorize</b>, then come back and tap the button below.</li></ol>
+       <button class="btn" id="fmG" style="width:100%;padding:14px">I've authorized it — turn on for the whole firm</button><div class="err" id="fmGerr"></div>` : `<button class="btn ghost" disabled style="width:100%;padding:14px">Google Workspace firm connect — coming soon</button>`}`
+   : `<p class="mute">Your firm's email (@${esc(fm.detect.domain)}) is hosted by ${esc(fm.detect.host)}. Firm-wide connect works with Microsoft 365 and Google Workspace. Attorneys can use the forwarding option under Court Updates.</p>`}</div>`;
+  $("#app").innerHTML = fmCard + `<div class="card"><h2>${esc(me.firm_name)} – seats</h2>${us.map(u => `<div style="border-top:1px solid var(--line);padding:10px 0" data-u="${u.id}">
     <b>${esc(u.name)}</b> <span class="tag ${u.active ? "g" : "r"}">${u.active ? u.role : "disabled"}</span> ${u.totp_enabled ? "" : `<span class="tag y">2FA not set</span>`}
     <div class="mute">${esc(u.email)}${u.bar_number ? " · Bar #" + esc(u.bar_number) : ""}</div><div class="mute">Counties: ${esc((u.counties || []).join(", ") || "none")} · Last login: ${u.last_login ? new Date(u.last_login).toLocaleString() : "never"}</div>
     ${u.id !== me.id ? `<div class="row" style="margin-top:6px"><button class="btn sm ghost" data-a="reset">Reset password & 2FA</button><button class="btn sm ${u.active ? "danger" : "ghost"}" data-a="toggle">${u.active ? "Disable" : "Enable"}</button></div>` : ""}</div>`).join("")}</div>
@@ -460,6 +479,9 @@ async function firmView() {
    <div><label>Bar # (attorneys)</label><input name="bar" inputmode="numeric"></div><div><label>Role</label><select name="role"><option value="attorney">Attorney</option><option value="paralegal">Paralegal</option><option value="admin">Firm admin</option></select></div></div>
    <div class="err" id="aerr"></div><button class="btn">Add seat</button></form><div id="temp"></div></div>`;
   const showTemp = (who, pw) => $("#temp").innerHTML = `<div class="card" style="background:#fff4d6;margin-top:10px"><b>Temporary password for ${esc(who)}:</b><div class="secret" style="margin-top:6px">${esc(pw)}</div><p class="mute">Shown once. Give it to them privately — they'll set their own password and 2FA at first sign-in.</p></div>`;
+  if ($("#fmSync")) $("#fmSync").onclick = async () => { await api("/api/firm/mail/sync", { method: "POST" }); toast("Checking firm email…"); setTimeout(firmView, 2000); };
+  if ($("#fmDel")) $("#fmDel").onclick = async () => { const b = $("#fmDel"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to disconnect"; return; } await api("/api/firm/mail", { method: "DELETE" }); firmView(); };
+  if ($("#fmG")) $("#fmG").onclick = async () => { try { await api("/api/firm/mail/google", { method: "POST" }); toast("Firm email connected"); firmView(); } catch (e) { $("#fmGerr").textContent = e.message; } };
   $("#af").onsubmit = async e => { e.preventDefault(); const b = Object.fromEntries(new FormData(e.target)); try { const r = await api("/api/firm/users", { method: "POST", body: b }); await firmView(); showTemp(b.email, r.temp_password); } catch (err) { $("#aerr").textContent = err.message; } };
   $$("[data-u]").forEach(row => {
     const u = us.find(x => x.id === +row.dataset.u);
@@ -481,7 +503,7 @@ function accountView() {
 (async () => {
   try { META = await api("/api/meta"); } catch (e) { $("#app").innerHTML = `<div class="card err">Can't reach server.</div>`; return; }
   const qs = new URLSearchParams(location.search);
-  if (qs.get("connected") || qs.get("mailerror")) { tab = "court"; history.replaceState(null, "", "/"); setTimeout(() => toast(qs.get("connected") ? `Email connected: ${qs.get("connected")} — checking court emails now` : qs.get("mailerror")), 600); }
+  if (qs.get("connected") || qs.get("mailerror")) { tab = /firm/.test(qs.get("connected") || "") ? "firm" : "court"; history.replaceState(null, "", "/"); setTimeout(() => toast(qs.get("connected") ? `Email connected: ${qs.get("connected")} — checking court emails now` : qs.get("mailerror")), 600); }
   try { me = (await api("/api/me")).user; start(); }
   catch (e) { e.code === "CHANGE_PW" ? (me = { must_change_pw: true }, changePwView(true)) : authView(); }
 })();

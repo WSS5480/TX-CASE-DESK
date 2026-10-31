@@ -384,6 +384,32 @@ app.get("/api/mail", requireAuth, wrap(async (req, res) => {
   for (const r of rows) if (mail.running.has(r.id)) r.status = "syncing";
   res.json({ configured: mail.configured(), names: Object.fromEntries(Object.entries(mail.PROVIDERS).map(([k, v]) => [k, v.name])), mailboxes: rows });
 }));
+app.get("/api/mail/detect", requireAuth, wrap(async (req, res) => res.json(await mail.detect(req.user.email))));
+// Firm-wide (admin): status + start
+app.get("/api/firm/mail", requireAuth, requireAdmin, wrap(async (req, res) => {
+  const f = (await q("SELECT provider, domain, status, last_sync, last_error, stats FROM firm_mail WHERE firm_id=$1", [req.user.firm_id])).rows[0] || null;
+  const det = await mail.detect(req.user.email);
+  const covered = f ? (await q("SELECT name, email FROM users WHERE firm_id=$1 AND active AND lower(split_part(email,'@',2))=lower($2) ORDER BY name", [req.user.firm_id, f.domain])).rows : [];
+  res.json({ firm: f, detect: det, covered, configured: mail.configured(), google_sa_client_id: mail.GSA().clientId || null });
+}));
+app.get("/api/firm/mail/microsoft", requireAuth, requireAdmin, wrap(async (req, res) => {
+  const det = await mail.detect(req.user.email);
+  if (!mail.configured().microsoft) return res.redirect("/?mailerror=" + encodeURIComponent("Microsoft connection isn't switched on yet."));
+  if (det.personal) return res.redirect("/?mailerror=" + encodeURIComponent("Firm-wide connect needs a firm email domain (not a personal Outlook/Gmail address)."));
+  res.redirect(mail.adminConsentUrl(req.user.firm_id, det.domain));
+}));
+app.get("/api/mail/admin-callback/microsoft", async (req, res) => {
+  try { await mail.finishAdminConsent(req.query); res.redirect("/?connected=" + encodeURIComponent("whole firm (Microsoft 365)")); }
+  catch (e) { console.error("[mail] admin consent failed", e.message); res.redirect("/?mailerror=" + encodeURIComponent(e.message.slice(0, 200))); }
+});
+app.post("/api/firm/mail/google", requireAuth, requireAdmin, wrap(async (req, res) => {
+  const det = await mail.detect(req.user.email);
+  if (det.personal || !det.domain) return res.status(400).json({ error: "Firm-wide connect needs a firm email domain." });
+  try { await mail.connectGoogleFirm(req.user.firm_id, det.domain, req.user.email); await audit(req, "firm_mail_google"); res.json({ ok: true }); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+}));
+app.post("/api/firm/mail/sync", requireAuth, requireAdmin, wrap(async (req, res) => { mail.syncFirm(req.user.firm_id).catch(() => {}); res.json({ started: true }); }));
+app.delete("/api/firm/mail", requireAuth, requireAdmin, wrap(async (req, res) => { await q("DELETE FROM firm_mail WHERE firm_id=$1", [req.user.firm_id]); await audit(req, "firm_mail_disconnected"); res.json({ ok: true }); }));
 app.get("/api/mail/connect/:provider", requireAuth, (req, res) => {
   const p = req.params.provider;
   if (!mail.PROVIDERS[p] || !mail.configured()[p]) return res.redirect("/?mailerror=" + encodeURIComponent("That email provider isn't switched on yet."));
