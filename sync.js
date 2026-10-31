@@ -15,6 +15,7 @@ async function runSync(loginId, why = "manual", { watchOnly = false } = {}) {
     if (!l || !l.active) return { skipped: "no login" };
     const conn = CONNECTORS[l.county];
     if (!conn) throw new Error(`No connector for ${l.county} yet.`);
+    if (conn.status === "blocked") throw new Error(conn.note || `${l.county} portal is blocking automatic pulls.`);
     if (!(l.counties || []).includes(l.county)) throw new Error(`${l.county} isn't in this attorney's counties.`);
     if (!/^\d{8}$/.test(l.bar_number || "")) throw new Error("Attorney needs an 8-digit bar # on their account.");
     await q("UPDATE court_logins SET status='syncing' WHERE id=$1", [loginId]);
