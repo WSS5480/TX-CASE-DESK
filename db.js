@@ -84,6 +84,21 @@ CREATE TABLE IF NOT EXISTS audit_log (
   ip TEXT,
   at TIMESTAMPTZ DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS court_logins (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  county TEXT NOT NULL,
+  username TEXT,
+  enc_password TEXT,
+  status TEXT DEFAULT 'new',
+  last_sync TIMESTAMPTZ,
+  last_result JSONB,
+  last_error TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE (user_id, county)
+);
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS external_url TEXT;
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS last_synced TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS cases_firm_county ON cases(firm_id, county);
 CREATE INDEX IF NOT EXISTS audit_firm ON audit_log(firm_id, at DESC);
 `;

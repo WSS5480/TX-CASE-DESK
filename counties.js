@@ -9,8 +9,9 @@ const APPEALS = {
 };
 
 // Where each county's pending-case feed comes from. Connectors get added as they're built and tested.
+// type: which connector module runs it. login: "optional" = public portal (bar # search works without a login).
 const CONNECTORS = {
-  Hidalgo: { name: "Hidalgo County public portal (pa.co.hidalgo.tx.us)", status: "planned" }
+  Hidalgo: { name: "Hidalgo County Odyssey portal", url: process.env.HIDALGO_PORTAL_URL || "https://pa.co.hidalgo.tx.us/", type: "odyssey", login: "optional", status: "beta" }
 };
 
 module.exports = { COUNTIES, APPEALS, CONNECTORS };

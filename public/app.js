@@ -69,14 +69,56 @@ function start() {
   renderNav(); show();
 }
 function renderNav() {
-  const tabs = [["cases", "Pending Cases"], ["law", "Case Law"], ["saved", "Saved"], ["counties", "My Counties"]];
+  const tabs = [["cases", "Pending Cases"], ["law", "Case Law"], ["saved", "Saved"], ["counties", "My Counties"], ["court", "Court Logins"]];
   if (me.role === "admin") tabs.push(["firm", "Firm Seats"]);
   tabs.push(["account", "Account"]);
   const n = $("#nav"); n.hidden = false;
   n.innerHTML = tabs.map(([k, v]) => `<button data-t="${k}" class="${tab === k ? "on" : ""}">${v}</button>`).join("");
   n.querySelectorAll("button").forEach(b => b.onclick = () => { tab = b.dataset.t; renderNav(); show(); });
 }
-function show() { ({ cases: casesView, law: lawView, saved: savedView, counties: countiesView, firm: firmView, account: accountView })[tab](); window.scrollTo(0, 0); }
+function show() { clearTimeout(courtPoll); ({ cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab](); window.scrollTo(0, 0); }
+
+// ---------------- court logins / county sync ----------------
+let courtPoll;
+async function courtView() {
+  clearTimeout(courtPoll);
+  let d; try { d = await api("/api/court-logins"); } catch (e) { return fail(e); }
+  const byCounty = Object.fromEntries(d.logins.map(l => [l.county, l]));
+  const ago = t => t ? new Date(t).toLocaleString() : "never";
+  $("#app").innerHTML = `<div class="card"><h2>Court logins</h2>
+   <p class="mute">Your cases are pulled from each county portal under <b>your</b> login and <b>your</b> bar # (${esc(me.bar_number || "not set")}) — only for counties you picked. Pulls run when you sign in, nightly, and when you tap Sync now. Passwords are encrypted and never shown again.</p>
+   ${d.bar_ok ? "" : `<p class="err">Your account needs an 8-digit bar # before cases can be pulled.</p>`}</div>
+   ${d.available.length ? "" : `<div class="card mute">None of your counties has an automatic feed yet. Live now: ${esc(Object.keys(META.connectors).join(", "))}. Add one under My Counties.</div>`}
+   ${d.available.map(c => { const l = byCounty[c.county];
+     const st = !l ? "" : l.status === "ok" ? `<span class="tag g">Synced</span>` : l.status === "error" ? `<span class="tag r">Error</span>` : `<span class="tag y">${l.status === "syncing" ? "Pulling cases…" : "Starting…"}</span>`;
+     return `<div class="card" data-county="${esc(c.county)}"><div class="row"><h3 style="margin:0">${esc(c.county)} County</h3>${st}<span class="tag n">${esc(c.status)}</span></div>
+     <div class="mute">${esc(c.name)} · <a class="link" href="${esc(c.url)}" target="_blank" rel="noopener">open portal</a></div>
+     ${l ? `<div class="kv"><div><b>Portal login</b>${esc(l.username || "Public search (no login)")}</div><div><b>Last pull</b>${ago(l.last_sync)}</div>
+       ${l.last_result ? `<div><b>Found</b>${l.last_result.found} cases</div><div><b>New / updated</b>${l.last_result.added} / ${l.last_result.updated}</div>` : ""}</div>
+       ${l.last_error ? `<p class="err">${esc(l.last_error)}</p>` : ""}
+       ${l.last_result?.notes?.length ? `<details style="margin-top:6px"><summary class="mute">Details</summary><div class="mute">${l.last_result.notes.map(esc).join("<br>")}</div></details>` : ""}
+       <div class="row" style="margin-top:10px"><button class="btn sm" data-a="sync" ${l.status === "syncing" ? "disabled" : ""}>Sync now</button><button class="btn sm ghost" data-a="edit">Change login</button><button class="btn sm danger" data-a="del">Remove</button></div>` : ""}
+     <form ${l ? "hidden" : ""} style="margin-top:10px"><div class="grid">
+       <div><label>Portal username ${c.login === "optional" ? "(optional)" : ""}</label><input name="username" autocomplete="off" value="${esc(l?.username || "")}"></div>
+       <div><label>Portal password ${c.login === "optional" ? "(optional)" : ""}</label><input name="password" type="password" autocomplete="new-password"></div></div>
+       ${c.login === "optional" ? `<p class="mute">This portal is public — leave blank to pull by your bar # only. Add your portal login to also see cases only registered users can view.</p>` : ""}
+       <div class="err"></div><button class="btn">${l ? "Save & pull" : "Connect & pull my cases"}</button></form></div>`; }).join("")}
+   ${me.role === "admin" && d.available.length ? `<div class="card"><h3>Admin: portal check</h3><p class="mute">Reads the county portal's public pages and shows its layout (for troubleshooting).</p><button class="btn sm ghost" id="insp">Check ${esc(d.available[0].county)} portal</button><pre id="inspOut" class="optext" hidden></pre></div>` : ""}`;
+  $$("[data-county]").forEach(card => {
+    const county = card.dataset.county, l = byCounty[county], form = card.querySelector("form");
+    form.onsubmit = async e => { e.preventDefault(); const b = Object.fromEntries(new FormData(form)); b.county = county;
+      try { await api("/api/court-logins", { method: "POST", body: b }); toast("Connected — pulling your cases"); courtView(); } catch (err) { form.querySelector(".err").textContent = err.message; } };
+    if (!l) return;
+    card.querySelector("[data-a=sync]").onclick = async () => { try { await api(`/api/court-logins/${l.id}/sync`, { method: "POST" }); toast("Pulling cases…"); setTimeout(courtView, 800); } catch (e) { fail(e); } };
+    card.querySelector("[data-a=edit]").onclick = () => { form.hidden = false; };
+    const del = card.querySelector("[data-a=del]");
+    del.onclick = async () => { if (!del.dataset.sure) { del.dataset.sure = 1; del.textContent = "Tap again to remove"; return; } await api(`/api/court-logins/${l.id}`, { method: "DELETE" }); courtView(); };
+  });
+  const insp = $("#insp");
+  if (insp) insp.onclick = async () => { insp.disabled = true; insp.textContent = "Checking…"; const out = $("#inspOut"); out.hidden = false;
+    try { out.textContent = JSON.stringify(await api(`/api/admin/inspect/${encodeURIComponent(d.available[0].county)}`), null, 2); } catch (e) { out.textContent = e.message; } insp.disabled = false; insp.textContent = "Check again"; };
+  if (d.logins.some(l => l.status === "syncing" || l.status === "new")) courtPoll = setTimeout(() => { if (tab === "court") courtView(); }, 4000);
+}
 function fail(err) {
   if (err.status === 401) { me = null; return authView("login", "Session ended — sign in again."); }
   if (err.code === "CHANGE_PW") return changePwView(true);
@@ -93,7 +135,7 @@ async function casesView() {
   app.innerHTML = `
   ${!me.counties.length ? `<div class="card"><b>Pick your counties first.</b> <span class="mute">You only see and add cases in counties you practice in.</span></div>` : ""}
   <div class="card"><div class="mute">Your counties</div><div style="font-weight:600">${esc(me.counties.join(", ") || "None selected")}</div>
-   <div class="mute" style="margin-top:4px">Automatic county feeds: coming online county by county. Until then add cases below or import a CSV from your case system.</div></div>
+   <div class="mute" style="margin-top:4px">Auto-pull: connect under <a class="link" id="goCourt">Court Logins</a> (live: ${esc(Object.keys(META.connectors).join(", "))}). Other counties: add cases below or import a CSV.</div></div>
   <div class="card"><div class="grid">
    <div><label>Show</label><select id="v"><option value="mine">My cases</option><option value="firm">Whole firm (my counties)</option><option value="tracked">Tracked cases</option></select></div>
    <div><label>County</label><select id="cf"><option value="">All my counties</option>${me.counties.map(c => `<option>${esc(c)}</option>`).join("")}</select></div>
@@ -104,6 +146,7 @@ async function casesView() {
    <div class="err" id="csvErr"></div><button class="btn" id="imp">Import</button></details>
   <div class="mute" style="margin:0 4px 8px">${cs.length} case${cs.length === 1 ? "" : "s"}</div>
   ${cs.map(caseCard).join("") || `<div class="card mute">No cases here yet.</div>`}`;
+  $("#goCourt").onclick = () => { tab = "court"; renderNav(); show(); };
   $("#v").value = caseF.view; $("#cf").value = caseF.county; $("#tf").value = caseF.type;
   $("#v").onchange = e => { caseF.view = e.target.value; casesView(); };
   $("#cf").onchange = e => { caseF.county = e.target.value; casesView(); };
@@ -128,6 +171,7 @@ function caseCard(c) {
    <div class="kv"><div><b>Cause #</b>${esc(c.cause_no)}</div><div><b>Type</b>${esc(c.case_type || "—")}</div><div><b>Filed</b>${c.filed_date ? String(c.filed_date).slice(0, 10) : "—"}</div>
    <div><b>Next</b>${esc(c.next_setting || "—")}</div><div><b>Appeals to</b>${esc(META.appeals[c.county] || "—")}</div><div><b>Attorney</b>${esc(c.attorney || "—")}</div></div>
    ${c.notes ? `<p class="mute" style="margin:8px 0 0">${esc(c.notes)}</p>` : ""}
+   ${c.source === "county_sync" ? `<p class="mute" style="margin:6px 0 0">↻ Pulled from county portal${c.last_synced ? " · " + new Date(c.last_synced).toLocaleString() : ""}</p>` : ""}
    <div class="row" style="margin-top:10px"><button class="btn sm ghost" data-a="edit">Edit</button><button class="btn sm ghost" data-a="track">${c.tracked ? "★ Untrack" : "☆ Track"}</button><button class="btn sm ghost" data-a="law">Research case law</button></div></div>`;
 }
 function caseForm(c) {

@@ -12,6 +12,8 @@ const { authenticator } = require("otplib");
 const { pool, q, migrate } = require("./db");
 const cl = require("./courtlistener");
 const { COUNTIES, APPEALS, CONNECTORS } = require("./counties");
+const sync = require("./sync");
+const box = require("./crypto-box");
 
 authenticator.options = { window: 1 };
 const PROD = process.env.NODE_ENV === "production";
@@ -116,6 +118,7 @@ async function finishMfa(req, res, uid, action) {
     req.user = await loadUser(uid);
     await audit(req, action);
     res.json({ user: publicUser(req.user) });
+    sync.syncUserIfStale(uid).catch(() => {}); // pull this attorney's counties when they sign in
   });
 }
 app.post("/api/2fa/enable", loginLimiter, wrap(async (req, res) => {
@@ -269,6 +272,47 @@ app.post("/api/cases/import", requireAuth, wrap(async (req, res) => {
   res.json({ added, skipped });
 }));
 
+// ---------- court logins & county sync (per attorney) ----------
+app.get("/api/court-logins", requireAuth, wrap(async (req, res) => {
+  const { rows } = await q("SELECT id, county, username, (enc_password IS NOT NULL) AS has_password, status, last_sync, last_result, last_error FROM court_logins WHERE user_id=$1 ORDER BY county", [req.user.id]);
+  for (const r of rows) if (sync.running.has(r.id)) r.status = "syncing";
+  const available = (req.user.counties || []).filter(c => CONNECTORS[c]).map(c => ({ county: c, ...CONNECTORS[c] }));
+  res.json({ logins: rows, available, bar_ok: isBar(req.user.bar_number) });
+}));
+app.post("/api/court-logins", requireAuth, wrap(async (req, res) => {
+  const { county, username, password } = req.body || {};
+  const conn = CONNECTORS[county];
+  if (!conn) return res.status(400).json({ error: "No automatic feed for that county yet." });
+  if (!(req.user.counties || []).includes(county)) return res.status(403).json({ error: `Add ${county} to My Counties first.` });
+  if (!isBar(req.user.bar_number)) return res.status(400).json({ error: "Your account needs an 8-digit Texas bar # to pull cases." });
+  if (conn.login === "required" && (!username || !password)) return res.status(400).json({ error: "This county needs your portal username and password." });
+  const enc = password ? box.seal(password) : null;
+  const { rows } = await q(`INSERT INTO court_logins(user_id, county, username, enc_password, status) VALUES($1,$2,$3,$4,'new')
+    ON CONFLICT(user_id, county) DO UPDATE SET username=$3, enc_password=$4, status='new', last_error=NULL RETURNING id`,
+    [req.user.id, county, username ? String(username).trim() : null, enc]);
+  await audit(req, "court_login_saved", { county, username: username || null });
+  sync.runSync(rows[0].id, "connected"); // first pull starts right away in the background
+  res.json({ id: rows[0].id, started: true });
+}));
+app.post("/api/court-logins/:id/sync", requireAuth, wrap(async (req, res) => {
+  const { rows } = await q("SELECT id FROM court_logins WHERE id=$1 AND user_id=$2", [+req.params.id, req.user.id]);
+  if (!rows[0]) return res.status(404).json({ error: "Not found" });
+  sync.runSync(rows[0].id, "manual");
+  res.json({ started: true });
+}));
+app.delete("/api/court-logins/:id", requireAuth, wrap(async (req, res) => {
+  await q("DELETE FROM court_logins WHERE id=$1 AND user_id=$2", [+req.params.id, req.user.id]);
+  await audit(req, "court_login_removed", { id: +req.params.id });
+  res.json({ ok: true });
+}));
+// Admin diagnostic: show a county portal's page structure (helps tune a connector). Public pages only.
+app.get("/api/admin/inspect/:county", requireAuth, requireAdmin, rateLimit({ windowMs: 60e3, max: 3 }), wrap(async (req, res) => {
+  const conn = CONNECTORS[req.params.county];
+  if (!conn) return res.status(404).json({ error: "No connector" });
+  try { const r = await sync.MODULES[conn.type].inspect({ baseUrl: conn.url }); console.log("[inspect]", JSON.stringify(r)); res.json(r); }
+  catch (e) { console.error("[inspect] failed", e.message); res.status(502).json({ error: e.message }); }
+}));
+
 // ---------- case law ----------
 const lawLimiter = rateLimit({ windowMs: 60e3, max: 30, message: { error: "Slow down a little." } });
 app.get("/api/law/search", requireAuth, lawLimiter, wrap(async (req, res) => {
@@ -314,4 +358,4 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-migrate().then(() => app.listen(PORT, () => console.log("TX Case Desk on :" + PORT))).catch(e => { console.error("DB migrate failed", e); process.exit(1); });
+migrate().then(() => app.listen(PORT, () => { console.log("TX Case Desk on :" + PORT); sync.startScheduler(); })).catch(e => { console.error("DB migrate failed", e); process.exit(1); });
