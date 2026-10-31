@@ -141,6 +141,8 @@ CREATE TABLE IF NOT EXISTS inbound_emails (
   received_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS inbound_user ON inbound_emails(user_id, received_at DESC);
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS html TEXT;
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ;
 -- Texas case law loaded from CourtListener bulk files (one row per opinion; a cluster = one decision)
 CREATE TABLE IF NOT EXISTS tx_opinions (
   opinion_id BIGINT PRIMARY KEY,

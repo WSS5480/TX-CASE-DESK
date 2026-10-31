@@ -15,6 +15,7 @@ async function api(path, opts = {}) {
 let META = null, me = null, tab = "cases";
 const caseF = { view: "mine", county: "", type: "", attorney: "" };
 let firmUsers = null;
+let inboxUnread = 0;
 const law = { q: "", court: "", after: "", county: "", results: null, open: null };
 
 // ---------------- auth screens ----------------
@@ -66,19 +67,67 @@ function changePwView(forced) {
 // ---------------- shell ----------------
 function start() {
   if (me.must_change_pw) return changePwView(true);
+  api("/api/inbox").then(r => { if (r.unread !== inboxUnread) { inboxUnread = r.unread; renderNav(); } }).catch(() => {});
   $("#who").textContent = `${me.name}${me.bar_number ? " · Bar #" + me.bar_number : ""}`;
   if (!me.counties.length && tab === "cases") tab = "counties";
   renderNav(); show();
 }
 function renderNav() {
-  const tabs = [["cases", "Pending Cases"], ["law", "Case Law"], ["saved", "Saved"], ["counties", "My Counties"], ["court", "Court Logins"]];
+  const tabs = [["cases", "Pending Cases"], ["inbox", "Inbox" + (inboxUnread ? ` (${inboxUnread})` : "")], ["law", "Case Law"], ["saved", "Saved"], ["counties", "My Counties"], ["court", "Court Updates"]];
   if (me.role === "admin") tabs.push(["firm", "Firm Seats"]);
   tabs.push(["account", "Account"]);
   const n = $("#nav"); n.hidden = false;
   n.innerHTML = tabs.map(([k, v]) => `<button data-t="${k}" class="${tab === k ? "on" : ""}">${v}</button>`).join("");
   n.querySelectorAll("button").forEach(b => b.onclick = () => { tab = b.dataset.t; renderNav(); show(); });
 }
-function show() { clearTimeout(courtPoll); ({ cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab](); window.scrollTo(0, 0); }
+function show() { clearTimeout(courtPoll); ({ inbox: inboxView, cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab](); window.scrollTo(0, 0); }
+
+// ---------------- inbox (court emails) ----------------
+const TYPE_TAG = { "Hearing / setting": "y", "New filing": "g", "Order / judgment": "r", "Case notice": "n", "Account activation": "n", "Email": "n" };
+async function inboxView() {
+  $("#app").innerHTML = `<div class="card mute">Loading inbox…</div>`;
+  let r; try { r = await api("/api/inbox"); } catch (e) { return fail(e); }
+  inboxUnread = r.unread; renderNav();
+  $("#app").innerHTML = `<div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Inbox</h2>${r.unread ? `<button class="btn sm ghost" id="readAll">Mark all read</button>` : ""}</div>
+   <p class="mute" style="margin-bottom:0">Every court email sent to your app address. Tap one for the summary and the exact email.</p></div>
+   ${r.emails.map(m => `<div class="card" data-open="${m.id}" style="cursor:pointer;${m.read ? "" : "border-left:4px solid var(--acc)"}">
+     <div class="row"><span class="tag ${TYPE_TAG[m.type] || "n"}">${esc(m.type)}</span>${m.read ? "" : `<span class="tag r">New</span>`}<span class="mute" style="margin-left:auto">${new Date(m.received_at).toLocaleString()}</span></div>
+     <h3 style="margin-top:6px">${esc(m.subject || "(no subject)")}</h3>
+     <div class="mute">${esc(m.from_addr)}</div>
+     ${m.cases.length ? `<div style="margin-top:4px">${m.cases.map(c => `<span class="chip">${esc(c.cause_no)}${c.case ? " · " + esc(c.case.style || "") : " · not in your cases"}</span>`).join("")}</div>` : ""}
+     ${m.dates.length ? `<div class="mute" style="margin-top:4px">📅 ${m.dates.map(esc).join(" · ")}</div>` : ""}
+     <div style="font-size:14px;margin-top:4px">${esc(m.preview)}</div></div>`).join("") || `<div class="card mute">No emails yet. Set up your address under <a class="link" id="goCU">Court Updates</a>.</div>`}`;
+  if ($("#readAll")) $("#readAll").onclick = async () => { await api("/api/inbox/read-all", { method: "POST" }); inboxView(); };
+  if ($("#goCU")) $("#goCU").onclick = () => { tab = "court"; renderNav(); show(); };
+  $$("[data-open]").forEach(c => c.onclick = () => emailView(+c.dataset.open));
+}
+async function emailView(id) {
+  window.scrollTo(0, 0);
+  let r; try { r = await api(`/api/email-alerts/${id}`); } catch (e) { return fail(e); }
+  const m = r.email, sm = r.summary;
+  const linkify = t => esc(t).replace(/(https?:\/\/[^\s<]+)/g, u => `<a class="link" href="${u}" target="_blank" rel="noopener">${u.length > 70 ? u.slice(0, 70) + "…" : u}</a>`);
+  $("#app").innerHTML = `<button class="btn sm ghost" id="bk">← Inbox</button>
+   <div class="card" style="margin-top:10px"><div class="row"><span class="tag ${TYPE_TAG[sm.type] || "n"}">${esc(sm.type)}</span><span class="mute" style="margin-left:auto">${new Date(m.received_at).toLocaleString()}</span></div>
+   <h2 style="margin-top:8px">${esc(m.subject || "(no subject)")}</h2><div class="mute">From: ${esc(m.from_addr)}</div></div>
+   <div class="card"><h3>Summary</h3>
+     ${sm.action ? `<p style="margin:6px 0"><b>👉 ${esc(sm.action)}</b></p>` : ""}
+     ${sm.cases.length ? `<div style="margin:6px 0"><b>Cases:</b> ${sm.cases.map(c => c.case ? `<a class="link" data-case="${c.case.id}">${esc(c.cause_no)} · ${esc(c.case.style || "")}</a>` : `${esc(c.cause_no)} <span class="mute">(not in your cases)</span>`).join(", ")}</div>` : ""}
+     ${sm.dates.length ? `<div style="margin:6px 0"><b>Dates:</b> ${sm.dates.map(esc).join(" · ")}</div>` : ""}
+     ${sm.lines.length ? `<ul style="padding-left:18px;margin:6px 0">${sm.lines.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : `<p class="mute">No key lines found — see the exact email below.</p>`}
+     ${sm.links.length ? `<div style="margin:6px 0"><b>Links:</b><br>${sm.links.map(u => `<a class="link" href="${esc(u)}" target="_blank" rel="noopener">${esc(u.length > 70 ? u.slice(0, 70) + "…" : u)}</a>`).join("<br>")}</div>` : ""}
+     <p class="mute" style="margin-bottom:0;font-size:12px">Summary is pulled from the email automatically — check the exact email before relying on it.</p></div>
+   <div class="card"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Exact email</h3>
+     <div class="row">${m.html ? `<button class="btn sm" id="vF">Formatted</button>` : ""}<button class="btn sm ${m.html ? "ghost" : ""}" id="vT">Plain text</button></div></div>
+     <div id="exact" style="margin-top:10px"></div></div>`;
+  const showF = () => { const f = document.createElement("iframe"); f.setAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox"); f.style.cssText = "width:100%;height:70vh;border:1px solid var(--line);border-radius:8px;background:#fff";
+    f.srcdoc = '<base target="_blank">' + m.html; $("#exact").replaceChildren(f); $("#vF").className = "btn sm"; $("#vT").className = "btn sm ghost"; };
+  const showT = () => { $("#exact").innerHTML = `<div class="optext" style="font-family:inherit;font-size:14px">${linkify(m.body || "(empty)")}</div>`; $("#vT").className = "btn sm"; if ($("#vF")) $("#vF").className = "btn sm ghost"; };
+  if ($("#vF")) $("#vF").onclick = showF; $("#vT").onclick = showT;
+  m.html ? showF() : showT();
+  $("#bk").onclick = inboxView;
+  $$("[data-case]").forEach(a => a.onclick = () => { tab = "cases"; caseF.view = "firm"; renderNav(); show(); });
+  inboxUnread = Math.max(0, inboxUnread - 1); renderNav();
+}
 
 // ---------------- court logins / county sync ----------------
 let courtPoll;
@@ -96,11 +145,12 @@ async function courtView() {
    ${ea.emails.some(m => /re:?search|tylertech/i.test(m.from_addr + m.subject)) ? `<p><span class="tag g">Connected</span> <span class="mute">re:SearchTX is sending to this app.</span></p>` : `<p><span class="tag n">Not connected yet</span></p>`}
    <ol style="padding-left:20px;font-size:15px;line-height:1.6">
      <li><b>Copy your app address:</b><div class="row" style="margin:4px 0"><div class="secret" style="flex:1">${esc(ea.address)}</div><button class="btn sm" id="cpAddr">Copy</button></div></li>
-     <li>Go to <a class="link" href="https://research.txcourts.gov" target="_blank" rel="noopener">research.txcourts.gov</a> → <b>Register</b> → use that address as the email.</li>
-     <li>Come back here. The <b>Activate Account</b> email shows below → tap <b>View email</b> → tap the activation link.</li>
-     <li>Sign in to re:SearchTX with that address → search each case by cause # → turn on <b>alerts</b>.</li>
+     <li><b>Register at re:SearchTX</b> with that address as your email: <a class="link" href="https://research.txcourts.gov" target="_blank" rel="noopener">research.txcourts.gov</a> → <b>Register</b> (top right).</li>
+     <li><b>Activate:</b> open your <a class="link" id="goInbox">Inbox</a> here → <b>re:SearchTX - Activate Account</b> → tap the activation link.</li>
+     <li><b>Turn on alerts:</b> <a class="link" href="https://research.txcourts.gov" target="_blank" rel="noopener">Sign in to re:SearchTX</a> with that address → search each case by cause # → turn on <b>alerts</b>.</li>
    </ol>
-   <p class="mute" style="margin:0">That's it — updates appear on your matching cases in Pending Cases. Keep your State Bar eService email as your real inbox; don't change it.</p>
+   <p class="mute" style="margin:0">Updates then show in your <b>Inbox</b> and on matching cases in <b>Pending Cases</b>. Keep your State Bar eService email as your real inbox (<a class="link" href="https://www.texasbar.com" target="_blank" rel="noopener">texasbar.com</a> → My Bar Page) — don't change it.
+   Help: <a class="link" href="https://research.txcourts.gov/CourtRecordsSearch/Assets/site/faq/TX_faq_Jan_1_2022.html" target="_blank" rel="noopener">re:SearchTX FAQ</a> · research.support@tylertech.com · (844) 307-8720</p>
    <details style="margin-top:8px"><summary class="mute">Already get re:SearchTX emails at your own address?</summary><p class="mute" style="font-size:14px">You can forward any of them to the address above (one at a time, or with a Gmail/Outlook rule) and they'll match the same way.</p></details>
    <h3 style="margin-top:12px">Recent alerts</h3>
    ${ea.emails.length ? ea.emails.map(m => `<div style="border-top:1px solid var(--line);padding:8px 0"><b>${esc(m.subject || "(no subject)")}</b><div class="mute">${new Date(m.received_at).toLocaleString()} · ${esc(m.from_addr)}</div>
@@ -139,6 +189,7 @@ async function courtView() {
     try { const m = (await api(`/api/email-alerts/${b.dataset.view}`)).email;
       box.innerHTML = `<div class="optext" style="font-family:inherit;font-size:14px;margin-top:8px;max-height:50vh">${linkify(m.body || "(empty)")}</div>`; b.textContent = "Hide email"; } catch (e) { fail(e); }
   });
+  if ($("#goInbox")) $("#goInbox").onclick = () => { tab = "inbox"; renderNav(); show(); };
   const cpa = $("#cpAddr"); if (cpa) cpa.onclick = async () => { try { await navigator.clipboard.writeText(ea.address); toast("Address copied"); } catch (e) { toast(ea.address); } };
   const insp = $("#insp");
   if (insp) insp.onclick = async () => { insp.disabled = true; insp.textContent = "Checking…"; const out = $("#inspOut"); out.hidden = false;

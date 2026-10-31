@@ -393,10 +393,27 @@ app.get("/api/email-alerts", requireAuth, wrap(async (req, res) => {
     emails: rows.filter(r => r.kind !== "forward_confirm").map(r => ({ ...r, unmatched: (r.causes || []).filter(c => !known.includes(c)) })) });
 }));
 app.get("/api/email-alerts/:id", requireAuth, wrap(async (req, res) => {
-  const { rows } = await q("SELECT id, from_addr, subject, body, received_at FROM inbound_emails WHERE id=$1 AND user_id=$2", [+req.params.id, req.user.id]);
+  const { rows } = await q("SELECT id, from_addr, subject, body, html, kind, causes, received_at FROM inbound_emails WHERE id=$1 AND user_id=$2", [+req.params.id, req.user.id]);
   if (!rows[0]) return res.status(404).json({ error: "Not found" });
-  res.json({ email: rows[0] });
+  await q("UPDATE inbound_emails SET read_at=now() WHERE id=$1 AND read_at IS NULL", [rows[0].id]);
+  const cm = await caseMap(req.user.firm_id, rows[0].causes || []);
+  res.json({ email: rows[0], summary: inbound.summarize(rows[0], cm) });
 }));
+async function caseMap(firmId, causes) {
+  if (!causes.length) return {};
+  const { rows } = await q("SELECT id, upper(cause_no) c, style, county FROM cases WHERE firm_id=$1 AND upper(cause_no) = ANY($2)", [firmId, causes]);
+  return Object.fromEntries(rows.map(r => [r.c, { id: r.id, style: r.style, county: r.county }]));
+}
+// Inbox: every email received for this attorney, newest first, each with a short summary.
+app.get("/api/inbox", requireAuth, wrap(async (req, res) => {
+  const { rows } = await q("SELECT id, from_addr, subject, body, kind, causes, read_at, received_at FROM inbound_emails WHERE user_id=$1 ORDER BY received_at DESC LIMIT 200", [req.user.id]);
+  const cm = await caseMap(req.user.firm_id, [...new Set(rows.flatMap(r => r.causes || []))]);
+  res.json({ unread: rows.filter(r => !r.read_at).length, emails: rows.map(r => {
+    const sm = inbound.summarize(r, cm);
+    return { id: r.id, from_addr: r.from_addr, subject: r.subject, received_at: r.received_at, read: !!r.read_at, type: sm.type, dates: sm.dates, cases: sm.cases, preview: (sm.lines[0] || String(r.body || "").replace(/\s+/g, " ").slice(0, 140)) };
+  }) });
+}));
+app.post("/api/inbox/read-all", requireAuth, wrap(async (req, res) => { await q("UPDATE inbound_emails SET read_at=now() WHERE user_id=$1 AND read_at IS NULL", [req.user.id]); res.json({ ok: true }); }));
 app.post("/api/cases/:id/filing-ack", requireAuth, wrap(async (req, res) => {
   await q("UPDATE cases SET filing_alert=NULL WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true });
 }));

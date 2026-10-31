@@ -67,11 +67,34 @@ async function handle(msg) {
       await q("UPDATE cases SET filing_alert=$2, filing_alert_at=now(), updated_at=now() WHERE id=$1", [r.id, `${line}${excerpt ? " — " + excerpt : ""}`.slice(0, 600)]);
     }
   }
-  await q(`INSERT INTO inbound_emails(user_id, firm_id, from_addr, subject, body, kind, causes, matched_case_ids, confirm_code)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [u.id, u.firm_id, from.slice(0, 200), subject, body, kind, causes, matched, confirm]);
+  await q(`INSERT INTO inbound_emails(user_id, firm_id, from_addr, subject, body, kind, causes, matched_case_ids, confirm_code, html)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [u.id, u.firm_id, from.slice(0, 200), subject, body, kind, causes, matched, confirm, String(msg.HtmlBody || "").slice(0, 400000) || null]);
   await q("INSERT INTO audit_log(user_id, firm_id, action, detail) VALUES($1,$2,'email_alert',$3)", [u.id, u.firm_id, { kind, subject, causes: causes.length, matched: matched.length }]);
   console.log(`[inbound] user ${u.id} kind=${kind} causes=${causes.length} matched=${matched.length} subject="${subject.slice(0, 80)}"`);
   return { ok: true, kind, causes, matched };
 }
 
-module.exports = { handle, tokenFor, addressFor, causesIn, countyIn };
+// Rule-based summary (no AI): what kind of email, which cases, dates/times, the key lines, and links.
+const KEY = /(hearing|trial|set for|setting|docket|filed|filing|order|notice|motion|judgment|citation|served|service|answer|petition|continuance|cancel|reset|document|activate|verify|password)/i;
+function summarize(e, caseMap = {}) {
+  const text = String(e.body || ""), subj = String(e.subject || "");
+  const all = subj + "\n" + text;
+  let type = "Email";
+  if (/activate|verify|confirm your/i.test(subj)) type = "Account activation";
+  else if (/hearing|setting|trial|docket/i.test(all.slice(0, 3000))) type = "Hearing / setting";
+  else if (/order|judgment/i.test(subj)) type = "Order / judgment";
+  else if (/filed|filing|document|envelope/i.test(all.slice(0, 3000))) type = "New filing";
+  else if (/alert|notice/i.test(subj)) type = "Case notice";
+  const dates = [...new Set([...all.matchAll(/\b(\d{1,2}\/\d{1,2}\/\d{4})(?:\s*(?:at\s*)?(\d{1,2}:\d{2}\s*[AP]\.?M\.?))?/gi)].map(m => m[2] ? `${m[1]} ${m[2].toUpperCase()}` : m[1]))].slice(0, 5);
+  const lines = text.split(/\n+/).map(l => l.trim()).filter(l => l.length > 12 && l.length < 300 && KEY.test(l) && !/^https?:/i.test(l)).slice(0, 5);
+  const links = [...new Set((text.match(/https?:\/\/[^\s<>"]+/g) || []))].slice(0, 5);
+  const cases = (e.causes || []).map(c => ({ cause_no: c, case: caseMap[c] || null }));
+  // the hearing date = a date on a line that talks about a hearing/setting/trial (not the filing date)
+  const hl = all.split(/\n+/).find(l => /(hearing|set for|setting|trial|docket call|mediation)/i.test(l) && /\d{1,2}\/\d{1,2}\/\d{4}/.test(l) && !/filed/i.test(l));
+  const hm = hl && hl.match(/(\d{1,2}\/\d{1,2}\/\d{4})(?:\s*(?:at\s*)?(\d{1,2}:\d{2}\s*[AP]\.?M\.?))?/i);
+  const when = hm ? (hm[2] ? `${hm[1]} ${hm[2].toUpperCase()}` : hm[1]) : null;
+  const action = type === "Account activation" ? "Open the activation link below to finish setup." : when ? `Calendar: ${when} — ${hl.replace(/\s+/g, " ").trim().slice(0, 120)}` : null;
+  return { type, dates, lines, links, cases, action };
+}
+
+module.exports = { summarize, handle, tokenFor, addressFor, causesIn, countyIn };
