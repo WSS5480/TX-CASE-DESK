@@ -328,7 +328,7 @@ app.delete("/api/court-logins/:id", requireAuth, wrap(async (req, res) => {
   await audit(req, "court_login_removed", { id: +req.params.id });
   res.json({ ok: true });
 }));
-// Hourly wake-up ping from the Render cron job (scripts/hourly-ping.js). Needs the shared SYNC_TOKEN.
+// Hourly wake-up ping (free GitHub Actions schedule; scripts/hourly-ping.js works for a Render cron too). Needs SYNC_TOKEN.
 let lastHourly = 0;
 app.post("/api/cron/hourly", wrap(async (req, res) => {
   const tok = process.env.SYNC_TOKEN;
