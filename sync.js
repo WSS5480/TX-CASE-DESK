@@ -71,7 +71,7 @@ async function syncUserIfStale(userId, hours = 6) {
 
 // In-process hourly timer.
 function startScheduler() {
-  // Runs while the server is awake; the free GitHub Actions ping (.github/workflows/hourly.yml) wakes it every hour.
+  // Runs while the server is awake; the Render cron job (scripts/hourly-ping.js) wakes it every hour.
   const tick = () => hourly().catch(e => console.error("[sync] scheduler", e.message));
   setInterval(tick, 60 * 60e3);
 }
