@@ -25,15 +25,15 @@ async function runSync(loginId, why = "manual") {
     });
     let added = 0, updated = 0;
     for (const c of out.cases) {
-      const r = await q(`INSERT INTO cases(firm_id,user_id,county,cause_no,court,style,case_type,filed_date,status,next_setting,source,last_synced)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'county_sync',now())
+      const r = await q(`INSERT INTO cases(firm_id,user_id,county,cause_no,court,style,case_type,filed_date,status,next_setting,external_url,source,last_synced)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'county_sync',now())
         ON CONFLICT(firm_id,county,cause_no) DO UPDATE SET
           court=COALESCE(EXCLUDED.court,cases.court), style=COALESCE(EXCLUDED.style,cases.style), case_type=COALESCE(EXCLUDED.case_type,cases.case_type),
           filed_date=COALESCE(EXCLUDED.filed_date,cases.filed_date), status=COALESCE(EXCLUDED.status,cases.status),
-          next_setting=COALESCE(EXCLUDED.next_setting,cases.next_setting), user_id=COALESCE(cases.user_id,EXCLUDED.user_id),
+          next_setting=COALESCE(EXCLUDED.next_setting,cases.next_setting), external_url=COALESCE(EXCLUDED.external_url,cases.external_url), user_id=COALESCE(cases.user_id,EXCLUDED.user_id),
           last_synced=now(), updated_at=now()
         RETURNING (xmax = 0) AS inserted`,
-        [l.firm_id, l.user_id, l.county, c.cause_no, c.court, c.style, c.case_type, c.filed_date, c.status, c.next_setting]);
+        [l.firm_id, l.user_id, l.county, c.cause_no, c.court, c.style, c.case_type, c.filed_date, c.status, c.next_setting, c.external_url || null]);
       r.rows[0]?.inserted ? added++ : updated++;
     }
     const result = { why, found: out.cases.length, added, updated, notes: out.notes, seconds: Math.round((Date.now() - started) / 1000) };

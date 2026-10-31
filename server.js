@@ -280,13 +280,15 @@ app.get("/api/court-logins", requireAuth, wrap(async (req, res) => {
   res.json({ logins: rows, available, bar_ok: isBar(req.user.bar_number) });
 }));
 app.post("/api/court-logins", requireAuth, wrap(async (req, res) => {
-  const { county, username, password } = req.body || {};
+  let { county, username, password } = req.body || {};
   const conn = CONNECTORS[county];
   if (!conn) return res.status(400).json({ error: "No automatic feed for that county yet." });
   if (!(req.user.counties || []).includes(county)) return res.status(403).json({ error: `Add ${county} to My Counties first.` });
   if (!isBar(req.user.bar_number)) return res.status(400).json({ error: "Your account needs an 8-digit Texas bar # to pull cases." });
   if (conn.login === "required" && (!username || !password)) return res.status(400).json({ error: "This county needs your portal username and password." });
-  const enc = password ? box.seal(password) : null;
+  const keepLogin = conn.login !== "none";
+  const enc = keepLogin && password ? box.seal(password) : null;
+  if (!keepLogin) username = null;
   const { rows } = await q(`INSERT INTO court_logins(user_id, county, username, enc_password, status) VALUES($1,$2,$3,$4,'new')
     ON CONFLICT(user_id, county) DO UPDATE SET username=$3, enc_password=$4, status='new', last_error=NULL RETURNING id`,
     [req.user.id, county, username ? String(username).trim() : null, enc]);

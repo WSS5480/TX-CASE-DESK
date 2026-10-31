@@ -212,7 +212,7 @@ async function sync({ baseUrl, username, password, barNumber, attorneyName, maxC
   }
   const cases = [];
   for (const r of [...found.values()].slice(0, maxCases)) {
-    const base = { cause_no: r.cause_no, style: r.style || null, ...splitFiled(r.filed_location) };
+    const base = { cause_no: r.cause_no, style: r.style || null, external_url: r.detail, ...splitFiled(r.filed_location) };
     base.case_type = r.case_type; base.status = r.status;
     try { Object.assign(base, Object.fromEntries(Object.entries(await caseDetail(s, r.detail, s.base)).filter(([, v]) => v))); } catch (e) { notes.push(`${r.cause_no} detail: ${e.message}`); }
     cases.push(base);

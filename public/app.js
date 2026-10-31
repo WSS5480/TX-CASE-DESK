@@ -93,16 +93,15 @@ async function courtView() {
      const st = !l ? "" : l.status === "ok" ? `<span class="tag g">Synced</span>` : l.status === "error" ? `<span class="tag r">Error</span>` : `<span class="tag y">${l.status === "syncing" ? "Pulling cases…" : "Starting…"}</span>`;
      return `<div class="card" data-county="${esc(c.county)}"><div class="row"><h3 style="margin:0">${esc(c.county)} County</h3>${st}<span class="tag n">${esc(c.status)}</span></div>
      <div class="mute">${esc(c.name)} · <a class="link" href="${esc(c.url)}" target="_blank" rel="noopener">open portal</a></div>
-     ${l ? `<div class="kv"><div><b>Portal login</b>${esc(l.username || "Public search (no login)")}</div><div><b>Last pull</b>${ago(l.last_sync)}</div>
+     ${l ? `<div class="kv"><div><b>Pulls by</b>${c.login === "none" ? "Your bar # (public portal)" : esc(l.username || "Your bar #")}</div><div><b>Last pull</b>${ago(l.last_sync)}</div>
        ${l.last_result ? `<div><b>Found</b>${l.last_result.found} cases</div><div><b>New / updated</b>${l.last_result.added} / ${l.last_result.updated}</div>` : ""}</div>
        ${l.last_error ? `<p class="err">${esc(l.last_error)}</p>` : ""}
        ${l.last_result?.notes?.length ? `<details style="margin-top:6px"><summary class="mute">Details</summary><div class="mute">${l.last_result.notes.map(esc).join("<br>")}</div></details>` : ""}
-       <div class="row" style="margin-top:10px"><button class="btn sm" data-a="sync" ${l.status === "syncing" ? "disabled" : ""}>Sync now</button><button class="btn sm ghost" data-a="edit">Change login</button><button class="btn sm danger" data-a="del">Remove</button></div>` : ""}
-     <form ${l ? "hidden" : ""} style="margin-top:10px"><div class="grid">
-       <div><label>Portal username ${c.login === "optional" ? "(optional)" : ""}</label><input name="username" autocomplete="off" value="${esc(l?.username || "")}"></div>
-       <div><label>Portal password ${c.login === "optional" ? "(optional)" : ""}</label><input name="password" type="password" autocomplete="new-password"></div></div>
-       ${c.login === "optional" ? `<p class="mute">This portal is public — leave blank to pull by your bar # only. Add your portal login to also see cases only registered users can view.</p>` : ""}
-       <div class="err"></div><button class="btn">${l ? "Save & pull" : "Connect & pull my cases"}</button></form></div>`; }).join("")}
+       <div class="row" style="margin-top:10px"><button class="btn sm" data-a="sync" ${l.status === "syncing" ? "disabled" : ""}>Sync now</button>${c.login === "none" ? "" : `<button class="btn sm ghost" data-a="edit">Change login</button>`}<button class="btn sm danger" data-a="del">Remove</button></div>` : ""}
+     <form ${l ? "hidden" : ""} style="margin-top:10px">${c.login === "none" ? `<p class="mute">Public portal — no login needed. One tap pulls every open case under bar #${esc(me.bar_number || "")}.</p>` : `<div class="grid">
+       <div><label>Portal username</label><input name="username" autocomplete="off" value="${esc(l?.username || "")}"></div>
+       <div><label>Portal password</label><input name="password" type="password" autocomplete="new-password"></div></div>`}
+       <div class="err"></div><button class="btn">${l ? "Save & pull" : "Pull my " + esc(c.county) + " cases"}</button></form></div>`; }).join("")}
    ${me.role === "admin" && d.available.length ? `<div class="card"><h3>Admin: portal check</h3><p class="mute">Reads the county portal's public pages and shows its layout (for troubleshooting).</p><button class="btn sm ghost" id="insp">Check ${esc(d.available[0].county)} portal</button><pre id="inspOut" class="optext" hidden></pre></div>` : ""}`;
   $$("[data-county]").forEach(card => {
     const county = card.dataset.county, l = byCounty[county], form = card.querySelector("form");
@@ -110,7 +109,7 @@ async function courtView() {
       try { await api("/api/court-logins", { method: "POST", body: b }); toast("Connected — pulling your cases"); courtView(); } catch (err) { form.querySelector(".err").textContent = err.message; } };
     if (!l) return;
     card.querySelector("[data-a=sync]").onclick = async () => { try { await api(`/api/court-logins/${l.id}/sync`, { method: "POST" }); toast("Pulling cases…"); setTimeout(courtView, 800); } catch (e) { fail(e); } };
-    card.querySelector("[data-a=edit]").onclick = () => { form.hidden = false; };
+    const ed = card.querySelector("[data-a=edit]"); if (ed) ed.onclick = () => { form.hidden = false; };
     const del = card.querySelector("[data-a=del]");
     del.onclick = async () => { if (!del.dataset.sure) { del.dataset.sure = 1; del.textContent = "Tap again to remove"; return; } await api(`/api/court-logins/${l.id}`, { method: "DELETE" }); courtView(); };
   });
@@ -172,6 +171,7 @@ function caseCard(c) {
    <div><b>Next</b>${esc(c.next_setting || "—")}</div><div><b>Appeals to</b>${esc(META.appeals[c.county] || "—")}</div><div><b>Attorney</b>${esc(c.attorney || "—")}</div></div>
    ${c.notes ? `<p class="mute" style="margin:8px 0 0">${esc(c.notes)}</p>` : ""}
    ${c.source === "county_sync" ? `<p class="mute" style="margin:6px 0 0">↻ Pulled from county portal${c.last_synced ? " · " + new Date(c.last_synced).toLocaleString() : ""}</p>` : ""}
+   ${c.external_url ? `<a class="btn sm ghost" style="margin-top:8px;display:inline-block;text-decoration:none" href="${esc(c.external_url)}" target="_blank" rel="noopener">Open on county portal ↗</a>` : ""}
    <div class="row" style="margin-top:10px"><button class="btn sm ghost" data-a="edit">Edit</button><button class="btn sm ghost" data-a="track">${c.tracked ? "★ Untrack" : "☆ Track"}</button><button class="btn sm ghost" data-a="law">Research case law</button></div></div>`;
 }
 function caseForm(c) {
