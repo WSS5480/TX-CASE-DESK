@@ -328,6 +328,18 @@ app.delete("/api/court-logins/:id", requireAuth, wrap(async (req, res) => {
   await audit(req, "court_login_removed", { id: +req.params.id });
   res.json({ ok: true });
 }));
+// Hourly wake-up ping (free GitHub Actions schedule). Needs the shared SYNC_TOKEN secret.
+let lastHourly = 0;
+app.post("/api/cron/hourly", wrap(async (req, res) => {
+  const tok = process.env.SYNC_TOKEN;
+  const given = String(req.get("X-Cron-Token") || "");
+  if (!tok || given.length !== tok.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(tok))) return res.status(403).json({ error: "Forbidden" });
+  if (Date.now() - lastHourly < 50 * 60e3) return res.json({ skipped: "ran recently" });
+  lastHourly = Date.now();
+  sync.hourly().catch(e => console.error("[cron] hourly", e.message));
+  res.json({ started: true });
+}));
+
 // Admin diagnostic: show a county portal's page structure (helps tune a connector). Public pages only.
 app.get("/api/admin/inspect/:county", requireAuth, requireAdmin, rateLimit({ windowMs: 60e3, max: 3 }), wrap(async (req, res) => {
   const conn = CONNECTORS[req.params.county];

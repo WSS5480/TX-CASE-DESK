@@ -6,7 +6,7 @@ const MODULES = { odyssey: require("./connectors/odyssey") };
 
 const running = new Set();
 
-async function runSync(loginId, why = "manual") {
+async function runSync(loginId, why = "manual", { watchOnly = false } = {}) {
   if (running.has(loginId)) return { skipped: "already running" };
   running.add(loginId);
   try {
@@ -22,7 +22,7 @@ async function runSync(loginId, why = "manual") {
     const w = await q("SELECT cause_no, external_url AS url FROM cases WHERE firm_id=$1 AND county=$2 AND watch_dates AND external_url IS NOT NULL", [l.firm_id, l.county]);
     const out = await MODULES[conn.type].sync({
       baseUrl: conn.url, username: l.username || null, password: l.enc_password ? box.open(l.enc_password) : null,
-      barNumber: l.bar_number, attorneyName: l.name, watchUrls: w.rows
+      barNumber: l.bar_number, attorneyName: l.name, watchUrls: w.rows, watchOnly
     });
     let added = 0, updated = 0, dateChanges = 0;
     for (const c of out.cases) {
@@ -46,6 +46,11 @@ async function runSync(loginId, why = "manual") {
         [l.firm_id, l.user_id, l.county, c.cause_no, c.court, c.style, c.case_type, c.filed_date, c.status, c.next_setting, c.external_url || null]);
       r.rows[0]?.inserted ? added++ : updated++;
     }
+    if (watchOnly) { // light run: don't overwrite the full-pull summary
+      await q("UPDATE court_logins SET status='ok', last_error=NULL, last_result = COALESCE(last_result,'{}'::jsonb) || $2 WHERE id=$1", [loginId, { last_watch_check: new Date().toISOString(), last_watch_changes: dateChanges }]);
+      console.log(`[sync] hourly watch ${l.county} login ${loginId}: ${out.cases.length} checked, ${dateChanges} date change(s)`);
+      return { watched: out.cases.length, date_changes: dateChanges };
+    }
     const result = { why, found: out.cases.length, added, updated, date_changes: dateChanges, notes: out.notes, seconds: Math.round((Date.now() - started) / 1000) };
     await q("UPDATE court_logins SET status='ok', last_sync=now(), last_result=$2, last_error=NULL WHERE id=$1", [loginId, result]);
     await q("INSERT INTO audit_log(user_id, firm_id, action, detail) VALUES($1,$2,'county_sync',$3)", [l.user_id, l.firm_id, { county: l.county, ...result }]);
@@ -64,16 +69,29 @@ async function syncUserIfStale(userId, hours = 6) {
   for (const r of rows) await runSync(r.id, "login");
 }
 
-// Nightly sweep: every 30 min, sync any login not synced in the last 24h, one at a time.
+// In-process hourly timer.
 function startScheduler() {
-  const tick = async () => {
-    try {
-      const { rows } = await q("SELECT l.id FROM court_logins l JOIN users u ON u.id=l.user_id WHERE u.active AND (l.last_sync IS NULL OR l.last_sync < now() - interval '24 hours') ORDER BY l.last_sync NULLS FIRST LIMIT 10");
-      for (const r of rows) await runSync(r.id, "scheduled");
-    } catch (e) { console.error("[sync] scheduler", e.message); }
-  };
-  setTimeout(tick, 60e3);
-  setInterval(tick, 30 * 60e3);
+  // Runs while the server is awake; the free GitHub Actions ping (.github/workflows/hourly.yml) wakes it every hour.
+  const tick = () => hourly().catch(e => console.error("[sync] scheduler", e.message));
+  setInterval(tick, 60 * 60e3);
 }
 
-module.exports = { runSync, syncUserIfStale, startScheduler, running, MODULES };
+// Hourly: re-check court dates on watched cases (light), plus any full pull that's over 24h old.
+let hourlyRunning = false;
+async function hourly() {
+  if (hourlyRunning) return { skipped: "already running" };
+  hourlyRunning = true;
+  const summary = { watch_checks: 0, full_pulls: 0 };
+  try {
+    const w = await q(`SELECT DISTINCT l.id FROM court_logins l JOIN users u ON u.id=l.user_id
+      JOIN cases c ON c.firm_id=u.firm_id AND c.county=l.county AND c.watch_dates AND c.external_url IS NOT NULL
+      WHERE u.active AND l.status <> 'syncing'`);
+    for (const r of w.rows) { await runSync(r.id, "hourly", { watchOnly: true }); summary.watch_checks++; }
+    const f = await q("SELECT l.id FROM court_logins l JOIN users u ON u.id=l.user_id WHERE u.active AND (l.last_sync IS NULL OR l.last_sync < now() - interval '24 hours') LIMIT 10");
+    for (const r of f.rows) { await runSync(r.id, "scheduled"); summary.full_pulls++; }
+  } finally { hourlyRunning = false; }
+  console.log("[sync] hourly done", JSON.stringify(summary));
+  return summary;
+}
+
+module.exports = { hourly, runSync, syncUserIfStale, startScheduler, running, MODULES };

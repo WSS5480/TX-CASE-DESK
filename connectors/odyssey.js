@@ -195,9 +195,18 @@ async function caseDetail(s, url, referer) {
   };
 }
 
-async function sync({ baseUrl, username, password, barNumber, attorneyName, maxCases = 200, watchUrls = [] }) {
+async function sync({ baseUrl, username, password, barNumber, attorneyName, maxCases = 200, watchUrls = [], watchOnly = false }) {
   const s = new Session(baseUrl);
   const home = await login(s, username, password);
+  if (watchOnly) { // hourly light check: only re-read watched cases' pages, no bar search
+    const notes = [], out = [];
+    for (const w of watchUrls.slice(0, 100)) {
+      try { out.push({ cause_no: w.cause_no, external_url: w.url, ...(await caseDetail(s, w.url, s.base)) }); }
+      catch (e) { notes.push(`${w.cause_no}: ${e.message}`); }
+    }
+    notes.push(`Hourly check: ${out.length} watched case(s)`);
+    return { cases: out, notes, diag: s.log };
+  }
   const entries = searchLinks(home.url.includes("default") ? home : await s.req("default.aspx"));
   if (!entries.length) throw Object.assign(new Error("No case-search pages found on the portal home page."), { diag: s.log });
   const found = new Map(), notes = [];
