@@ -123,6 +123,35 @@ CREATE TABLE IF NOT EXISTS case_changes (
   new_value TEXT,
   at TIMESTAMPTZ DEFAULT now()
 );
+-- Texas case law loaded from CourtListener bulk files (one row per opinion; a cluster = one decision)
+CREATE TABLE IF NOT EXISTS tx_opinions (
+  opinion_id BIGINT PRIMARY KEY,
+  cluster_id BIGINT NOT NULL,
+  court_id TEXT NOT NULL,            -- tex | texapp | texcrimapp
+  coa SMALLINT,                      -- court of appeals district 1-15 (from docket number, e.g. 13-24-00123-CV)
+  origin_county TEXT,                -- trial-court county the appeal came from
+  docket_number TEXT,
+  case_name TEXT,
+  date_filed DATE,
+  citations TEXT,
+  judges TEXT,
+  cite_count INT DEFAULT 0,
+  precedential TEXT,
+  op_type TEXT,
+  text TEXT,
+  tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', left(coalesce(case_name,'') || ' ' || coalesce(text,''), 400000))) STORED
+);
+CREATE INDEX IF NOT EXISTS tx_op_tsv ON tx_opinions USING GIN (tsv);
+CREATE INDEX IF NOT EXISTS tx_op_cluster ON tx_opinions(cluster_id);
+CREATE INDEX IF NOT EXISTS tx_op_court ON tx_opinions(court_id, coa, date_filed);
+CREATE INDEX IF NOT EXISTS tx_op_county ON tx_opinions(origin_county);
+CREATE TABLE IF NOT EXISTS tx_cites (
+  citing BIGINT NOT NULL,
+  cited BIGINT NOT NULL,
+  depth INT DEFAULT 1,
+  PRIMARY KEY (citing, cited)
+);
+CREATE INDEX IF NOT EXISTS tx_cites_cited ON tx_cites(cited);
 CREATE INDEX IF NOT EXISTS cases_firm_county ON cases(firm_id, county);
 CREATE INDEX IF NOT EXISTS audit_firm ON audit_log(firm_id, at DESC);
 `;

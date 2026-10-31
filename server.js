@@ -11,6 +11,7 @@ const QRCode = require("qrcode");
 const { authenticator } = require("otplib");
 const { pool, q, migrate } = require("./db");
 const analysis = require("./analysis");
+const lawdb = require("./lawdb");
 const cl = require("./courtlistener");
 const { COUNTIES, APPEALS, CONNECTORS } = require("./counties");
 const sync = require("./sync");
@@ -21,6 +22,7 @@ const PROD = process.env.NODE_ENV === "production";
 const app = express();
 app.set("trust proxy", 1);
 app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", "data:"] } } }));
+app.use("/api/ingest", express.json({ limit: "80mb" })); // bulk case-law loader (gzip JSON batches)
 app.use(express.json({ limit: "2mb" }));
 app.use(session({
   store: new PgSession({ pool, createTableIfMissing: true }),
@@ -67,7 +69,7 @@ const requireAuth = wrap(async (req, res, next) => {
 const requireAdmin = (req, res, next) => req.user.role === "admin" ? next() : res.status(403).json({ error: "Firm admins only" });
 
 // ---------- reference ----------
-app.get("/api/meta", (req, res) => res.json({ counties: COUNTIES, appeals: APPEALS, connectors: CONNECTORS, courts: cl.TX_COURTS, caseLawLive: true, tokenSet: !!process.env.COURTLISTENER_TOKEN }));
+app.get("/api/meta", wrap(async (req, res) => res.json({ counties: COUNTIES, appeals: APPEALS, connectors: CONNECTORS, courts: cl.TX_COURTS, localLaw: await lawdb.available(), lawCount: await lawdb.size().catch(() => 0), tokenSet: !!process.env.COURTLISTENER_TOKEN })));
 app.get("/healthz", (req, res) => res.send("ok"));
 
 // ---------- signup / login / 2FA ----------
@@ -377,17 +379,60 @@ const lawLimiter = rateLimit({ windowMs: 60e3, max: 30, message: { error: "Slow 
 app.get("/api/law/search", requireAuth, lawLimiter, wrap(async (req, res) => {
   const query = String(req.query.q || "").trim();
   if (query.length < 2) return res.status(400).json({ error: "Enter search words." });
+  if (await lawdb.available()) {
+    const f = { after: req.query.after || undefined, county: req.query.county || undefined };
+    if (["tex", "texapp", "texcrimapp"].includes(req.query.court)) f.court = req.query.court;
+    if (/^\d{1,2}$/.test(req.query.coa || "")) { f.court = "texapp"; f.coa = +req.query.coa; }
+    return res.json(await lawdb.search({ text: query.replace(/\bAND\b/g, " ") }, f, 30));
+  }
   res.json(await cl.search({ query, court: req.query.court, after: req.query.after, before: req.query.before, page: req.query.page }));
 }));
 app.get("/api/law/opinion/:cid", requireAuth, lawLimiter, wrap(async (req, res) => {
   const cid = +req.params.cid; if (!cid) return res.status(400).json({ error: "Bad id" });
-  const op = await cl.opinion(cid);
+  const op = (await lawdb.available() && await lawdb.opinion(cid)) || await cl.opinion(cid);
   await audit(req, "opinion_viewed", { cluster_id: cid });
   res.json({ opinion: op });
 }));
 app.get("/api/law/citator/:oid", requireAuth, lawLimiter, wrap(async (req, res) => {
   const oid = +req.params.oid; if (!oid) return res.status(400).json({ error: "Bad id" });
+  if (req.query.cluster && await lawdb.available()) { const r = await lawdb.citator(+req.query.cluster); if (r.cited_by || (await lawdb.opinion(+req.query.cluster))) return res.json(r); }
   res.json(await cl.citator(oid));
+}));
+app.get("/api/law/stats", requireAuth, wrap(async (req, res) => res.json({ available: await lawdb.available(), rows: await lawdb.stats() })));
+
+// ---------- bulk case-law loader (GitHub Actions job → here). Token-protected. ----------
+function ingestAuth(req, res, next) {
+  const tok = (process.env.SYNC_TOKEN || "").trim(), given = String(req.get("X-Cron-Token") || "").trim();
+  if (!tok || given.length !== tok.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(tok))) return res.status(403).json({ error: "Forbidden" });
+  next();
+}
+app.post("/api/ingest/log", ingestAuth, (req, res) => { console.log("[loader]", String(req.body?.msg || "").slice(0, 2000)); res.json({ ok: true }); });
+app.post("/api/ingest/opinions", ingestAuth, wrap(async (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  const cols = ["opinion_id", "cluster_id", "court_id", "coa", "origin_county", "docket_number", "case_name", "date_filed", "citations", "judges", "cite_count", "precedential", "op_type", "text"];
+  let n = 0;
+  for (let i = 0; i < rows.length; i += 50) {
+    const chunk = rows.slice(i, i + 50), params = [];
+    const values = chunk.map(r => "(" + cols.map(c => { params.push(r[c] === "" || r[c] === undefined ? null : r[c]); return "$" + params.length; }).join(",") + ")").join(",");
+    await q(`INSERT INTO tx_opinions(${cols.join(",")}) VALUES ${values}
+      ON CONFLICT(opinion_id) DO UPDATE SET ${cols.slice(1).map(c => `${c}=EXCLUDED.${c}`).join(",")}`, params);
+    n += chunk.length;
+  }
+  res.json({ ok: true, n });
+}));
+app.post("/api/ingest/cites", ingestAuth, wrap(async (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  for (let i = 0; i < rows.length; i += 1000) {
+    const chunk = rows.slice(i, i + 1000);
+    await q(`INSERT INTO tx_cites(citing, cited, depth) SELECT * FROM unnest($1::bigint[], $2::bigint[], $3::int[]) ON CONFLICT DO NOTHING`,
+      [chunk.map(r => r[0]), chunk.map(r => r[1]), chunk.map(r => r[2] || 1)]);
+  }
+  res.json({ ok: true, n: rows.length });
+}));
+app.post("/api/ingest/done", ingestAuth, wrap(async (req, res) => {
+  await q("ANALYZE tx_opinions"); await q("ANALYZE tx_cites");
+  console.log("[loader] done", JSON.stringify(req.body || {}), "rows now:", (await q("SELECT count(*)::int n FROM tx_opinions")).rows[0].n);
+  res.json({ ok: true });
 }));
 app.get("/api/research", requireAuth, wrap(async (req, res) => {
   const params = [req.user.id]; let w = "r.user_id=$1";

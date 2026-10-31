@@ -1,0 +1,95 @@
+# Loads Texas case law (last 15 years, full text) from CourtListener's free bulk files into TX Case Desk.
+# Runs on GitHub's free machines. Manual start, plus monthly refresh after new bulk files are published.
+name: Load Texas case law
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "How many years back"
+        default: "15"
+  schedule:
+    - cron: "23 9 6 * *"   # 6th of each month, 09:23 UTC
+
+env:
+  APP_URL: https://tx-case-desk.onrender.com
+  BUCKET: s3://com-courtlistener-storage/bulk-data/
+  YEARS: ${{ github.event.inputs.years || '15' }}
+
+jobs:
+  find:
+    runs-on: ubuntu-latest
+    outputs:
+      dockets: ${{ steps.f.outputs.dockets }}
+      clusters: ${{ steps.f.outputs.clusters }}
+      citations: ${{ steps.f.outputs.citations }}
+      opinions: ${{ steps.f.outputs.opinions }}
+      citemap: ${{ steps.f.outputs.citemap }}
+    steps:
+      - id: f
+        name: Find newest bulk files
+        run: |
+          aws s3 ls --no-sign-request "$BUCKET" --region us-west-2 | awk '{print $4}' > list.txt
+          pick() { grep -E "^$1-[0-9]{4}-[0-9]{2}-[0-9]{2}\.csv\.bz2$" list.txt | sort | tail -1; }
+          for k in dockets:dockets clusters:opinion-clusters citations:citations opinions:opinions citemap:citation-map; do
+            v=$(pick "${k#*:}"); echo "${k%%:*}=$v" >> "$GITHUB_OUTPUT"; echo "${k%%:*} -> $v"
+            [ -n "$v" ] || { echo "Missing ${k#*:} file"; tail -50 list.txt; exit 1; }
+          done
+
+  dockets:
+    needs: find
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y lbzip2 >/dev/null
+      - name: Texas dockets
+        env: { SYNC_TOKEN: "${{ secrets.SYNC_TOKEN }}" }
+        run: aws s3 cp --no-sign-request --region us-west-2 "$BUCKET${{ needs.find.outputs.dockets }}" - | lbzip2 -dc | python3 scripts/load_texas.py dockets
+      - uses: actions/upload-artifact@v4
+        with: { name: tx-dockets, path: tx_dockets.tsv, retention-days: 3 }
+
+  clusters:
+    needs: [find, dockets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: tx-dockets }
+      - run: sudo apt-get install -y lbzip2 >/dev/null
+      - name: Texas decisions
+        env: { SYNC_TOKEN: "${{ secrets.SYNC_TOKEN }}" }
+        run: aws s3 cp --no-sign-request --region us-west-2 "$BUCKET${{ needs.find.outputs.clusters }}" - | lbzip2 -dc | python3 scripts/load_texas.py clusters
+      - name: Reporter citations
+        env: { SYNC_TOKEN: "${{ secrets.SYNC_TOKEN }}" }
+        run: aws s3 cp --no-sign-request --region us-west-2 "$BUCKET${{ needs.find.outputs.citations }}" - | lbzip2 -dc | python3 scripts/load_texas.py citations
+      - uses: actions/upload-artifact@v4
+        with: { name: tx-clusters, path: tx_clusters.jsonl, retention-days: 3 }
+
+  opinions:
+    needs: [find, clusters]
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: tx-clusters }
+      - run: sudo apt-get install -y lbzip2 >/dev/null
+      - name: Texas opinions (full text) -> app
+        env: { SYNC_TOKEN: "${{ secrets.SYNC_TOKEN }}" }
+        run: aws s3 cp --no-sign-request --region us-west-2 "$BUCKET${{ needs.find.outputs.opinions }}" - | lbzip2 -dc | python3 scripts/load_texas.py opinions
+      - uses: actions/upload-artifact@v4
+        with: { name: tx-opinion-ids, path: tx_opinion_ids.txt, retention-days: 3 }
+
+  citemap:
+    needs: [find, opinions]
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: tx-opinion-ids }
+      - run: sudo apt-get install -y lbzip2 >/dev/null
+      - name: Who-cites-whom -> app
+        env: { SYNC_TOKEN: "${{ secrets.SYNC_TOKEN }}" }
+        run: aws s3 cp --no-sign-request --region us-west-2 "$BUCKET${{ needs.find.outputs.citemap }}" - | lbzip2 -dc | python3 scripts/load_texas.py citemap

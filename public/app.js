@@ -1,6 +1,7 @@
 // TX Case Desk — front end
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
+const ordn = n => n + (n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th"); // 1st..15th
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 function toast(m) { const t = $("#toast"); t.textContent = m; t.style.display = "block"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 3000); }
 
@@ -14,7 +15,7 @@ async function api(path, opts = {}) {
 let META = null, me = null, tab = "cases";
 const caseF = { view: "mine", county: "", type: "", attorney: "" };
 let firmUsers = null;
-const law = { q: "", court: "", after: "", results: null, open: null };
+const law = { q: "", court: "", after: "", county: "", results: null, open: null };
 
 // ---------------- auth screens ----------------
 function authView(mode = "login", msg = "") {
@@ -252,11 +253,13 @@ function renderAnalysis(r, at) {
   const op = o => `<a class="link" data-c="${o.cluster_id}">${esc(o.case_name)}</a> <span class="mute">${esc(o.citation || "")} · ${esc(o.court)} · ${esc(o.date_filed || "")}</span>`;
   const ranked = r.paths.filter(p => p.enough), thin = r.paths.filter(p => !p.enough);
   $("#ar").innerHTML = `
-  <div class="card"><div class="mute">Run ${new Date(at).toLocaleString()} · ${r.total_opinions.toLocaleString()} Texas opinions (last 10 yrs) match: ${esc(r.mode)}</div>
+  <div class="card"><div class="mute">Run ${new Date(at).toLocaleString()} · ${r.total_opinions.toLocaleString()} Texas opinions (last 10 yrs) match: ${esc(r.mode)}${r.source ? ` · Source: ${esc(r.source)}` : ""}</div>
    ${r.trend ? `<p style="margin:8px 0 0"><b>Trend:</b> ${esc(r.trend.path)} — ${r.trend.recentRate ?? "–"}% upheld in the last 3 years (${r.trend.recentN} cases) vs ${r.trend.olderRate ?? "–"}% before (${r.trend.olderN}). <b>${esc(r.trend.direction)}</b>.</p>` : ""}</div>
   <div class="card"><h3>Ways forward — ranked</h3><p class="mute">How often Texas appeals courts upheld each path in cases on these issues.</p>
    ${ranked.map((p, i) => `<div style="border-top:1px solid var(--line);padding:10px 0"><div class="row"><span class="tag ${i === 0 ? "g" : "n"}">#${i + 1}</span><b>${esc(p.label)}</b></div>
-     <div style="font-size:14px;margin-top:4px">Upheld <b>${p.rate}%</b> — ${p.upheld} upheld, ${p.reversed} reversed (${p.n} cases)</div>${bar(p.rate)}
+     <div style="font-size:14px;margin-top:4px">Upheld <b>${p.rate}%</b> <span class="mute">(${esc(p.basis)})</span></div>${bar(p.rate)}
+     ${p.binding ? `<div class="mute" style="margin-top:4px">Binding courts (Tex. Sup. Ct. + ${esc(r.appeals || "")}): ${p.binding.upheld} upheld, ${p.binding.reversed} reversed${p.binding.rate != null ? ` (${p.binding.rate}%)` : ""}</div>` : ""}
+     <div class="mute">All Texas courts: ${p.upheld} upheld, ${p.reversed} reversed (${p.n} cases)</div>
      ${p.examples?.length ? `<div style="margin-top:8px;font-size:14px">${p.examples.map(op).join("<br>")}</div>` : ""}</div>`).join("") || `<p class="mute">Not enough appellate cases on these issues to rank paths. Try broader issues.</p>`}
    ${thin.length ? `<p class="mute" style="margin-bottom:0">Too few cases to rank: ${thin.map(p => `${esc(p.label)} (${p.n})`).join(", ")}</p>` : ""}</div>
   <div class="card"><h3>Top authorities</h3><p class="mute">Ranked by court (Texas Supreme Court first), how recent, and how often cited.</p>
@@ -270,16 +273,20 @@ function lawView(autoSearch) {
   if (law.open) return opinionView(law.open);
   $("#app").innerHTML = `<div class="card"><h2>Texas case law</h2>
    <form id="lf"><div class="grid"><div class="full"><label>Search words (use quotes for phrases, AND / OR)</label><input name="q" value="${esc(law.q)}" placeholder='"constructive notice" AND premises'></div>
-   <div><label>Court</label><select name="court"><option value="">All Texas courts</option>${Object.entries(META.courts).map(([k, v]) => `<option value="${k}" ${law.court === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+   <div><label>Court</label><select name="court"><option value="">All Texas courts</option>${Object.entries(META.courts).map(([k, v]) => `<option value="${k}" ${law.court === k ? "selected" : ""}>${v}</option>`).join("")}
+     ${META.localLaw ? Array.from({ length: 15 }, (_, i) => i + 1).map(n => `<option value="coa${n}" ${law.court === "coa" + n ? "selected" : ""}>${ordn(n)} Court of Appeals only</option>`).join("") : ""}</select></div>
+   ${META.localLaw ? `<div><label>Appeal from county</label><select name="county"><option value="">Any county</option>${META.counties.map(c => `<option ${law.county === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></div>` : ""}
    <div><label>Decided after</label><input name="after" type="date" value="${esc(law.after)}"></div></div><br><button class="btn">Search</button></form>
-   <p class="mute" style="margin-bottom:0">Source: public Texas court opinions (via CourtListener / Free Law Project). Flags are our own citator, not Lexis/Westlaw.</p></div><div id="res"></div>`;
+   <p class="mute" style="margin-bottom:0">Source: public Texas court opinions (CourtListener / Free Law Project)${META.localLaw ? ` — ${Number(META.lawCount).toLocaleString()} opinions in our database` : ""}. Flags are our own citator, not Lexis/Westlaw.</p></div><div id="res"></div>`;
   $("#lf").onsubmit = e => { e.preventDefault(); Object.assign(law, Object.fromEntries(new FormData(e.target))); runSearch(); };
   if (law.results) renderResults(); else if (autoSearch && law.q) runSearch();
 }
 async function runSearch() {
   if (law.q.trim().length < 2) return toast("Enter search words");
   $("#res").innerHTML = `<div class="card mute">Searching Texas opinions…</div>`;
-  try { law.results = await api(`/api/law/search?${new URLSearchParams({ q: law.q, court: law.court, after: law.after })}`); renderResults(); }
+  const prm = { q: law.q, after: law.after, county: law.county || "" };
+  if (/^coa\d+$/.test(law.court)) prm.coa = law.court.slice(3); else prm.court = law.court;
+  try { law.results = await api(`/api/law/search?${new URLSearchParams(prm)}`); renderResults(); }
   catch (e) { $("#res").innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
 }
 function renderResults() {
@@ -287,7 +294,7 @@ function renderResults() {
   $("#res").innerHTML = `<div class="mute" style="margin:0 4px 8px">${(r.count || 0).toLocaleString()} opinions${r.stale ? " (cached)" : ""}</div>` +
     (r.results.map(o => `<div class="card"><div class="mute">${esc(o.court)} · ${esc(o.date_filed || "")}</div>
      <h3 style="margin-top:4px"><a class="link" data-c="${o.cluster_id}">${esc(o.case_name)}</a></h3>
-     <div class="mute">${esc(o.citation || "No reporter cite")} · cited ${o.cite_count}×</div>
+     <div class="mute">${esc(o.citation || "No reporter cite")} · cited ${o.cite_count}×${o.origin_county ? ` · appeal from ${esc(o.origin_county)} County` : ""}</div>
      ${o.snippet ? `<p style="margin:6px 0 0;font-size:14px">${esc(o.snippet)}…</p>` : ""}</div>`).join("") || `<div class="card mute">No opinions found.</div>`);
   $$("[data-c]").forEach(a => a.onclick = () => { law.open = +a.dataset.c; opinionView(law.open); window.scrollTo(0, 0); });
 }
@@ -310,7 +317,7 @@ async function opinionView(cid) {
   $("#save").onclick = async () => { try { await api("/api/research", { method: "POST", body: { case_id: +$("#sc").value || null, cluster_id: cid, case_name: op.case_name, citation: op.citations, note: $("#sn").value } }); toast("Saved"); } catch (e) { fail(e); } };
   if (!op.opinion_id) { $("#flag").innerHTML = ""; $("#cit .mute").textContent = "Not available."; return; }
   try {
-    const c = await api(`/api/law/citator/${op.opinion_id}`);
+    const c = await api(`/api/law/citator/${op.opinion_id}?cluster=${cid}`);
     $("#flag").innerHTML = c.flag === "caution" ? `<span class="tag y">⚠ Caution – ${c.negative_count} citing opinion(s) use negative-treatment language. Review.</span>`
       : c.flag === "cited" ? `<span class="tag g">Cited by ${c.cited_by} – no negative-treatment language found</span>` : `<span class="tag n">No citing opinions found</span>`;
     $("#cit").innerHTML = `<h3>Citing references (${c.cited_by})</h3>` + (c.citing.map(x => `<div style="margin:8px 0">${x.negative ? `<span class="tag y">review</span> ` : ""}<a class="link" data-c="${x.cluster_id}">${esc(x.case_name)}</a> <span class="mute">${esc(x.citation)} · ${esc(x.court)} · ${esc(x.date_filed || "")}</span></div>`).join("") || `<p class="mute">None found.</p>`);
