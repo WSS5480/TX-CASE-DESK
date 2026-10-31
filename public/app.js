@@ -82,12 +82,14 @@ function renderNav() {
   n.innerHTML = tabs.map(([k, v]) => `<button data-t="${k}" class="${tab === k ? "on" : ""}">${v}</button>`).join("");
   n.querySelectorAll("button").forEach(b => b.onclick = () => { tab = b.dataset.t; renderNav(); show(); });
 }
-function show() { clearTimeout(courtPoll); ({ inbox: inboxView, cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab](); window.scrollTo(0, 0); }
+function show() { subView = false; clearTimeout(courtPoll); ({ inbox: inboxView, cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab](); window.scrollTo(0, 0); }
 
 // ---------------- inbox (court emails) ----------------
 const TYPE_TAG = { "Hearing / setting": "y", "New filing": "g", "Order / judgment": "r", "Case notice": "n", "Account activation": "n", "Email": "n" };
-async function inboxView() {
-  $("#app").innerHTML = `<div class="card mute">Loading inbox…</div>`;
+let subView = false;
+async function inboxView(quiet) {
+  subView = false;
+  if (!quiet) $("#app").innerHTML = `<div class="card mute">Loading inbox…</div>`;
   let r, mb; try { [r, mb] = await Promise.all([api("/api/inbox"), api("/api/mail").catch(() => null)]); } catch (e) { return fail(e); }
   inboxUnread = r.unread; renderNav();
   const conn = mb && mb.mailboxes.find(x => x.status === "ok" || x.status === "syncing");
@@ -110,6 +112,7 @@ async function inboxView() {
   $$("[data-open]").forEach(c => c.onclick = () => emailView(+c.dataset.open));
 }
 async function emailView(id) {
+  subView = true;
   window.scrollTo(0, 0);
   let r; try { r = await api(`/api/email-alerts/${id}`); } catch (e) { return fail(e); }
   const m = r.email, sm = r.summary;
@@ -132,7 +135,7 @@ async function emailView(id) {
   const showT = () => { $("#exact").innerHTML = `<div class="optext" style="font-family:inherit;font-size:14px">${linkify(m.body || "(empty)")}</div>`; $("#vT").className = "btn sm"; if ($("#vF")) $("#vF").className = "btn sm ghost"; };
   if ($("#vF")) $("#vF").onclick = showF; $("#vT").onclick = showT;
   m.html ? showF() : showT();
-  $("#bk").onclick = inboxView;
+  $("#bk").onclick = () => inboxView();
   $$("[data-case]").forEach(a => a.onclick = () => { tab = "cases"; caseF.view = "firm"; renderNav(); show(); });
   inboxUnread = Math.max(0, inboxUnread - 1); renderNav();
 }
@@ -526,11 +529,44 @@ function accountView() {
   $("#out").onclick = async () => { await api("/api/logout", { method: "POST" }).catch(() => {}); me = null; authView(); };
 }
 
+// ---------------- auto refresh + pull to refresh ----------------
+let appVer = null;
+async function checkVersion() {
+  try { const { v } = await api("/api/version"); if (appVer && v !== appVer) return location.reload(); appVer = v; } catch {}
+}
+function busy() { const a = document.activeElement; return a && /INPUT|TEXTAREA|SELECT/.test(a.tagName); }
+async function autoRefresh() {
+  if (document.hidden || !me || !me.id || busy()) return;
+  await checkVersion();
+  if (tab === "inbox" && !subView) { const y = window.scrollY; await inboxView(true); window.scrollTo(0, y); }
+  else if (tab === "inbox" || tab === "cases") { try { const r = await api("/api/inbox"); inboxUnread = r.unread; renderNav(); } catch {} }
+}
+setInterval(autoRefresh, 60e3);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) autoRefresh(); });
+(() => {
+  const ind = document.createElement("div");
+  ind.style.cssText = "position:fixed;top:0;left:0;right:0;text-align:center;font-size:14px;padding:8px;color:var(--mute,#666);transform:translateY(-100%);transition:transform .15s;z-index:999;pointer-events:none";
+  document.body.appendChild(ind);
+  let y0 = null, pull = 0;
+  addEventListener("touchstart", e => { y0 = window.scrollY <= 0 && e.touches.length === 1 ? e.touches[0].clientY : null; pull = 0; }, { passive: true });
+  addEventListener("touchmove", e => {
+    if (y0 === null) return; pull = e.touches[0].clientY - y0;
+    if (pull <= 0) { ind.style.transform = "translateY(-100%)"; return; }
+    ind.textContent = pull > 80 ? "↻ Release to refresh" : "↓ Pull to refresh";
+    ind.style.transform = `translateY(${Math.min(pull, 100) - 40}px)`;
+  }, { passive: true });
+  addEventListener("touchend", async () => {
+    if (y0 === null) return; y0 = null;
+    if (pull > 80 && me && me.id) { ind.textContent = "Refreshing…"; await checkVersion(); if (tab === "inbox" && subView) await inboxView(); else show(); }
+    ind.style.transform = "translateY(-100%)"; pull = 0;
+  });
+})();
+
 // ---------------- boot ----------------
 (async () => {
   try { META = await api("/api/meta"); } catch (e) { $("#app").innerHTML = `<div class="card err">Can't reach server.</div>`; return; }
   const qs = new URLSearchParams(location.search);
-  if (qs.get("connected") || qs.get("mailerror")) { tab = /firm/.test(qs.get("connected") || "") ? "firm" : "court"; history.replaceState(null, "", "/"); setTimeout(() => toast(qs.get("connected") ? `Email connected: ${qs.get("connected")} — checking court emails now` : qs.get("mailerror")), 600); }
+  if (qs.get("connected") || qs.get("mailerror")) { tab = /firm/.test(qs.get("connected") || "") ? "firm" : "inbox"; history.replaceState(null, "", "/"); setTimeout(() => toast(qs.get("connected") ? `Email connected: ${qs.get("connected")} — checking court emails now` : qs.get("mailerror")), 600); }
   try { me = (await api("/api/me")).user; start(); }
   catch (e) { e.code === "CHANGE_PW" ? (me = { must_change_pw: true }, changePwView(true)) : authView(qs.get("signup") || qs.get("code") ? "signup" : "login"); }
 })();

@@ -80,6 +80,8 @@ const requireAuth = wrap(async (req, res, next) => {
 const requireAdmin = (req, res, next) => req.user.role === "admin" ? next() : res.status(403).json({ error: "Firm admins only" });
 
 // ---------- reference ----------
+const VERSION = (process.env.RENDER_GIT_COMMIT || String(Date.now())).slice(0, 12);
+app.get("/api/version", (req, res) => { res.set("Cache-Control", "no-store"); res.json({ v: VERSION }); });
 app.get("/api/meta", wrap(async (req, res) => res.json({ counties: COUNTIES, appeals: APPEALS, connectors: CONNECTORS, courts: cl.TX_COURTS, localLaw: await lawdb.available(), lawCount: await lawdb.size().catch(() => 0), tokenSet: !!process.env.COURTLISTENER_TOKEN })));
 app.get("/healthz", (req, res) => res.send("ok"));
 
@@ -576,7 +578,7 @@ app.delete("/api/research/:id", requireAuth, wrap(async (req, res) => {
 }));
 
 // ---------- static + errors ----------
-app.use(express.static(path.join(__dirname, "public"), { index: "index.html" }));
+app.use(express.static(path.join(__dirname, "public"), { index: "index.html", setHeaders: r => r.setHeader("Cache-Control", "no-cache") }));
 app.use((req, res) => req.path.startsWith("/api") ? res.status(404).json({ error: "Not found" }) : res.sendFile(path.join(__dirname, "public", "index.html")));
 app.use((err, req, res, next) => {
   if (err instanceof cl.CLError) return res.status(err.status || 502).json({ error: err.message });
