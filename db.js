@@ -143,6 +143,27 @@ CREATE TABLE IF NOT EXISTS inbound_emails (
 CREATE INDEX IF NOT EXISTS inbound_user ON inbound_emails(user_id, received_at DESC);
 ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS html TEXT;
 ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ;
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS ext_id TEXT;
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'forward';
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS parsed JSONB;
+CREATE UNIQUE INDEX IF NOT EXISTS inbound_ext ON inbound_emails(user_id, ext_id) WHERE ext_id IS NOT NULL;
+-- attorneys' connected mailboxes (Outlook / Gmail), read-only, court senders only
+CREATE TABLE IF NOT EXISTS mailboxes (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,          -- microsoft | google
+  email TEXT,
+  enc_refresh TEXT NOT NULL,
+  enc_access TEXT,
+  access_expires TIMESTAMPTZ,
+  status TEXT DEFAULT 'ok',
+  last_sync TIMESTAMPTZ,
+  last_seen TIMESTAMPTZ,           -- newest email time already processed
+  last_error TEXT,
+  stats JSONB,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE (user_id, provider)
+);
 -- Texas case law loaded from CourtListener bulk files (one row per opinion; a cluster = one decision)
 CREATE TABLE IF NOT EXISTS tx_opinions (
   opinion_id BIGINT PRIMARY KEY,

@@ -13,6 +13,7 @@ const { pool, q, migrate } = require("./db");
 const analysis = require("./analysis");
 const lawdb = require("./lawdb");
 const inbound = require("./inbound");
+const mail = require("./mail");
 const cl = require("./courtlistener");
 const { COUNTIES, APPEALS, CONNECTORS } = require("./counties");
 const sync = require("./sync");
@@ -375,6 +376,34 @@ app.get("/api/admin/inspect/:county", requireAuth, requireAdmin, rateLimit({ win
   if (!conn) return res.status(404).json({ error: "No connector" });
   try { const r = await sync.MODULES[conn.type].inspect({ baseUrl: conn.url }); console.log("[inspect]", JSON.stringify(r)); res.json(r); }
   catch (e) { console.error("[inspect] failed", e.message); res.status(502).json({ error: e.message }); }
+}));
+
+// ---------- connected mailboxes (Connect Outlook / Connect Gmail) ----------
+app.get("/api/mail", requireAuth, wrap(async (req, res) => {
+  const { rows } = await q("SELECT id, provider, email, status, last_sync, last_error, stats FROM mailboxes WHERE user_id=$1 ORDER BY provider", [req.user.id]);
+  for (const r of rows) if (mail.running.has(r.id)) r.status = "syncing";
+  res.json({ configured: mail.configured(), names: Object.fromEntries(Object.entries(mail.PROVIDERS).map(([k, v]) => [k, v.name])), mailboxes: rows });
+}));
+app.get("/api/mail/connect/:provider", requireAuth, (req, res) => {
+  const p = req.params.provider;
+  if (!mail.PROVIDERS[p] || !mail.configured()[p]) return res.redirect("/?mailerror=" + encodeURIComponent("That email provider isn't switched on yet."));
+  res.redirect(mail.startUrl(p, req.user.id));
+});
+app.get("/api/mail/callback/:provider", async (req, res) => {
+  try {
+    if (req.query.error) throw new Error(req.query.error_description || "Access was not allowed.");
+    const r = await mail.finish(req.params.provider, String(req.query.code || ""), String(req.query.state || ""));
+    res.redirect("/?connected=" + encodeURIComponent(r.email || req.params.provider));
+  } catch (e) { console.error("[mail] connect failed", e.message); res.redirect("/?mailerror=" + encodeURIComponent(e.message.slice(0, 200))); }
+});
+app.post("/api/mail/:id/sync", requireAuth, wrap(async (req, res) => {
+  const { rows } = await q("SELECT id FROM mailboxes WHERE id=$1 AND user_id=$2", [+req.params.id, req.user.id]);
+  if (!rows[0]) return res.status(404).json({ error: "Not found" });
+  mail.syncMailbox(rows[0].id).catch(() => {}); res.json({ started: true });
+}));
+app.delete("/api/mail/:id", requireAuth, wrap(async (req, res) => {
+  await q("DELETE FROM mailboxes WHERE id=$1 AND user_id=$2", [+req.params.id, req.user.id]);
+  await audit(req, "mailbox_disconnected", { id: +req.params.id }); res.json({ ok: true });
 }));
 
 // ---------- re:SearchTX alert emails (Postmark inbound webhook) ----------

@@ -113,6 +113,7 @@ async function hourly() {
     const f = await q("SELECT l.id FROM court_logins l JOIN users u ON u.id=l.user_id WHERE u.active AND (l.last_sync IS NULL OR l.last_sync < now() - interval '24 hours') LIMIT 10");
     for (const r of f.rows) { await runSync(r.id, "scheduled"); summary.full_pulls++; }
     summary.law_checks = await lawWatch();
+    try { summary.mailboxes = await require("./mail").syncAll(); } catch (e) { console.error("[mail] hourly", e.message); }
   } finally { hourlyRunning = false; }
   console.log("[sync] hourly done", JSON.stringify(summary));
   return summary;

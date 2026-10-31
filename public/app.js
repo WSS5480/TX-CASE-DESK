@@ -133,13 +133,25 @@ async function emailView(id) {
 let courtPoll;
 async function courtView() {
   clearTimeout(courtPoll);
-  let d, ea; try { [d, ea] = await Promise.all([api("/api/court-logins"), api("/api/email-alerts")]); } catch (e) { return fail(e); }
+  let d, ea, mb; try { [d, ea, mb] = await Promise.all([api("/api/court-logins"), api("/api/email-alerts"), api("/api/mail")]); } catch (e) { return fail(e); }
   const byCounty = Object.fromEntries(d.logins.map(l => [l.county, l]));
   const ago = t => t ? new Date(t).toLocaleString() : "never";
   $("#app").innerHTML = `<div class="card"><h2>Court logins</h2>
    <p class="mute">Your cases are pulled from each county portal under <b>your</b> login and <b>your</b> bar # (${esc(me.bar_number || "not set")}) — only for counties you picked. Pulls run when you sign in, nightly, and when you tap Sync now. Passwords are encrypted and never shown again.</p>
    ${d.bar_ok ? "" : `<p class="err">Your account needs an 8-digit bar # before cases can be pulled.</p>`}</div>
-   <div class="card"><h2>📨 Court updates (re:SearchTX)</h2>
+   <div class="card"><h2>📬 Connect your email</h2>
+   <p style="margin-top:0">You already get court emails — eFileTexas service notices, clerk notices, hearing settings. Connect your email once and TX Case Desk reads <b>only those court emails</b>, adds new cases, and updates your existing ones automatically.</p>
+   ${["microsoft", "google"].map(p => { const m = mb.mailboxes.find(x => x.provider === p);
+     if (m) return `<div style="border-top:1px solid var(--line);padding:10px 0"><div class="row"><b>${esc(mb.names[p])}</b>
+       <span class="tag ${m.status === "ok" ? "g" : m.status === "syncing" ? "y" : "r"}">${m.status === "ok" ? "Connected" : m.status === "syncing" ? "Checking…" : m.status === "reconnect" ? "Reconnect needed" : "Error"}</span></div>
+       <div class="mute">${esc(m.email || "")}${m.last_sync ? " · last checked " + new Date(m.last_sync).toLocaleString() : ""}${m.stats ? ` · ${m.stats.added} new court emails, ${m.stats.created} cases added` : ""}</div>
+       ${m.last_error ? `<p class="err" style="margin:4px 0">${esc(m.last_error)}</p>` : ""}
+       <div class="row" style="margin-top:6px">${m.status === "reconnect" ? `<a class="btn sm" href="/api/mail/connect/${p}" style="text-decoration:none">Reconnect</a>` : `<button class="btn sm" data-msync="${m.id}">Check now</button>`}<button class="btn sm danger" data-mdel="${m.id}">Disconnect</button></div></div>`;
+     return mb.configured[p] ? `<a class="btn" href="/api/mail/connect/${p}" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Connect ${p === "microsoft" ? "Outlook / Microsoft 365" : "Gmail"}</a>`
+       : `<button class="btn ghost" disabled style="display:block;width:100%;margin:8px 0;padding:14px">Connect ${p === "microsoft" ? "Outlook / Microsoft 365" : "Gmail"} — coming soon</button>`; }).join("")}
+   <p class="mute" style="margin-bottom:0;font-size:13px">Read-only. Only emails from courts, clerks, eFileTexas and re:SearchTX are read; everything else is ignored and never stored. Checked every hour. Disconnect anytime.</p></div>
+   <details class="card"><summary>Other ways (re:SearchTX alerts / forwarding)</summary>
+   <div class="card" style="margin-top:10px"><h2>📨 Court updates (re:SearchTX)</h2>
    ${!ea.configured ? `<p class="mute">Court updates aren't switched on for this app yet.</p>` : `
    <p style="margin-top:0">Get filing and hearing updates on your cases automatically — no email settings to change.</p>
    ${ea.emails.some(m => /re:?search|tylertech/i.test(m.from_addr + m.subject)) ? `<p><span class="tag g">Connected</span> <span class="mute">re:SearchTX is sending to this app.</span></p>` : `<p><span class="tag n">Not connected yet</span></p>`}
@@ -152,7 +164,8 @@ async function courtView() {
    <p class="mute" style="margin:0">Updates then show in your <b>Inbox</b> and on matching cases in <b>Pending Cases</b>. Keep your State Bar eService email as your real inbox (<a class="link" href="https://www.texasbar.com" target="_blank" rel="noopener">texasbar.com</a> → My Bar Page) — don't change it.
    Help: <a class="link" href="https://research.txcourts.gov/CourtRecordsSearch/Assets/site/faq/TX_faq_Jan_1_2022.html" target="_blank" rel="noopener">re:SearchTX FAQ</a> · research.support@tylertech.com · (844) 307-8720</p>
    <details style="margin-top:8px"><summary class="mute">Already get re:SearchTX emails at your own address?</summary><p class="mute" style="font-size:14px">You can forward any of them to the address above (one at a time, or with a Gmail/Outlook rule) and they'll match the same way.</p></details>
-   <h3 style="margin-top:12px">Recent alerts</h3>
+   </div></details><div class="card">
+   <h3 style="margin-top:0">Recent court emails</h3>
    ${ea.emails.length ? ea.emails.map(m => `<div style="border-top:1px solid var(--line);padding:8px 0"><b>${esc(m.subject || "(no subject)")}</b><div class="mute">${new Date(m.received_at).toLocaleString()} · ${esc(m.from_addr)}</div>
      <div class="mute">${(m.matched_case_ids || []).length} matched case(s)${m.unmatched.length ? ` · not in your list yet: ${m.unmatched.map(esc).join(", ")}` : ""}</div>
      <button class="btn sm ghost" data-view="${m.id}" style="margin-top:6px">View email</button><div data-body="${m.id}"></div></div>`).join("") : `<p class="mute">No alert emails received yet.</p>`}`}</div>
@@ -189,6 +202,9 @@ async function courtView() {
     try { const m = (await api(`/api/email-alerts/${b.dataset.view}`)).email;
       box.innerHTML = `<div class="optext" style="font-family:inherit;font-size:14px;margin-top:8px;max-height:50vh">${linkify(m.body || "(empty)")}</div>`; b.textContent = "Hide email"; } catch (e) { fail(e); }
   });
+  $$("[data-msync]").forEach(b => b.onclick = async () => { await api(`/api/mail/${b.dataset.msync}/sync`, { method: "POST" }); toast("Checking your email…"); setTimeout(courtView, 1500); });
+  $$("[data-mdel]").forEach(b => b.onclick = async () => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to disconnect"; return; } await api(`/api/mail/${b.dataset.mdel}`, { method: "DELETE" }); courtView(); });
+  if (mb.mailboxes.some(m => m.status === "syncing")) courtPoll = setTimeout(() => { if (tab === "court") courtView(); }, 4000);
   if ($("#goInbox")) $("#goInbox").onclick = () => { tab = "inbox"; renderNav(); show(); };
   const cpa = $("#cpAddr"); if (cpa) cpa.onclick = async () => { try { await navigator.clipboard.writeText(ea.address); toast("Address copied"); } catch (e) { toast(ea.address); } };
   const insp = $("#insp");
@@ -211,7 +227,7 @@ async function casesView() {
   const cs = data.cases;
   if (me.role === "admin" && !firmUsers) { try { firmUsers = (await api("/api/firm/users")).users; } catch (e) { firmUsers = []; } }
   app.innerHTML = `
-  ${data.alerts ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4"><b>⚠ ${data.alerts} case alert${data.alerts === 1 ? "" : "s"}</b> (court dates, re:SearchTX updates, new case law). <a class="link" id="seeAlerts">Show them</a></div>` : ""}
+  ${data.alerts ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4"><b>⚠ ${data.alerts} case alert${data.alerts === 1 ? "" : "s"}</b> (court dates, court emails, new case law). <a class="link" id="seeAlerts">Show them</a></div>` : ""}
   ${!me.counties.length ? `<div class="card"><b>Pick your counties first.</b> <span class="mute">You only see and add cases in counties you practice in.</span></div>` : ""}
   <div class="card"><div class="mute">Your counties</div><div style="font-weight:600">${esc(me.counties.join(", ") || "None selected")}</div>
    <div class="mute" style="margin-top:4px">Auto-pull: connect under <a class="link" id="goCourt">Court Logins</a> (live: ${esc(Object.entries(META.connectors).filter(([, v]) => v.status !== "blocked").map(([k]) => k).join(", ") || "none right now — use re:SearchTX alerts")}). Other counties: add cases below or import a CSV.</div></div>
@@ -264,7 +280,7 @@ function caseCard(c) {
    <div class="kv"><div><b>Cause #</b>${esc(c.cause_no)}</div><div><b>Type</b>${esc(c.case_type || "—")}</div><div><b>Filed</b>${c.filed_date ? String(c.filed_date).slice(0, 10) : "—"}</div>
    <div><b>Next</b>${esc(c.next_setting || "—")}</div><div><b>Appeals to</b>${esc(META.appeals[c.county] || "—")}</div><div><b>Attorney</b>${esc(c.attorney || "—")}</div></div>
    ${c.date_alert ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4;margin:10px 0 0;padding:10px"><b>⚠ Court date changed</b><div>${esc(c.date_alert)}</div><div class="mute">${c.date_alert_at ? new Date(c.date_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="ack" style="margin-top:6px">Got it</button></div>` : ""}
-   ${c.filing_alert ? `<div class="card" style="background:#e3f4ea;border-color:#bfe3cd;margin:10px 0 0;padding:10px"><b>📨 re:SearchTX update</b><div style="font-size:14px">${esc(c.filing_alert)}</div><div class="mute">${c.filing_alert_at ? new Date(c.filing_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="fileack" style="margin-top:6px">Got it</button></div>` : ""}
+   ${c.filing_alert ? `<div class="card" style="background:#e3f4ea;border-color:#bfe3cd;margin:10px 0 0;padding:10px"><b>📨 Court email</b><div style="font-size:14px">${esc(c.filing_alert)}</div><div class="mute">${c.filing_alert_at ? new Date(c.filing_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="fileack" style="margin-top:6px">Got it</button></div>` : ""}
    ${c.law_alert ? `<div class="card" style="background:#e8eefc;border-color:#c9d6f5;margin:10px 0 0;padding:10px"><b>📚 New case law</b><div style="font-size:14px">${esc(c.law_alert)}</div><button class="btn sm" data-a="lawack" style="margin-top:6px">Got it</button></div>` : ""}
    ${c.issues ? `<p class="mute" style="margin:8px 0 0">Issues: ${esc(c.issues)}</p>` : ""}
    ${c.notes ? `<p class="mute" style="margin:8px 0 0">${esc(c.notes)}</p>` : ""}
@@ -464,6 +480,8 @@ function accountView() {
 // ---------------- boot ----------------
 (async () => {
   try { META = await api("/api/meta"); } catch (e) { $("#app").innerHTML = `<div class="card err">Can't reach server.</div>`; return; }
+  const qs = new URLSearchParams(location.search);
+  if (qs.get("connected") || qs.get("mailerror")) { tab = "court"; history.replaceState(null, "", "/"); setTimeout(() => toast(qs.get("connected") ? `Email connected: ${qs.get("connected")} — checking court emails now` : qs.get("mailerror")), 600); }
   try { me = (await api("/api/me")).user; start(); }
   catch (e) { e.code === "CHANGE_PW" ? (me = { must_change_pw: true }, changePwView(true)) : authView(); }
 })();
