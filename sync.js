@@ -19,12 +19,22 @@ async function runSync(loginId, why = "manual") {
     if (!/^\d{8}$/.test(l.bar_number || "")) throw new Error("Attorney needs an 8-digit bar # on their account.");
     await q("UPDATE court_logins SET status='syncing' WHERE id=$1", [loginId]);
     const started = Date.now();
+    const w = await q("SELECT cause_no, external_url AS url FROM cases WHERE firm_id=$1 AND county=$2 AND watch_dates AND external_url IS NOT NULL", [l.firm_id, l.county]);
     const out = await MODULES[conn.type].sync({
       baseUrl: conn.url, username: l.username || null, password: l.enc_password ? box.open(l.enc_password) : null,
-      barNumber: l.bar_number, attorneyName: l.name
+      barNumber: l.bar_number, attorneyName: l.name, watchUrls: w.rows
     });
-    let added = 0, updated = 0;
+    let added = 0, updated = 0, dateChanges = 0;
     for (const c of out.cases) {
+      // Court-date change detection (compare before we overwrite)
+      const prev = (await q("SELECT id, next_setting, watch_dates FROM cases WHERE firm_id=$1 AND county=$2 AND cause_no=$3", [l.firm_id, l.county, c.cause_no])).rows[0];
+      if (prev && c.next_setting && prev.next_setting !== c.next_setting) {
+        await q("INSERT INTO case_changes(case_id, field, old_value, new_value) VALUES($1,'next_setting',$2,$3)", [prev.id, prev.next_setting, c.next_setting]);
+        if (prev.watch_dates) {
+          await q("UPDATE cases SET date_alert=$2, date_alert_at=now() WHERE id=$1", [prev.id, `${prev.next_setting || "No setting"} → ${c.next_setting}`]);
+          dateChanges++;
+        }
+      }
       const r = await q(`INSERT INTO cases(firm_id,user_id,county,cause_no,court,style,case_type,filed_date,status,next_setting,external_url,source,last_synced)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'county_sync',now())
         ON CONFLICT(firm_id,county,cause_no) DO UPDATE SET
@@ -36,7 +46,7 @@ async function runSync(loginId, why = "manual") {
         [l.firm_id, l.user_id, l.county, c.cause_no, c.court, c.style, c.case_type, c.filed_date, c.status, c.next_setting, c.external_url || null]);
       r.rows[0]?.inserted ? added++ : updated++;
     }
-    const result = { why, found: out.cases.length, added, updated, notes: out.notes, seconds: Math.round((Date.now() - started) / 1000) };
+    const result = { why, found: out.cases.length, added, updated, date_changes: dateChanges, notes: out.notes, seconds: Math.round((Date.now() - started) / 1000) };
     await q("UPDATE court_logins SET status='ok', last_sync=now(), last_result=$2, last_error=NULL WHERE id=$1", [loginId, result]);
     await q("INSERT INTO audit_log(user_id, firm_id, action, detail) VALUES($1,$2,'county_sync',$3)", [l.user_id, l.firm_id, { county: l.county, ...result }]);
     console.log(`[sync] login ${loginId} ${l.county}: found ${out.cases.length}, +${added}, ~${updated}`, out.notes.join(" | "));

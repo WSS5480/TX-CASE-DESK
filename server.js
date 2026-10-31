@@ -190,13 +190,14 @@ app.patch("/api/firm/users/:id", requireAuth, requireAdmin, wrap(async (req, res
 
 // ---------- pending cases ----------
 // Rule: attorneys only see/add cases in the counties they practice in — plus cases they explicitly track.
-const CASE_COLS = ["county", "cause_no", "court", "style", "case_type", "filed_date", "status", "next_setting", "notes", "tracked"];
+const CASE_COLS = ["county", "cause_no", "court", "style", "case_type", "filed_date", "status", "next_setting", "notes", "tracked", "watch_dates"];
 function cleanCase(b) {
   const o = {};
   for (const k of CASE_COLS) if (b[k] !== undefined) o[k] = typeof b[k] === "string" ? b[k].trim().slice(0, 500) : b[k];
   if (o.filed_date === "") o.filed_date = null;
   if (o.filed_date && !/^\d{4}-\d{2}-\d{2}$/.test(o.filed_date)) o.filed_date = null;
   if ("tracked" in o) o.tracked = !!o.tracked;
+  if ("watch_dates" in o) o.watch_dates = !!o.watch_dates;
   return o;
 }
 app.get("/api/cases", requireAuth, wrap(async (req, res) => {
@@ -205,10 +206,14 @@ app.get("/api/cases", requireAuth, wrap(async (req, res) => {
   let where = "c.firm_id=$1 AND (c.county = ANY($2) OR c.tracked)";
   if (view === "mine") { params.push(req.user.id); where += ` AND c.user_id=$${params.length}`; }
   if (view === "tracked") where += " AND c.tracked";
+  if (view === "alerts") where += " AND c.date_alert IS NOT NULL";
+  if (view === "watched") where += " AND c.watch_dates";
+  if (req.query.attorney) { params.push(+req.query.attorney); where += ` AND c.user_id=$${params.length}`; }
   if (county) { params.push(county); where += ` AND c.county=$${params.length}`; }
   if (type) { params.push(type); where += ` AND c.case_type=$${params.length}`; }
-  const { rows } = await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} ORDER BY c.filed_date DESC NULLS LAST, c.id DESC LIMIT 500`, params);
-  res.json({ cases: rows });
+  const { rows } = await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} ORDER BY (c.date_alert IS NOT NULL) DESC, c.filed_date DESC NULLS LAST, c.id DESC LIMIT 500`, params);
+  const al = await q("SELECT count(*)::int n FROM cases WHERE firm_id=$1 AND (county = ANY($2) OR tracked) AND date_alert IS NOT NULL" + (req.user.role === "paralegal" || req.user.role === "admin" ? "" : " AND user_id=$3"), req.user.role === "paralegal" || req.user.role === "admin" ? [req.user.firm_id, req.user.counties || []] : [req.user.firm_id, req.user.counties || [], req.user.id]);
+  res.json({ cases: rows, alerts: al.rows[0].n });
 }));
 app.post("/api/cases", requireAuth, wrap(async (req, res) => {
   const c = cleanCase(req.body || {});
@@ -230,6 +235,22 @@ app.patch("/api/cases/:id", requireAuth, wrap(async (req, res) => {
   if (!rows[0]) return res.status(404).json({ error: "Not found" });
   await audit(req, "case_updated", { id: rows[0].id, fields: cols });
   res.json({ case: rows[0] });
+}));
+app.post("/api/cases/:id/ack", requireAuth, wrap(async (req, res) => {
+  await q("UPDATE cases SET date_alert=NULL WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]);
+  await audit(req, "date_change_ack", { id: +req.params.id });
+  res.json({ ok: true });
+}));
+app.get("/api/cases/:id/changes", requireAuth, wrap(async (req, res) => {
+  const { rows } = await q("SELECT ch.* FROM case_changes ch JOIN cases c ON c.id=ch.case_id WHERE ch.case_id=$1 AND c.firm_id=$2 ORDER BY ch.at DESC LIMIT 50", [+req.params.id, req.user.firm_id]);
+  res.json({ changes: rows });
+}));
+// Firm admins: tick "watch court dates" on all of one attorney's cases at once.
+app.post("/api/cases/watch-all", requireAuth, wrap(async (req, res) => {
+  const uid = req.user.role === "admin" && req.body?.user_id ? +req.body.user_id : req.user.id;
+  const r = await q("UPDATE cases SET watch_dates=$3 WHERE firm_id=$1 AND user_id=$2", [req.user.firm_id, uid, req.body?.on !== false]);
+  await audit(req, "watch_all", { user_id: uid, on: req.body?.on !== false, count: r.rowCount });
+  res.json({ updated: r.rowCount });
 }));
 app.delete("/api/cases/:id", requireAuth, wrap(async (req, res) => {
   const r = await q("DELETE FROM cases WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]);

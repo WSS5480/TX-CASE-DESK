@@ -99,6 +99,17 @@ CREATE TABLE IF NOT EXISTS court_logins (
 );
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS external_url TEXT;
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS last_synced TIMESTAMPTZ;
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS watch_dates BOOLEAN DEFAULT false;
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS date_alert TEXT;
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS date_alert_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS case_changes (
+  id BIGSERIAL PRIMARY KEY,
+  case_id INT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  field TEXT NOT NULL,
+  old_value TEXT,
+  new_value TEXT,
+  at TIMESTAMPTZ DEFAULT now()
+);
 CREATE INDEX IF NOT EXISTS cases_firm_county ON cases(firm_id, county);
 CREATE INDEX IF NOT EXISTS audit_firm ON audit_log(firm_id, at DESC);
 `;

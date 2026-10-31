@@ -195,7 +195,7 @@ async function caseDetail(s, url, referer) {
   };
 }
 
-async function sync({ baseUrl, username, password, barNumber, attorneyName, maxCases = 200 }) {
+async function sync({ baseUrl, username, password, barNumber, attorneyName, maxCases = 200, watchUrls = [] }) {
   const s = new Session(baseUrl);
   const home = await login(s, username, password);
   const entries = searchLinks(home.url.includes("default") ? home : await s.req("default.aspx"));
@@ -217,7 +217,15 @@ async function sync({ baseUrl, username, password, barNumber, attorneyName, maxC
     try { Object.assign(base, Object.fromEntries(Object.entries(await caseDetail(s, r.detail, s.base)).filter(([, v]) => v))); } catch (e) { notes.push(`${r.cause_no} detail: ${e.message}`); }
     cases.push(base);
   }
-  return { cases, notes, diag: s.log };
+  // Watched cases that didn't come back in the bar search (closed, transferred, other counsel): re-read their detail page.
+  const seen = new Set(cases.map(c => c.external_url));
+  const watched = [];
+  for (const w of watchUrls.filter(w => w.url && !seen.has(w.url)).slice(0, 100)) {
+    try { watched.push({ cause_no: w.cause_no, external_url: w.url, ...(await caseDetail(s, w.url, s.base)) }); }
+    catch (e) { notes.push(`${w.cause_no} watch check: ${e.message}`); }
+  }
+  if (watched.length) notes.push(`Re-checked ${watched.length} watched case(s) outside the bar search`);
+  return { cases: cases.concat(watched), notes, diag: s.log };
 }
 
 // Fetch the portal pages and report their structure (used to tune a county's settings from server logs).

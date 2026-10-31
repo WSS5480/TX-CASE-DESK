@@ -12,7 +12,8 @@ async function api(path, opts = {}) {
 }
 
 let META = null, me = null, tab = "cases";
-const caseF = { view: "mine", county: "", type: "" };
+const caseF = { view: "mine", county: "", type: "", attorney: "" };
+let firmUsers = null;
 const law = { q: "", court: "", after: "", results: null, open: null };
 
 // ---------------- auth screens ----------------
@@ -131,14 +132,18 @@ async function casesView() {
   app.innerHTML = `<div class="card mute">Loading cases…</div>`;
   let data; try { data = await api(`/api/cases?${new URLSearchParams(caseF)}`); } catch (e) { return fail(e); }
   const cs = data.cases;
+  if (me.role === "admin" && !firmUsers) { try { firmUsers = (await api("/api/firm/users")).users; } catch (e) { firmUsers = []; } }
   app.innerHTML = `
+  ${data.alerts ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4"><b>⚠ ${data.alerts} court date change${data.alerts === 1 ? "" : "s"}</b> on watched cases. <a class="link" id="seeAlerts">Show them</a></div>` : ""}
   ${!me.counties.length ? `<div class="card"><b>Pick your counties first.</b> <span class="mute">You only see and add cases in counties you practice in.</span></div>` : ""}
   <div class="card"><div class="mute">Your counties</div><div style="font-weight:600">${esc(me.counties.join(", ") || "None selected")}</div>
    <div class="mute" style="margin-top:4px">Auto-pull: connect under <a class="link" id="goCourt">Court Logins</a> (live: ${esc(Object.keys(META.connectors).join(", "))}). Other counties: add cases below or import a CSV.</div></div>
   <div class="card"><div class="grid">
-   <div><label>Show</label><select id="v"><option value="mine">My cases</option><option value="firm">Whole firm (my counties)</option><option value="tracked">Tracked cases</option></select></div>
+   <div><label>Show</label><select id="v"><option value="mine">My cases</option><option value="firm">Whole firm (my counties)</option><option value="tracked">Tracked cases</option><option value="watched">Watching court dates</option><option value="alerts">Court date changes</option></select></div>
+   ${me.role === "admin" ? `<div><label>Attorney</label><select id="af2"><option value="">All attorneys</option>${(firmUsers || []).filter(u => u.role !== "paralegal").map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("")}</select></div>` : ""}
    <div><label>County</label><select id="cf"><option value="">All my counties</option>${me.counties.map(c => `<option>${esc(c)}</option>`).join("")}</select></div>
    <div><label>Case type</label><select id="tf"><option value="">All types</option>${TYPES.map(t => `<option>${t}</option>`).join("")}</select></div></div></div>
+  <div class="row" style="margin:0 0 12px"><button class="btn sm ghost" id="watchAll">☑ Watch court dates on all ${caseF.attorney && firmUsers ? esc((firmUsers.find(u => u.id === +caseF.attorney) || {}).name || "") + "'s" : "my"} cases</button></div>
   <details class="card" id="addBox"><summary>+ Add a case</summary><br>${caseForm()}</details>
   <details class="card"><summary>Import CSV</summary><p class="mute">Header row with: county, cause_no, court, style, case_type, filed_date (YYYY-MM-DD), status, next_setting, notes</p>
    <input type="file" id="csvFile" accept=".csv,text/csv"><br><br><textarea id="csv" placeholder="county,cause_no,court,style,case_type,filed_date,status,next_setting"></textarea>
@@ -146,6 +151,10 @@ async function casesView() {
   <div class="mute" style="margin:0 4px 8px">${cs.length} case${cs.length === 1 ? "" : "s"}</div>
   ${cs.map(caseCard).join("") || `<div class="card mute">No cases here yet.</div>`}`;
   $("#goCourt").onclick = () => { tab = "court"; renderNav(); show(); };
+  if ($("#seeAlerts")) $("#seeAlerts").onclick = () => { caseF.view = "alerts"; casesView(); };
+  if ($("#af2")) { $("#af2").value = caseF.attorney; $("#af2").onchange = e => { caseF.attorney = e.target.value; if (e.target.value && caseF.view === "mine") caseF.view = "firm"; casesView(); }; }
+  const wa = $("#watchAll");
+  if (wa) wa.onclick = async () => { try { const r = await api("/api/cases/watch-all", { method: "POST", body: { user_id: +caseF.attorney || null, on: true } }); toast(`Watching court dates on ${r.updated} case(s)`); casesView(); } catch (e) { fail(e); } };
   $("#v").value = caseF.view; $("#cf").value = caseF.county; $("#tf").value = caseF.type;
   $("#v").onchange = e => { caseF.view = e.target.value; casesView(); };
   $("#cf").onchange = e => { caseF.county = e.target.value; casesView(); };
@@ -161,6 +170,10 @@ async function casesView() {
     el.querySelector("[data-a=track]").onclick = async () => { try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { tracked: !c.tracked } }); casesView(); } catch (e) { fail(e); } };
     el.querySelector("[data-a=law]").onclick = () => { law.q = (c.case_type || "").replace(/^.*– /, ""); law.results = null; law.open = null; tab = "law"; renderNav(); lawView(true); };
     el.querySelector("[data-a=edit]").onclick = () => { el.innerHTML = caseForm(c); bindCaseForm(el.querySelector("form"), c); };
+    el.querySelector("[data-a=watch]").onchange = async e => { try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { watch_dates: e.target.checked } }); c.watch_dates = e.target.checked; toast(e.target.checked ? "Watching court dates" : "Stopped watching"); } catch (err) { fail(err); } };
+    const ack = el.querySelector("[data-a=ack]"); if (ack) ack.onclick = async () => { await api(`/api/cases/${c.id}/ack`, { method: "POST" }); casesView(); };
+    el.querySelector("[data-a=hist]").onclick = async () => { const out = el.querySelector("[data-a=histOut]"); const ch = (await api(`/api/cases/${c.id}/changes`)).changes;
+      out.innerHTML = ch.length ? ch.map(x => `<div class="mute">${new Date(x.at).toLocaleDateString()}: ${esc(x.old_value || "none")} → ${esc(x.new_value)}</div>`).join("") : `<div class="mute">No date changes recorded yet.</div>`; };
   });
 }
 function caseCard(c) {
@@ -169,10 +182,13 @@ function caseCard(c) {
    <h3 style="margin-top:6px">${esc(c.style || c.cause_no)}</h3>
    <div class="kv"><div><b>Cause #</b>${esc(c.cause_no)}</div><div><b>Type</b>${esc(c.case_type || "—")}</div><div><b>Filed</b>${c.filed_date ? String(c.filed_date).slice(0, 10) : "—"}</div>
    <div><b>Next</b>${esc(c.next_setting || "—")}</div><div><b>Appeals to</b>${esc(META.appeals[c.county] || "—")}</div><div><b>Attorney</b>${esc(c.attorney || "—")}</div></div>
+   ${c.date_alert ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4;margin:10px 0 0;padding:10px"><b>⚠ Court date changed</b><div>${esc(c.date_alert)}</div><div class="mute">${c.date_alert_at ? new Date(c.date_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="ack" style="margin-top:6px">Got it</button></div>` : ""}
    ${c.notes ? `<p class="mute" style="margin:8px 0 0">${esc(c.notes)}</p>` : ""}
    ${c.source === "county_sync" ? `<p class="mute" style="margin:6px 0 0">↻ Pulled from county portal${c.last_synced ? " · " + new Date(c.last_synced).toLocaleString() : ""}</p>` : ""}
    ${c.external_url ? `<a class="btn sm ghost" style="margin-top:8px;display:inline-block;text-decoration:none" href="${esc(c.external_url)}" target="_blank" rel="noopener">Open on county portal ↗</a>` : ""}
-   <div class="row" style="margin-top:10px"><button class="btn sm ghost" data-a="edit">Edit</button><button class="btn sm ghost" data-a="track">${c.tracked ? "★ Untrack" : "☆ Track"}</button><button class="btn sm ghost" data-a="law">Research case law</button></div></div>`;
+   <div class="row" style="margin-top:10px"><button class="btn sm ghost" data-a="edit">Edit</button><button class="btn sm ghost" data-a="track">${c.tracked ? "★ Untrack" : "☆ Track"}</button><button class="btn sm ghost" data-a="law">Research case law</button></div>
+   <label style="margin-top:10px;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink)"><input type="checkbox" data-a="watch" style="width:auto" ${c.watch_dates ? "checked" : ""}> Watch court dates (alert me when the setting changes)</label>
+   <a class="link mute" data-a="hist" style="font-size:13px">Date history</a><div data-a="histOut"></div></div>`;
 }
 function caseForm(c) {
   const v = k => esc(c?.[k] ?? "");
