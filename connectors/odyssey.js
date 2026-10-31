@@ -208,7 +208,21 @@ async function sync({ baseUrl, username, password, barNumber, attorneyName, maxC
     return { cases: out, notes, diag: s.log };
   }
   const entries = searchLinks(home.url.includes("default") ? home : await s.req("default.aspx"));
-  if (!entries.length) throw Object.assign(new Error("No case-search pages found on the portal home page."), { diag: s.log });
+  if (!entries.length) {
+    const $ = home.$, h = home.html;
+    const peek = {
+      url: home.url, bytes: h.length,
+      text: $("body").text().replace(/\s+/g, " ").trim().slice(0, 400),
+      links: $("a").map((_, a) => `${$(a).text().trim().slice(0, 40)} -> ${$(a).attr("href")}`).get().slice(0, 25),
+      scripts: $("script[src]").map((_, x) => $(x).attr("src")).get().slice(0, 10),
+      meta_refresh: $("meta[http-equiv='refresh' i]").attr("content") || null,
+      forms: $("form").map((_, f) => $(f).attr("action")).get(),
+      challenge: /cloudflare|cf-chl|incapsula|_Incapsula_|captcha|recaptcha|hcaptcha|akamai|bot detection|enable javascript/i.test(h),
+      head: h.slice(0, 700).replace(/\s+/g, " ")
+    };
+    console.log("[odyssey] home page peek:", JSON.stringify(peek));
+    throw Object.assign(new Error(peek.challenge ? "The county portal is showing a bot-check page to our server, so automatic pulls are blocked for now." : "No case-search pages found on the portal home page."), { diag: s.log });
+  }
   const found = new Map(), notes = [];
   for (const e of entries) {
     try {
