@@ -26,11 +26,13 @@ function authView(mode = "login", msg = "") {
    <form id="f">
    ${signup ? `<label>Firm name</label><input name="firm" required><br><br>
    <label>Your full name</label><input name="name" required><br><br>
-   <label>Texas Bar # (8 digits)</label><input name="bar" inputmode="numeric" pattern="\\d{8}" required><br><br>` : ""}
+   <label>Texas Bar # (8 digits)</label><input name="bar" inputmode="numeric" pattern="\\d{8}" required><br><br>
+   <label>Free-time code (optional)</label><input name="code" value="${esc(new URLSearchParams(location.search).get("code") || "")}" placeholder="TXC-30D-…"><br><br>` : ""}
    <label>Email</label><input name="email" type="email" autocomplete="username" required><br><br>
    <label>Password${signup ? " (10+ chars, letters & numbers)" : ""}</label><input name="password" type="password" autocomplete="${signup ? "new-password" : "current-password"}" required>
    <div class="err" id="err">${esc(msg)}</div>
    <button class="btn" style="width:100%">${signup ? "Create account" : "Continue"}</button></form>
+   ${signup ? `<p class="mute" style="text-align:center">Every new firm starts with a free 14-day trial.</p>` : ""}
    <p class="mute" style="text-align:center"><a class="link" id="sw">${signup ? "Have an account? Sign in" : "New firm? Create an account"}</a></p></div>`;
   $("#sw").onclick = () => authView(signup ? "login" : "signup");
   $("#f").onsubmit = async e => {
@@ -218,6 +220,7 @@ async function courtView() {
 function fail(err) {
   if (err.status === 401) { me = null; return authView("login", "Session ended — sign in again."); }
   if (err.code === "CHANGE_PW") return changePwView(true);
+  if (err.code === "PLAN_EXPIRED" || err.code === "FIRM_OFF") return subWall(err);
   toast(err.message);
 }
 
@@ -490,11 +493,29 @@ async function firmView() {
   });
 }
 
+// ---------------- subscription ----------------
+function subWall(err) {
+  $("#app").innerHTML = `<div class="narrow card"><h2>${err.code === "FIRM_OFF" ? "Account turned off" : "Subscription needed"}</h2><p>${esc(err.message)}</p>
+   ${err.code === "PLAN_EXPIRED" ? `<label>Have a code?</label><input id="sc" placeholder="TXC-30D-…"><div class="err" id="scErr"></div><button class="btn" id="scGo" style="width:100%">Apply code</button>` : ""}
+   <p class="mute">Questions? Email <b>steve.smith@buddyrents.com</b>.</p></div>`;
+  if ($("#scGo")) $("#scGo").onclick = async () => { try { await api("/api/subscription/redeem", { method: "POST", body: { code: $("#sc").value } }); toast("Code applied"); show(); } catch (e) { $("#scErr").textContent = e.message; } };
+}
+function subLine(sub) {
+  if (!sub || !sub.plan) return "";
+  if (sub.plan === "pro" && sub.expires_on) { const d = Math.ceil((new Date(sub.expires_on) - new Date()) / 864e5); return `${sub.source === "trial" ? "Free trial" : "Active"} — ${d > 0 ? d + " day" + (d === 1 ? "" : "s") + " left" : "ends today"} (until ${String(sub.expires_on).slice(0, 10)})`; }
+  if (sub.plan === "pro") return "Active subscription";
+  return sub.reason || "Not active";
+}
+
 // ---------------- account ----------------
 function accountView() {
   $("#app").innerHTML = `<div class="card"><h2>Account</h2><div class="kv"><div><b>Name</b>${esc(me.name)}</div><div><b>Email</b>${esc(me.email)}</div><div><b>Bar #</b>${esc(me.bar_number || "—")}</div>
    <div><b>Firm</b>${esc(me.firm_name)}</div><div><b>Role</b>${esc(me.role)}</div><div><b>2FA</b>${me.totp_enabled ? "On" : "Off"}</div></div>
-   <div class="row" style="margin-top:12px"><button class="btn ghost" id="pw">Change password</button><button class="btn danger" id="out">Sign out</button></div></div>`;
+   <div class="row" style="margin-top:12px"><button class="btn ghost" id="pw">Change password</button><button class="btn danger" id="out">Sign out</button></div></div>
+   <div class="card"><h3>Subscription</h3><div id="subInfo" class="mute">Loading…</div>
+   <label style="margin-top:10px">Have a free-time code?</label><div class="row"><input id="sc" placeholder="TXC-30D-…" style="flex:1"><button class="btn sm" id="scGo">Apply</button></div><div class="err" id="scErr"></div></div>`;
+  api("/api/subscription").then(r => { $("#subInfo").textContent = r.managed ? subLine(r) : "Active"; }).catch(() => {});
+  $("#scGo").onclick = async () => { try { await api("/api/subscription/redeem", { method: "POST", body: { code: $("#sc").value } }); toast("Code applied"); accountView(); } catch (e) { $("#scErr").textContent = e.message; } };
   $("#pw").onclick = () => changePwView(false);
   $("#out").onclick = async () => { await api("/api/logout", { method: "POST" }).catch(() => {}); me = null; authView(); };
 }
@@ -505,5 +526,5 @@ function accountView() {
   const qs = new URLSearchParams(location.search);
   if (qs.get("connected") || qs.get("mailerror")) { tab = /firm/.test(qs.get("connected") || "") ? "firm" : "court"; history.replaceState(null, "", "/"); setTimeout(() => toast(qs.get("connected") ? `Email connected: ${qs.get("connected")} — checking court emails now` : qs.get("mailerror")), 600); }
   try { me = (await api("/api/me")).user; start(); }
-  catch (e) { e.code === "CHANGE_PW" ? (me = { must_change_pw: true }, changePwView(true)) : authView(); }
+  catch (e) { e.code === "CHANGE_PW" ? (me = { must_change_pw: true }, changePwView(true)) : authView(qs.get("signup") || qs.get("code") ? "signup" : "login"); }
 })();

@@ -14,6 +14,7 @@ const analysis = require("./analysis");
 const lawdb = require("./lawdb");
 const inbound = require("./inbound");
 const mail = require("./mail");
+const myapps = require("./myapps");
 const cl = require("./courtlistener");
 const { COUNTIES, APPEALS, CONNECTORS } = require("./counties");
 const sync = require("./sync");
@@ -37,7 +38,7 @@ app.use(session({
 
 // CSRF guard: every state-changing call must come from our own page (custom header can't be sent cross-site).
 app.use("/api", (req, res, next) => {
-  if (req.path.startsWith("/inbound/")) return next(); // Postmark webhook — protected by its own secret key
+  if (req.path.startsWith("/inbound/") || req.path.startsWith("/platform/")) return next(); // webhooks / My Apps — protected by their own secret keys
   if (req.method !== "GET" && req.get("X-Requested-With") !== "tcd") return res.status(403).json({ error: "Bad request origin" });
   next();
 });
@@ -59,15 +60,21 @@ function publicUser(u) {
     counties: u.counties || [], totp_enabled: u.totp_enabled, must_change_pw: u.must_change_pw };
 }
 async function loadUser(id) {
-  const { rows } = await q("SELECT u.*, f.name AS firm_name FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
+  const { rows } = await q("SELECT u.*, f.name AS firm_name, f.plan, f.plan_expires, f.plan_source, f.plan_checked, f.disabled AS firm_disabled FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
   return rows[0];
 }
 const requireAuth = wrap(async (req, res, next) => {
   if (!req.session.uid || !req.session.mfa) return res.status(401).json({ error: "Sign in required" });
   req.user = await loadUser(req.session.uid);
   if (!req.user) { req.session.destroy(() => {}); return res.status(401).json({ error: "Account disabled" }); }
-  if (req.user.must_change_pw && !["/api/me", "/api/password", "/api/logout"].includes(req.originalUrl.split("?")[0]))
+  const path = req.originalUrl.split("?")[0];
+  if (req.user.must_change_pw && !["/api/me", "/api/password", "/api/logout"].includes(path))
     return res.status(403).json({ error: "Change your temporary password first", code: "CHANGE_PW" });
+  // Subscription (managed in My Apps). Account, logout and subscription pages stay open so they can fix it.
+  const firm = await myapps.refresh({ id: req.user.firm_id, plan: req.user.plan, plan_expires: req.user.plan_expires, plan_source: req.user.plan_source, plan_checked: req.user.plan_checked, disabled: req.user.firm_disabled });
+  req.subscription = { plan: firm.plan, expires_on: firm.plan_expires, source: firm.plan_source, ...myapps.active(firm) };
+  if (!req.subscription.ok && !["/api/me", "/api/logout", "/api/password", "/api/subscription", "/api/subscription/redeem"].includes(path))
+    return res.status(402).json({ error: req.subscription.reason, code: req.subscription.code });
   next();
 });
 const requireAdmin = (req, res, next) => req.user.role === "admin" ? next() : res.status(403).json({ error: "Firm admins only" });
@@ -78,7 +85,7 @@ app.get("/healthz", (req, res) => res.send("ok"));
 
 // ---------- signup / login / 2FA ----------
 app.post("/api/signup", loginLimiter, wrap(async (req, res) => {
-  const { firm, name, email, bar, password } = req.body || {};
+  const { firm, name, email, bar, password, code } = req.body || {};
   const em = String(email || "").trim().toLowerCase();
   if (!firm || !name || !isEmail(em) || !isBar(bar)) return res.status(400).json({ error: "Firm, name, valid email and 8-digit Texas bar # are required." });
   if (!strongPw(password)) return res.status(400).json({ error: "Password must be 10+ characters with letters and numbers." });
@@ -91,7 +98,8 @@ app.post("/api/signup", loginLimiter, wrap(async (req, res) => {
     const u = await client.query("INSERT INTO users(firm_id,email,name,bar_number,role,pw_hash) VALUES($1,$2,$3,$4,'admin',$5) RETURNING id",
       [f.rows[0].id, em, String(name).trim(), bar, await bcrypt.hash(password, 12)]);
     await client.query("COMMIT");
-    req.session.regenerate(() => { req.session.pendingUid = u.rows[0].id; audit(req, "signup", { email: em }); res.json({ next: "enroll_2fa" }); });
+    let sub = null; try { sub = await myapps.onSignup(f.rows[0].id, String(firm).trim(), code ? String(code).trim() : null); } catch (e) { console.error("[myapps] trial start failed", e.message); }
+    req.session.regenerate(() => { req.session.pendingUid = u.rows[0].id; audit(req, "signup", { email: em, code: code || null }); res.json({ next: "enroll_2fa", codeError: sub?.codeError || null }); });
   } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
 }));
 
@@ -147,7 +155,23 @@ app.post("/api/login/2fa", loginLimiter, wrap(async (req, res) => {
 }));
 
 app.post("/api/logout", (req, res) => req.session.destroy(() => { res.clearCookie("tcd.sid"); res.json({ ok: true }); }));
-app.get("/api/me", requireAuth, (req, res) => res.json({ user: publicUser(req.user) }));
+app.get("/api/me", requireAuth, (req, res) => res.json({ user: publicUser(req.user), subscription: req.subscription }));
+app.get("/api/subscription", requireAuth, (req, res) => res.json({ ...req.subscription, managed: myapps.enabled() }));
+app.post("/api/subscription/redeem", requireAuth, wrap(async (req, res) => {
+  if (!myapps.enabled()) return res.status(400).json({ error: "Codes aren't available right now." });
+  try { const r = await myapps.redeem(req.user.firm_id, req.user.firm_name, req.body?.code); await audit(req, "code_redeemed", { code: req.body?.code }); res.json(r); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+}));
+// My Apps console → TX Case Desk (shared secret)
+app.get("/api/platform/firms", myapps.platformAuth, wrap(async (req, res) => res.json({ firms: await myapps.listFirms((process.env.APP_URL || "https://tx-case-desk.onrender.com").replace(/\/$/, "")) })));
+app.post("/api/platform/firms/:id", myapps.platformAuth, wrap(async (req, res) => {
+  try { res.json(await myapps.platformAction(+String(req.params.id).replace(/^firm:/, ""), req.body || {})); }
+  catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+}));
+app.get("/api/platform/info", myapps.platformAuth, wrap(async (req, res) => res.json({
+  azure_account: "stevesmith.5480@outlook.com", microsoft_connect: mail.configured().microsoft, google_connect: mail.configured().google,
+  postmark: !!process.env.POSTMARK_INBOUND, courtlistener: !!process.env.COURTLISTENER_TOKEN, case_law_opinions: await lawdb.size().catch(() => 0)
+})));
 
 app.post("/api/password", requireAuth, wrap(async (req, res) => {
   const { current, next } = req.body || {};
