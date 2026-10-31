@@ -4,7 +4,7 @@
 // fixed positions, because each county skins the portal a little differently.
 const cheerio = require("cheerio");
 
-const UA = "Mozilla/5.0 (compatible; TX-Case-Desk/1.0; attorney case sync)";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 class Session {
@@ -19,7 +19,7 @@ class Session {
     let url = this.url(path), body, hops = 0;
     if (form) body = new URLSearchParams(form).toString();
     while (true) {
-      const headers = { "User-Agent": UA, Accept: "text/html,application/xhtml+xml", Cookie: this.cookieHeader() };
+      const headers = { "User-Agent": UA, Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9", Cookie: this.cookieHeader() };
       if (referer) headers.Referer = referer;
       if (body) headers["Content-Type"] = "application/x-www-form-urlencoded";
       let res;
@@ -270,4 +270,17 @@ async function inspect({ baseUrl }) {
   return report;
 }
 
-module.exports = { sync, inspect };
+// Startup probe: how does the portal answer different addresses / clients? (logged for troubleshooting)
+async function probe(base) {
+  const host = new URL(base).origin;
+  const tries = [["/", UA], ["/default.aspx", UA], ["/Default.aspx", UA], ["/default.aspx", "curl/8.0"], ["/default.aspx", "Mozilla/5.0 (compatible; TX-Case-Desk/1.0)"], ["/Search.aspx?ID=400", UA]];
+  for (const [path, ua] of tries) {
+    try {
+      const r = await fetch(host + path, { headers: { "User-Agent": ua, Accept: "text/html,*/*", "Accept-Language": "en-US,en;q=0.9" }, redirect: "manual", signal: AbortSignal.timeout(20000) });
+      const t = await r.text();
+      console.log(`[probe] ${path} ua=${ua.slice(0, 20)} -> ${r.status} ${r.headers.get("location") || ""} bytes=${t.length} server=${r.headers.get("server") || ""} title="${(cheerio.load(t)("title").text() || "").trim().slice(0, 60)}" body="${t.replace(/\s+/g, " ").slice(0, 160)}"`);
+    } catch (e) { console.log(`[probe] ${path} -> ERROR ${e.cause?.code || e.message}`); }
+  }
+}
+
+module.exports = { sync, inspect, probe };

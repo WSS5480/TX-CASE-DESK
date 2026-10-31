@@ -462,4 +462,5 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-migrate().then(() => app.listen(PORT, () => { console.log("TX Case Desk on :" + PORT); sync.startScheduler(); })).catch(e => { console.error("DB migrate failed", e); process.exit(1); });
+migrate().then(() => app.listen(PORT, () => { console.log("TX Case Desk on :" + PORT); sync.startScheduler();
+  if (process.env.NODE_ENV === "production") setTimeout(() => sync.MODULES.odyssey.probe(CONNECTORS.Hidalgo.url).catch(() => {}), 5000); })).catch(e => { console.error("DB migrate failed", e); process.exit(1); });
