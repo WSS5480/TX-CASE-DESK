@@ -272,8 +272,8 @@ async function inspect({ baseUrl }) {
 
 // Startup probe: how does the portal answer different addresses / clients? (logged for troubleshooting)
 async function probe(base) {
-  const host = new URL(base).origin;
-  const tries = [["/", UA], ["/default.aspx", UA], ["/Default.aspx", UA], ["/default.aspx", "curl/8.0"], ["/default.aspx", "Mozilla/5.0 (compatible; TX-Case-Desk/1.0)"], ["/Search.aspx?ID=400", UA]];
+  const host = base.replace(/\/+$/, "");
+  const tries = [["/default.aspx", UA], ["/Search.aspx?ID=400", UA], ["/Search.aspx?ID=100", UA]];
   for (const [path, ua] of tries) {
     try {
       const r = await fetch(host + path, { headers: { "User-Agent": ua, Accept: "text/html,*/*", "Accept-Language": "en-US,en;q=0.9" }, redirect: "manual", signal: AbortSignal.timeout(20000) });
