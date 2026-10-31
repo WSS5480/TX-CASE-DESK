@@ -88,10 +88,16 @@ function show() { clearTimeout(courtPoll); ({ inbox: inboxView, cases: casesView
 const TYPE_TAG = { "Hearing / setting": "y", "New filing": "g", "Order / judgment": "r", "Case notice": "n", "Account activation": "n", "Email": "n" };
 async function inboxView() {
   $("#app").innerHTML = `<div class="card mute">Loading inbox…</div>`;
-  let r; try { r = await api("/api/inbox"); } catch (e) { return fail(e); }
+  let r, mb; try { [r, mb] = await Promise.all([api("/api/inbox"), api("/api/mail").catch(() => null)]); } catch (e) { return fail(e); }
   inboxUnread = r.unread; renderNav();
-  $("#app").innerHTML = `<div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Inbox</h2>${r.unread ? `<button class="btn sm ghost" id="readAll">Mark all read</button>` : ""}</div>
-   <p class="mute" style="margin-bottom:0">Every court email sent to your app address. Tap one for the summary and the exact email.</p></div>
+  const conn = mb && mb.mailboxes.find(x => x.status === "ok" || x.status === "syncing");
+  const connCard = !mb ? "" : conn
+    ? `<div class="card"><span class="tag g">Connected</span> <b>${esc(conn.email || mb.names[conn.provider])}</b> <span class="mute">· court emails are checked every hour</span></div>`
+    : `<div class="card"><h2 style="margin-top:0">📬 Connect your email</h2><p style="margin-top:0">Sign in once with the email you get court notices at. We read only court emails and build and update your cases from them.</p>
+       ${["microsoft", "google"].map(p => mb.configured[p] ? `<a class="btn" href="/api/mail/connect/${p}" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with ${p === "microsoft" ? "Outlook / Microsoft 365" : "Gmail"}</a>` : "").join("")}
+       <p class="mute" style="margin-bottom:0;font-size:13px">Read-only. Personal email is ignored and never stored. Disconnect anytime under Court Updates.</p></div>`;
+  $("#app").innerHTML = `${connCard}<div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Inbox</h2>${r.unread ? `<button class="btn sm ghost" id="readAll">Mark all read</button>` : ""}</div>
+   <p class="mute" style="margin-bottom:0">Every court email from your connected email. Tap one for the summary and the exact email.</p></div>
    ${r.emails.map(m => `<div class="card" data-open="${m.id}" style="cursor:pointer;${m.read ? "" : "border-left:4px solid var(--acc)"}">
      <div class="row"><span class="tag ${TYPE_TAG[m.type] || "n"}">${esc(m.type)}</span>${m.read ? "" : `<span class="tag r">New</span>`}<span class="mute" style="margin-left:auto">${new Date(m.received_at).toLocaleString()}</span></div>
      <h3 style="margin-top:6px">${esc(m.subject || "(no subject)")}</h3>
