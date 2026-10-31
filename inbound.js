@@ -50,7 +50,7 @@ async function handle(msg) {
   if (/forwarding-noreply@google\.com/i.test(from) || /forwarding confirmation/i.test(subject)) {
     kind = "forward_confirm";
     confirm = (body.match(/Confirmation code:\s*(\d{6,12})/i) || [])[1] || (body.match(/https:\/\/mail[^\s]*google\.com\/mail\/[^\s]+/) || [])[0] || null;
-  } else if (/research|txcourts|tylertech|tylerhost|efiletexas/i.test(from + " " + subject + " " + body.slice(0, 2000))) kind = "research_alert";
+  } else if (/re:?search|txcourts|tylertech|tylerhost|efiletexas/i.test(from + " " + subject + " " + body.slice(0, 2000))) kind = "research_alert";
   const causes = kind === "forward_confirm" ? [] : causesIn(subject + "\n" + body);
   let matched = [];
   if (causes.length) {
