@@ -123,6 +123,24 @@ CREATE TABLE IF NOT EXISTS case_changes (
   new_value TEXT,
   at TIMESTAMPTZ DEFAULT now()
 );
+-- re:SearchTX alert emails forwarded by each attorney (via Postmark inbound)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS inbox_token TEXT UNIQUE;
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS filing_alert TEXT;
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS filing_alert_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS inbound_emails (
+  id BIGSERIAL PRIMARY KEY,
+  user_id INT REFERENCES users(id) ON DELETE CASCADE,
+  firm_id INT,
+  from_addr TEXT,
+  subject TEXT,
+  body TEXT,
+  kind TEXT,                -- research_alert | forward_confirm | other
+  causes TEXT[],            -- cause numbers found in the email
+  matched_case_ids INT[],
+  confirm_code TEXT,
+  received_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS inbound_user ON inbound_emails(user_id, received_at DESC);
 -- Texas case law loaded from CourtListener bulk files (one row per opinion; a cluster = one decision)
 CREATE TABLE IF NOT EXISTS tx_opinions (
   opinion_id BIGINT PRIMARY KEY,

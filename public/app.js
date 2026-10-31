@@ -84,17 +84,31 @@ function show() { clearTimeout(courtPoll); ({ cases: casesView, law: lawView, sa
 let courtPoll;
 async function courtView() {
   clearTimeout(courtPoll);
-  let d; try { d = await api("/api/court-logins"); } catch (e) { return fail(e); }
+  let d, ea; try { [d, ea] = await Promise.all([api("/api/court-logins"), api("/api/email-alerts")]); } catch (e) { return fail(e); }
   const byCounty = Object.fromEntries(d.logins.map(l => [l.county, l]));
   const ago = t => t ? new Date(t).toLocaleString() : "never";
   $("#app").innerHTML = `<div class="card"><h2>Court logins</h2>
    <p class="mute">Your cases are pulled from each county portal under <b>your</b> login and <b>your</b> bar # (${esc(me.bar_number || "not set")}) — only for counties you picked. Pulls run when you sign in, nightly, and when you tap Sync now. Passwords are encrypted and never shown again.</p>
    ${d.bar_ok ? "" : `<p class="err">Your account needs an 8-digit bar # before cases can be pulled.</p>`}</div>
-   ${d.available.length ? "" : `<div class="card mute">None of your counties has an automatic feed yet. Live now: ${esc(Object.keys(META.connectors).join(", "))}. Add one under My Counties.</div>`}
+   <div class="card"><h2>📨 re:SearchTX alerts</h2>
+   ${!ea.configured ? `<p class="mute">Email alerts aren't switched on for this app yet (admin setup pending).</p>` : `
+   <p class="mute">Forward your re:SearchTX alert emails to your private address. Each alert is matched to your cases by cause number and shows on the case.</p>
+   <label>Your forwarding address</label><div class="row"><div class="secret" style="flex:1">${esc(ea.address)}</div><button class="btn sm" id="cpAddr">Copy</button></div>
+   ${ea.confirm ? `<div class="card" style="background:#fff4d6;margin:10px 0 0"><b>Gmail forwarding confirmation received.</b><div class="mute">Enter this in Gmail (or open the link) to finish setup:</div><div class="secret" style="margin-top:6px">${esc(ea.confirm.code)}</div></div>` : ""}
+   <details style="margin-top:10px"><summary>How to set it up (5 min)</summary><ol style="padding-left:18px;font-size:14px">
+     <li>Sign in at <a class="link" href="https://research.txcourts.gov" target="_blank" rel="noopener">research.txcourts.gov</a> (same login as eFileTexas), claim your attorney record, and turn on alerts for your cases.</li>
+     <li><b>Gmail:</b> Settings → See all settings → Forwarding and POP/IMAP → Add a forwarding address → paste your address above. The confirmation code will appear right here — enter it in Gmail. Then create a filter: From contains <code>tylertech</code> or <code>txcourts</code> → Forward to your address.</li>
+     <li><b>Outlook:</b> Settings → Mail → Rules → Add rule: From contains <code>tylertech</code> → Forward to your address.</li>
+     <li>Tip: forward one existing re:SearchTX email by hand to test it — it should show below within a minute.</li></ol></details>
+   <h3 style="margin-top:12px">Recent alerts</h3>
+   ${ea.emails.length ? ea.emails.map(m => `<div style="border-top:1px solid var(--line);padding:8px 0"><b>${esc(m.subject || "(no subject)")}</b><div class="mute">${new Date(m.received_at).toLocaleString()} · ${esc(m.from_addr)}</div>
+     <div class="mute">${(m.matched_case_ids || []).length} matched case(s)${m.unmatched.length ? ` · not in your list yet: ${m.unmatched.map(esc).join(", ")}` : ""}</div></div>`).join("") : `<p class="mute">No alert emails received yet.</p>`}`}</div>
+   ${d.available.length ? "" : `<div class="card mute">None of your counties has an automatic feed yet. Live now: ${esc(Object.entries(META.connectors).filter(([, v]) => v.status !== "blocked").map(([k]) => k).join(", ") || "none")}. Add one under My Counties.</div>`}
    ${d.available.map(c => { const l = byCounty[c.county];
      const st = !l ? "" : l.status === "ok" ? `<span class="tag g">Synced</span>` : l.status === "error" ? `<span class="tag r">Error</span>` : `<span class="tag y">${l.status === "syncing" ? "Pulling cases…" : "Starting…"}</span>`;
      return `<div class="card" data-county="${esc(c.county)}"><div class="row"><h3 style="margin:0">${esc(c.county)} County</h3>${st}<span class="tag n">${esc(c.status)}</span></div>
      <div class="mute">${esc(c.name)} · <a class="link" href="${esc(c.url)}" target="_blank" rel="noopener">open portal</a></div>
+     ${c.status === "blocked" ? `<p class="err" style="margin:6px 0 0">${esc(c.note || "Automatic pulls paused.")} Use re:SearchTX alerts above, or add cases by hand / CSV.</p>` : ""}
      ${l ? `<div class="kv"><div><b>Pulls by</b>${c.login === "none" ? "Your bar # (public portal)" : esc(l.username || "Your bar #")}</div><div><b>Last pull</b>${ago(l.last_sync)}</div>
        ${l.last_result ? `<div><b>Found</b>${l.last_result.found} cases</div><div><b>New / updated</b>${l.last_result.added} / ${l.last_result.updated}</div>` : ""}</div>
        ${l.last_error ? `<p class="err">${esc(l.last_error)}</p>` : ""}
@@ -115,6 +129,7 @@ async function courtView() {
     const del = card.querySelector("[data-a=del]");
     del.onclick = async () => { if (!del.dataset.sure) { del.dataset.sure = 1; del.textContent = "Tap again to remove"; return; } await api(`/api/court-logins/${l.id}`, { method: "DELETE" }); courtView(); };
   });
+  const cpa = $("#cpAddr"); if (cpa) cpa.onclick = async () => { try { await navigator.clipboard.writeText(ea.address); toast("Address copied"); } catch (e) { toast(ea.address); } };
   const insp = $("#insp");
   if (insp) insp.onclick = async () => { insp.disabled = true; insp.textContent = "Checking…"; const out = $("#inspOut"); out.hidden = false;
     try { out.textContent = JSON.stringify(await api(`/api/admin/inspect/${encodeURIComponent(d.available[0].county)}`), null, 2); } catch (e) { out.textContent = e.message; } insp.disabled = false; insp.textContent = "Check again"; };
@@ -135,12 +150,12 @@ async function casesView() {
   const cs = data.cases;
   if (me.role === "admin" && !firmUsers) { try { firmUsers = (await api("/api/firm/users")).users; } catch (e) { firmUsers = []; } }
   app.innerHTML = `
-  ${data.alerts ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4"><b>⚠ ${data.alerts} court date change${data.alerts === 1 ? "" : "s"}</b> on watched cases. <a class="link" id="seeAlerts">Show them</a></div>` : ""}
+  ${data.alerts ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4"><b>⚠ ${data.alerts} case alert${data.alerts === 1 ? "" : "s"}</b> (court dates, re:SearchTX updates, new case law). <a class="link" id="seeAlerts">Show them</a></div>` : ""}
   ${!me.counties.length ? `<div class="card"><b>Pick your counties first.</b> <span class="mute">You only see and add cases in counties you practice in.</span></div>` : ""}
   <div class="card"><div class="mute">Your counties</div><div style="font-weight:600">${esc(me.counties.join(", ") || "None selected")}</div>
-   <div class="mute" style="margin-top:4px">Auto-pull: connect under <a class="link" id="goCourt">Court Logins</a> (live: ${esc(Object.keys(META.connectors).join(", "))}). Other counties: add cases below or import a CSV.</div></div>
+   <div class="mute" style="margin-top:4px">Auto-pull: connect under <a class="link" id="goCourt">Court Logins</a> (live: ${esc(Object.entries(META.connectors).filter(([, v]) => v.status !== "blocked").map(([k]) => k).join(", ") || "none right now — use re:SearchTX alerts")}). Other counties: add cases below or import a CSV.</div></div>
   <div class="card"><div class="grid">
-   <div><label>Show</label><select id="v"><option value="mine">My cases</option><option value="firm">Whole firm (my counties)</option><option value="tracked">Tracked cases</option><option value="watched">Watching court dates</option><option value="alerts">Court date changes</option></select></div>
+   <div><label>Show</label><select id="v"><option value="mine">My cases</option><option value="firm">Whole firm (my counties)</option><option value="tracked">Tracked cases</option><option value="watched">Watching court dates</option><option value="alerts">Alerts (dates, filings, case law)</option></select></div>
    ${me.role === "admin" ? `<div><label>Attorney</label><select id="af2"><option value="">All attorneys</option>${(firmUsers || []).filter(u => u.role !== "paralegal").map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("")}</select></div>` : ""}
    <div><label>County</label><select id="cf"><option value="">All my counties</option>${me.counties.map(c => `<option>${esc(c)}</option>`).join("")}</select></div>
    <div><label>Case type</label><select id="tf"><option value="">All types</option>${TYPES.map(t => `<option>${t}</option>`).join("")}</select></div></div></div>
@@ -174,6 +189,7 @@ async function casesView() {
     el.querySelector("[data-a=watch]").onchange = async e => { try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { watch_dates: e.target.checked } }); c.watch_dates = e.target.checked; toast(e.target.checked ? "Watching court dates" : "Stopped watching"); } catch (err) { fail(err); } };
     el.querySelector("[data-a=analyze]").onclick = () => analysisView(c);
     el.querySelector("[data-a=lawwatch]").onchange = async e => { if (e.target.checked && !c.issues) { e.target.checked = false; return toast("Add the case's issues first (Edit → Issues)"); } try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { law_watch: e.target.checked } }); toast(e.target.checked ? "Watching for new case law" : "Stopped"); } catch (err) { fail(err); } };
+    const fack = el.querySelector("[data-a=fileack]"); if (fack) fack.onclick = async () => { await api(`/api/cases/${c.id}/filing-ack`, { method: "POST" }); casesView(); };
     const lack = el.querySelector("[data-a=lawack]"); if (lack) lack.onclick = async () => { await api(`/api/cases/${c.id}/law-ack`, { method: "POST" }); casesView(); };
     const ack = el.querySelector("[data-a=ack]"); if (ack) ack.onclick = async () => { await api(`/api/cases/${c.id}/ack`, { method: "POST" }); casesView(); };
     el.querySelector("[data-a=hist]").onclick = async () => { const out = el.querySelector("[data-a=histOut]"); const ch = (await api(`/api/cases/${c.id}/changes`)).changes;
@@ -187,6 +203,7 @@ function caseCard(c) {
    <div class="kv"><div><b>Cause #</b>${esc(c.cause_no)}</div><div><b>Type</b>${esc(c.case_type || "—")}</div><div><b>Filed</b>${c.filed_date ? String(c.filed_date).slice(0, 10) : "—"}</div>
    <div><b>Next</b>${esc(c.next_setting || "—")}</div><div><b>Appeals to</b>${esc(META.appeals[c.county] || "—")}</div><div><b>Attorney</b>${esc(c.attorney || "—")}</div></div>
    ${c.date_alert ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4;margin:10px 0 0;padding:10px"><b>⚠ Court date changed</b><div>${esc(c.date_alert)}</div><div class="mute">${c.date_alert_at ? new Date(c.date_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="ack" style="margin-top:6px">Got it</button></div>` : ""}
+   ${c.filing_alert ? `<div class="card" style="background:#e3f4ea;border-color:#bfe3cd;margin:10px 0 0;padding:10px"><b>📨 re:SearchTX update</b><div style="font-size:14px">${esc(c.filing_alert)}</div><div class="mute">${c.filing_alert_at ? new Date(c.filing_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="fileack" style="margin-top:6px">Got it</button></div>` : ""}
    ${c.law_alert ? `<div class="card" style="background:#e8eefc;border-color:#c9d6f5;margin:10px 0 0;padding:10px"><b>📚 New case law</b><div style="font-size:14px">${esc(c.law_alert)}</div><button class="btn sm" data-a="lawack" style="margin-top:6px">Got it</button></div>` : ""}
    ${c.issues ? `<p class="mute" style="margin:8px 0 0">Issues: ${esc(c.issues)}</p>` : ""}
    ${c.notes ? `<p class="mute" style="margin:8px 0 0">${esc(c.notes)}</p>` : ""}

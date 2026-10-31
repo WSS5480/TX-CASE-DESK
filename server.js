@@ -12,6 +12,7 @@ const { authenticator } = require("otplib");
 const { pool, q, migrate } = require("./db");
 const analysis = require("./analysis");
 const lawdb = require("./lawdb");
+const inbound = require("./inbound");
 const cl = require("./courtlistener");
 const { COUNTIES, APPEALS, CONNECTORS } = require("./counties");
 const sync = require("./sync");
@@ -22,7 +23,8 @@ const PROD = process.env.NODE_ENV === "production";
 const app = express();
 app.set("trust proxy", 1);
 app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", "data:"] } } }));
-app.use("/api/ingest", express.json({ limit: "80mb" })); // bulk case-law loader (gzip JSON batches)
+app.use("/api/ingest", express.json({ limit: "80mb" }));
+app.use("/api/inbound", express.json({ limit: "30mb" })); // Postmark inbound email webhook // bulk case-law loader (gzip JSON batches)
 app.use(express.json({ limit: "2mb" }));
 app.use(session({
   store: new PgSession({ pool, createTableIfMissing: true }),
@@ -34,6 +36,7 @@ app.use(session({
 
 // CSRF guard: every state-changing call must come from our own page (custom header can't be sent cross-site).
 app.use("/api", (req, res, next) => {
+  if (req.path.startsWith("/inbound/")) return next(); // Postmark webhook — protected by its own secret key
   if (req.method !== "GET" && req.get("X-Requested-With") !== "tcd") return res.status(403).json({ error: "Bad request origin" });
   next();
 });
@@ -211,13 +214,13 @@ app.get("/api/cases", requireAuth, wrap(async (req, res) => {
   let where = "c.firm_id=$1 AND (c.county = ANY($2) OR c.tracked)";
   if (view === "mine") { params.push(req.user.id); where += ` AND c.user_id=$${params.length}`; }
   if (view === "tracked") where += " AND c.tracked";
-  if (view === "alerts") where += " AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL)";
+  if (view === "alerts") where += " AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL)";
   if (view === "watched") where += " AND c.watch_dates";
   if (req.query.attorney) { params.push(+req.query.attorney); where += ` AND c.user_id=$${params.length}`; }
   if (county) { params.push(county); where += ` AND c.county=$${params.length}`; }
   if (type) { params.push(type); where += ` AND c.case_type=$${params.length}`; }
-  const { rows } = await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} ORDER BY (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL) DESC, c.filed_date DESC NULLS LAST, c.id DESC LIMIT 500`, params);
-  const al = await q("SELECT count(*)::int n FROM cases WHERE firm_id=$1 AND (county = ANY($2) OR tracked) AND (date_alert IS NOT NULL OR law_alert IS NOT NULL)" + (req.user.role === "paralegal" || req.user.role === "admin" ? "" : " AND user_id=$3"), req.user.role === "paralegal" || req.user.role === "admin" ? [req.user.firm_id, req.user.counties || []] : [req.user.firm_id, req.user.counties || [], req.user.id]);
+  const { rows } = await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} ORDER BY (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL) DESC, c.filed_date DESC NULLS LAST, c.id DESC LIMIT 500`, params);
+  const al = await q("SELECT count(*)::int n FROM cases WHERE firm_id=$1 AND (county = ANY($2) OR tracked) AND (date_alert IS NOT NULL OR law_alert IS NOT NULL OR filing_alert IS NOT NULL)" + (req.user.role === "paralegal" || req.user.role === "admin" ? "" : " AND user_id=$3"), req.user.role === "paralegal" || req.user.role === "admin" ? [req.user.firm_id, req.user.counties || []] : [req.user.firm_id, req.user.counties || [], req.user.id]);
   res.json({ cases: rows, alerts: al.rows[0].n });
 }));
 app.post("/api/cases", requireAuth, wrap(async (req, res) => {
@@ -372,6 +375,25 @@ app.get("/api/admin/inspect/:county", requireAuth, requireAdmin, rateLimit({ win
   if (!conn) return res.status(404).json({ error: "No connector" });
   try { const r = await sync.MODULES[conn.type].inspect({ baseUrl: conn.url }); console.log("[inspect]", JSON.stringify(r)); res.json(r); }
   catch (e) { console.error("[inspect] failed", e.message); res.status(502).json({ error: e.message }); }
+}));
+
+// ---------- re:SearchTX alert emails (Postmark inbound webhook) ----------
+app.post("/api/inbound/postmark", wrap(async (req, res) => {
+  const key = (process.env.INBOUND_KEY || "").trim(), given = String(req.query.key || "").trim();
+  if (!key || given.length !== key.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(key))) return res.status(403).json({ error: "Forbidden" });
+  try { res.json(await inbound.handle(req.body || {})); }
+  catch (e) { console.error("[inbound] failed", e.message); res.json({ ok: false }); } // 200 so Postmark doesn't retry forever
+}));
+app.get("/api/email-alerts", requireAuth, wrap(async (req, res) => {
+  const token = await inbound.tokenFor(req.user.id);
+  const { rows } = await q("SELECT id, from_addr, subject, kind, causes, matched_case_ids, confirm_code, received_at FROM inbound_emails WHERE user_id=$1 ORDER BY received_at DESC LIMIT 30", [req.user.id]);
+  const confirm = rows.find(r => r.kind === "forward_confirm" && r.confirm_code);
+  const known = rows.length ? (await q("SELECT upper(cause_no) c FROM cases WHERE firm_id=$1", [req.user.firm_id])).rows.map(r => r.c) : [];
+  res.json({ address: inbound.addressFor(token), configured: !!inbound.addressFor(token), confirm: confirm ? { code: confirm.confirm_code, at: confirm.received_at } : null,
+    emails: rows.filter(r => r.kind !== "forward_confirm").map(r => ({ ...r, unmatched: (r.causes || []).filter(c => !known.includes(c)) })) });
+}));
+app.post("/api/cases/:id/filing-ack", requireAuth, wrap(async (req, res) => {
+  await q("UPDATE cases SET filing_alert=NULL WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true });
 }));
 
 // ---------- case law ----------
