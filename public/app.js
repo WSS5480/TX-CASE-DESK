@@ -96,7 +96,8 @@ async function inboxView(quiet) {
   const connCard = !mb ? "" : conn
     ? `<div class="card"><span class="tag g">Connected</span> <b>${esc(conn.email || mb.names[conn.provider])}</b> <span class="mute">· court emails are checked every hour</span></div>`
     : `<div class="card"><h2 style="margin-top:0">📬 Connect your email</h2><p style="margin-top:0">Sign in once with the email you get court notices at. We read only court emails and build and update your cases from them.</p>
-       ${["microsoft", "google"].map(p => mb.configured[p] ? `<a class="btn" href="/api/mail/connect/${p}" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with ${p === "microsoft" ? "Outlook / Microsoft 365" : "Gmail"}</a>` : "").join("")}
+       ${mb.configured.microsoft ? `<a class="btn" href="/api/mail/connect/microsoft" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Outlook / Microsoft 365</a>` : `<button class="btn ghost" disabled style="display:block;width:100%;margin:8px 0;padding:14px">Sign in with Outlook — not switched on yet</button>`}
+       ${mb.configured.google ? `<a class="btn" href="/api/mail/connect/google" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Gmail</a>` : ""}
        <p class="mute" style="margin-bottom:0;font-size:13px">Read-only. Personal email is ignored and never stored. Disconnect anytime under Court Updates.</p></div>`;
   $("#app").innerHTML = `${connCard}<div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Inbox</h2>${r.unread ? `<button class="btn sm ghost" id="readAll">Mark all read</button>` : ""}</div>
    <p class="mute" style="margin-bottom:0">Every court email from your connected email. Tap one for the summary and the exact email.</p></div>
@@ -532,7 +533,8 @@ function accountView() {
 // ---------------- auto refresh + pull to refresh ----------------
 let appVer = null;
 async function checkVersion() {
-  try { const { v } = await api("/api/version"); if (appVer && v !== appVer) return location.reload(); appVer = v; } catch {}
+  try { const r = await api("/api/version"); if (appVer && r.v !== appVer) return location.reload(); appVer = r.v;
+    const el = document.getElementById("ver"); if (el) el.textContent = `Version ${r.v} · updated ${new Date(r.updated).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} · Outlook connect ${r.outlook ? "on" : "OFF"}`; } catch {}
 }
 function busy() { const a = document.activeElement; return a && /INPUT|TEXTAREA|SELECT/.test(a.tagName); }
 async function autoRefresh() {
@@ -563,6 +565,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) auto
 })();
 
 // ---------------- boot ----------------
+checkVersion();
 (async () => {
   try { META = await api("/api/meta"); } catch (e) { $("#app").innerHTML = `<div class="card err">Can't reach server.</div>`; return; }
   const qs = new URLSearchParams(location.search);

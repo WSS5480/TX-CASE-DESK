@@ -80,8 +80,9 @@ const requireAuth = wrap(async (req, res, next) => {
 const requireAdmin = (req, res, next) => req.user.role === "admin" ? next() : res.status(403).json({ error: "Firm admins only" });
 
 // ---------- reference ----------
-const VERSION = (process.env.RENDER_GIT_COMMIT || String(Date.now())).slice(0, 12);
-app.get("/api/version", (req, res) => { res.set("Cache-Control", "no-store"); res.json({ v: VERSION }); });
+const VERSION = (process.env.RENDER_GIT_COMMIT || String(Date.now())).slice(0, 7);
+const STARTED = new Date().toISOString();
+app.get("/api/version", (req, res) => { res.set("Cache-Control", "no-store"); res.json({ v: VERSION, updated: STARTED, outlook: mail.configured().microsoft, gmail: mail.configured().google }); });
 app.get("/api/meta", wrap(async (req, res) => res.json({ counties: COUNTIES, appeals: APPEALS, connectors: CONNECTORS, courts: cl.TX_COURTS, localLaw: await lawdb.available(), lawCount: await lawdb.size().catch(() => 0), tokenSet: !!process.env.COURTLISTENER_TOKEN })));
 app.get("/healthz", (req, res) => res.send("ok"));
 
