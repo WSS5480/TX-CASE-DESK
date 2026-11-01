@@ -176,6 +176,7 @@ async function quickAdd(k) {
   const q = QUICK.find(x => x[0] === k); if (!q) return;
   await nav(q[2]);
   const el = $(q[3]); const d = el && (el.tagName === "DETAILS" ? el : el.closest("details"));
+  if (!d && k === "event" && window.calAdd) return window.calAdd();
   if (d) { d.open = true; d.scrollIntoView({ behavior: "smooth", block: "start" }); setTimeout(() => { const i = d.querySelector("input:not([type=hidden]):not([type=checkbox]),select,textarea"); if (i) i.focus({ preventScroll: true }); }, 350); }
 }
 // running timer (kept on this device; same storage the Today and Billing screens use)

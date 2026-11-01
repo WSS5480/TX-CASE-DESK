@@ -232,41 +232,152 @@
   };
 
   // ===================== CALENDAR (+ Texas deadline calculator + feed) =====================
-  const cal = { range: "upcoming" };
-  let rules = null;
+  // ===================== CALENDAR: Month, Week, Day and List views =====================
+  const cal = { view: "month", anchor: null, sel: null, hide: {}, openDl: false };
+  let rules = null;   // Texas deadline rules, loaded once
+  const KCLS = { hearing: "k-h", deadline: "k-d", meeting: "k-m", event: "k-o" };
+  const KWORD = { hearing: "Hearing", deadline: "Deadline", meeting: "Meeting", event: "Other" };
+  const mins = s => { const m = String(s || "").match(/(\d{1,2})(?::(\d{2}))?\s*([AP])\.?M/i); return m ? (+m[1] % 12 + (m[3].toUpperCase() === "P" ? 12 : 0)) * 60 + (+m[2] || 0) : null; };
+  const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const D = s => new Date(s + "T12:00:00");
+  const sunday = s => { const d = D(s); d.setDate(d.getDate() - d.getDay()); return ymd(d); };
+  const shortT = s => { const m = mins(s); if (m == null) return ""; const h = Math.floor(m / 60), mm = m % 60; return `${h % 12 || 12}${mm ? ":" + String(mm).padStart(2, "0") : ""}${h < 12 ? "a" : "p"}`; };
+  const initialsOf = n => String(n || "").split(/\s+/).filter(Boolean).slice(0, 2).map(x => x[0]).join("").toUpperCase();
+  function calRange() {
+    const a = cal.anchor;
+    if (cal.view === "month") { const f = D(a); f.setDate(1); const l = new Date(f); l.setMonth(l.getMonth() + 1); l.setDate(0); const from = sunday(ymd(f)); const end = D(ymd(l)); end.setDate(end.getDate() + (6 - end.getDay())); return { from, to: ymd(end) }; }
+    if (cal.view === "week") { const from = sunday(a); return { from, to: addD(from, 6) }; }
+    if (cal.view === "day") return { from: a, to: a };
+    return { from: a, to: addD(a, 44) };
+  }
+  function calTitle(r) {
+    const a = D(cal.anchor);
+    if (cal.view === "month") return a.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+    if (cal.view === "day") return a.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+    const f = D(r.from), t = D(r.to), sameM = f.getMonth() === t.getMonth();
+    if (cal.view === "list") return `${f.toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${t.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
+    return `${f.toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${sameM ? t.getDate() : t.toLocaleDateString("en-US", { month: "short", day: "numeric" })}, ${t.getFullYear()}`;
+  }
+  function calMove(n) {
+    const d = D(cal.anchor);
+    if (cal.view === "month") { d.setDate(1); d.setMonth(d.getMonth() + n); }
+    else d.setDate(d.getDate() + n * (cal.view === "week" ? 7 : cal.view === "day" ? 1 : 45));
+    cal.anchor = ymd(d); cal.sel = null; calendarView();
+  }
+  const chip = (i, k, firm) => `<button type="button" class="ev ${KCLS[i.kind] || "k-o"}${i.done ? " done" : ""}" data-ev="${k}" aria-label="${esc(KWORD[i.kind] || "Event")}: ${esc(i.title)}${i.time ? ", " + esc(i.time) : ""}${i.done ? ", done" : ""}">${i.time ? `<span class="et">${esc(shortT(i.time))}</span>` : ""}${i.kind === "deadline" ? "Due: " : ""}${esc(i.title)}${firm && i.who ? ` <span class="ew">${esc(initialsOf(i.who))}</span>` : ""}</button>`;
+
   VIEWS.calendar = async function calendarView() {
+    if (!cal.anchor) cal.anchor = todayStr();
     $("#app").innerHTML = `<div class="card mute">Loading calendar…</div>`;
     const bar = await filterBar("pfCal", calendarView, "Calendar");
-    const t = todayStr(), from = cal.range === "past" ? addD(t, -60) : t, to = cal.range === "past" ? addD(t, -1) : addD(t, cal.range === "upcoming" ? 45 : 180);
-    let r, cs; try { [r, cs] = await Promise.all([api("/api/calendar?" + qs({ from, to })), loadCases()]); if (!rules) rules = (await api("/api/deadlines/rules")).rules; } catch (e) { return fail(e); }
-    const byDay = {}; r.items.forEach(i => (byDay[i.date] = byDay[i.date] || []).push(i));
+    const t = todayStr(), rg = calRange(), firm = pf.who === "firm";
+    let r, cs; try { [r, cs] = await Promise.all([api("/api/calendar?" + qs(rg)), loadCases()]); if (!rules) rules = (await api("/api/deadlines/rules")).rules; } catch (e) { return fail(e); }
+    const items = r.items.filter(i => !cal.hide[i.kind || "event"]);
+    const byDay = {}; items.forEach((i, k) => { i._k = k; (byDay[i.date] = byDay[i.date] || []).push(i); });
     const groups = [...new Set(rules.map(x => x.group))];
+    const phone = window.matchMedia("(max-width:999px)").matches;
+    let body = "";
+    if (cal.view === "month") {
+      const days = []; for (let d = rg.from; d <= rg.to; d = addD(d, 1)) days.push(d);
+      const mon = D(cal.anchor).getMonth();
+      body = `<div class="mgrid" role="grid" aria-label="${esc(calTitle(rg))}"><div class="mhead" role="row">${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(x => `<span role="columnheader">${x}</span>`).join("")}</div>
+        ${Array.from({ length: days.length / 7 }, (_, w) => `<div class="mrow" role="row">${days.slice(w * 7, w * 7 + 7).map(d => { const its = byDay[d] || [], out = D(d).getMonth() !== mon;
+          return `<div class="mcell${out ? " out" : ""}${d === t ? " today" : ""}${cal.sel === d ? " sel" : ""}" role="gridcell"><button type="button" class="mday" data-day="${d}" aria-label="${esc(D(d).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }))}, ${its.length} item${its.length === 1 ? "" : "s"}">${D(d).getDate()}</button>
+            <div class="mevs">${its.slice(0, 3).map(i => chip(i, i._k, firm)).join("")}${its.length > 3 ? `<button type="button" class="more" data-day="${d}">+${its.length - 3} more</button>` : ""}</div>
+            <div class="mdots" aria-hidden="true">${its.slice(0, 4).map(i => `<span class="dot ${KCLS[i.kind] || "k-o"}"></span>`).join("")}</div></div>`; }).join("")}</div>`).join("")}</div>
+        ${phone ? `<div id="dayPanel">${dayList(cal.sel || (rg.from <= t && t <= rg.to ? t : cal.anchor), byDay, firm)}</div>` : ""}`;
+    } else if (cal.view === "week" || cal.view === "day") {
+      const days = cal.view === "day" ? [cal.anchor] : Array.from({ length: 7 }, (_, i) => addD(rg.from, i));
+      if (phone) body = days.map(d => dayList(d, byDay, firm, true)).join("");
+      else {
+        const timed = items.filter(i => mins(i.time) != null).map(i => mins(i.time));
+        const h0 = Math.min(7, ...timed.map(m => Math.floor(m / 60))), h1 = Math.max(19, ...timed.map(m => Math.ceil(m / 60) + 1));
+        const H = 48, hours = Array.from({ length: h1 - h0 }, (_, i) => h0 + i);
+        const col = d => { const evs = (byDay[d] || []).filter(i => mins(i.time) != null).sort((a, b) => mins(a.time) - mins(b.time));
+          const lanes = []; evs.forEach(i => { const st = mins(i.time); let l = lanes.findIndex(end => end <= st); if (l < 0) { l = lanes.length; lanes.push(0); } lanes[l] = st + 60; i._lane = l; });
+          const n = Math.max(1, lanes.length);
+          return evs.map(i => `<div class="wev" style="top:${(mins(i.time) - h0 * 60) / 60 * H}px;height:${H - 4}px;left:calc(${i._lane / n * 100}% + 2px);width:calc(${100 / n}% - 4px)">${chip(i, i._k, firm)}</div>`).join(""); };
+        body = `<div class="wk" style="--cols:${days.length}">
+          <div class="wkh"><span></span>${days.map(d => `<button type="button" class="wkd${d === t ? " today" : ""}" data-gday="${d}"><small>${D(d).toLocaleDateString("en-US", { weekday: "short" })}</small><b>${D(d).getDate()}</b></button>`).join("")}</div>
+          <div class="wka"><span class="wkl">All day</span>${days.map(d => `<div class="wkac">${(byDay[d] || []).filter(i => mins(i.time) == null).map(i => chip(i, i._k, firm)).join("")}</div>`).join("")}</div>
+          <div class="wkb" style="height:${hours.length * H}px"><div class="wkt">${hours.map(h => `<span style="height:${H}px">${h % 12 || 12} ${h < 12 ? "AM" : "PM"}</span>`).join("")}</div>
+            ${days.map(d => `<div class="wkc${d === t ? " today" : ""}" style="background-size:100% ${H}px">${col(d)}</div>`).join("")}</div></div>`;
+      }
+    } else {
+      body = Object.keys(byDay).length ? Object.entries(byDay).map(([day, its]) => `<div class="card"><div style="font-weight:700;margin-bottom:4px">${day === t ? "Today · " : ""}${niceDate(day)}</div>${its.map(i => itemRow(i) + (i.src === "event" ? `<div class="row" style="margin:2px 0 6px 82px"><label style="display:flex;gap:6px;align-items:center;font-size:13px;color:var(--ink);margin:0"><input type="checkbox" data-done="${i.id}" ${i.done ? "checked" : ""}> Done</label><button class="btn sm ghost" data-del="${i.id}">Delete</button></div>` : "")).join("")}</div>`).join("") : `<div class="card mute">Nothing on the calendar from ${esc(niceDate(rg.from))} to ${esc(niceDate(rg.to))}.</div>`;
+    }
     $("#app").innerHTML = `${bar}
-      <details class="card" id="dlBox" ${cal.openDl ? "open" : ""}><summary>Texas deadline calculator</summary>
+      <div class="calbar"><div class="row calnav"><button type="button" class="btn ghost sm" id="calToday">Today</button>
+          <button type="button" class="iconb" id="calPrev" aria-label="Previous">${ic("back", 20, 2)}</button><button type="button" class="iconb" id="calNext" aria-label="Next">${ic("chev", 20, 2)}</button>
+          <h1 class="pt calt" aria-live="polite">${esc(calTitle(rg))}</h1></div>
+        <div class="row"><div class="seg" role="group" aria-label="View">${[["month", "Month"], ["week", "Week"], ["day", "Day"], ["list", "List"]].map(([k, v]) => `<button type="button" data-view="${k}" aria-pressed="${cal.view === k}">${v}</button>`).join("")}</div>
+          <button type="button" class="btn" id="calAdd">${ic("plus", 18, 2)}Add</button></div></div>
+      <div class="typef" role="group" aria-label="Show types">${Object.entries(KWORD).map(([k, v]) => `<button type="button" class="tf" data-kind="${k}" aria-pressed="${!cal.hide[k]}"><span class="sw ${KCLS[k]}" aria-hidden="true"></span>${v === "Other" ? "Other" : v + "s"}</button>`).join("")}</div>
+      ${body}
+      <details class="card" id="dlBox" ${cal.openDl ? "open" : ""} style="margin-top:16px"><summary>Texas deadline calculator</summary>
         <p class="mute" style="margin:6px 0">Counts under TRCP 4: weekends and legal holidays push the last day forward. Texas state holidays are flagged so you can check the clerk's office. Always confirm against the rules and any court order.</p>
         <div class="grid"><div class="full"><label>Deadline</label><select id="dlRule">${groups.map(g => `<optgroup label="${esc(g)}">${rules.filter(x => x.group === g).map(x => `<option value="${x.key}">${esc(x.label)} — ${esc(x.cite)}</option>`).join("")}</optgroup>`).join("")}</select></div>
         <div><label id="dlTrigLabel">Date</label><input type="date" id="dlTrig"></div>
         <div id="dlOpts" class="full"></div></div>
         <div class="row" style="margin-top:8px"><button class="btn" id="dlCalc">Calculate</button></div><div class="err" id="dlErr"></div><div id="dlOut"></div></details>
-      <details class="card"><summary>+ Add to calendar</summary><form id="evF" style="margin-top:8px"><div class="grid">
-        <div class="full"><label>What</label><input name="title" required placeholder="Mediation with opposing counsel"></div>
-        <div><label>Date</label><input type="date" name="on_date" required value="${t}"></div><div><label>Time</label><input name="at_time" placeholder="10:00 AM"></div>
-        <div><label>Type</label><select name="kind"><option value="hearing">Hearing</option><option value="deadline">Deadline</option><option value="meeting">Meeting</option><option value="event" selected>Other</option></select></div>
-        <div class="full"><label>Case</label><select name="case_id">${caseOptions(cs)}</select></div>
-        <div class="full"><label>Where</label><input name="location"></div><div class="full"><label>Notes</label><input name="notes"></div></div>
-        <div class="err"></div><button class="btn">Add</button></form></details>
-      <div class="card"><div class="row"><button class="btn sm ${cal.range === "upcoming" ? "" : "ghost"}" data-range="upcoming">Next 45 days</button><button class="btn sm ${cal.range === "long" ? "" : "ghost"}" data-range="long">Next 6 months</button><button class="btn sm ${cal.range === "past" ? "" : "ghost"}" data-range="past">Past 60 days</button></div></div>
-      ${Object.keys(byDay).length ? Object.entries(byDay).map(([day, items]) => `<div class="card"><div style="font-weight:700;margin-bottom:4px">${niceDate(day)}</div>${items.map(i => itemRow(i) + (i.src === "event" ? `<div class="row" style="margin:2px 0 6px 74px"><label style="display:flex;gap:6px;align-items:center;font-size:13px;color:var(--ink)"><input type="checkbox" data-done="${i.id}" ${i.done ? "checked" : ""} style="width:auto"> Done</label><button class="btn sm ghost" data-del="${i.id}">Delete</button></div>` : "")).join("")}</div>`).join("") : `<div class="card mute">Nothing in this range.</div>`}
       <details class="card"><summary>See this calendar in Outlook, Google or your iPhone</summary><div id="feedBox" class="mute" style="margin-top:8px">Loading…</div></details>`;
-    $$("[data-range]").forEach(b => b.onclick = () => { cal.range = b.dataset.range; calendarView(); });
-    $$("[data-case]").forEach(a => a.onclick = () => caseHub(+a.dataset.case));
+    const open = k => evSheet(items[k], cs);
+    $$("#app [data-ev]").forEach(b => b.onclick = () => open(+b.dataset.ev));
+    $$("#app [data-view]").forEach(b => b.onclick = () => { cal.view = b.dataset.view; cal.sel = null; calendarView(); });
+    $$("#app [data-kind]").forEach(b => b.onclick = () => { cal.hide[b.dataset.kind] = !cal.hide[b.dataset.kind]; calendarView(); });
+    $("#calPrev").onclick = () => calMove(-1); $("#calNext").onclick = () => calMove(1);
+    $("#calToday").onclick = () => { cal.anchor = todayStr(); cal.sel = null; calendarView(); };
+    $("#calAdd").onclick = () => addSheet(cal.sel || (cal.view === "day" ? cal.anchor : t), cs);
+    $$("#app [data-gday]").forEach(b => b.onclick = () => { cal.anchor = b.dataset.gday; cal.view = "day"; calendarView(); });
+    $$("#app [data-day]").forEach(b => b.onclick = () => { const d = b.dataset.day;
+      if (phone && cal.view === "month") { cal.sel = d; $$(".mcell.sel").forEach(x => x.classList.remove("sel")); b.closest(".mcell").classList.add("sel"); $("#dayPanel").innerHTML = dayList(d, byDay, firm); $$("#dayPanel [data-ev]").forEach(x => x.onclick = () => open(+x.dataset.ev)); $$("#dayPanel [data-addday]").forEach(x => x.onclick = () => addSheet(x.dataset.addday, cs)); }
+      else { cal.anchor = d; cal.view = "day"; calendarView(); } });
+    $$("#app [data-addday]").forEach(b => b.onclick = () => addSheet(b.dataset.addday, cs));
+    $$("#app [data-case]").forEach(a => a.onclick = () => caseHub(+a.dataset.case));
     $$("[data-done]").forEach(c => c.onchange = async () => { await api(`/api/events/${c.dataset.done}`, { method: "PATCH", body: { done: c.checked } }); toast(c.checked ? "Marked done" : "Reopened"); });
     $$("[data-del]").forEach(b => b.onclick = () => sure(b, async () => { await api(`/api/events/${b.dataset.del}`, { method: "DELETE" }); calendarView(); }));
-    $("#evF").onsubmit = async e => { e.preventDefault(); try { await api("/api/events", { method: "POST", body: Object.fromEntries(new FormData(e.target)) }); toast("Added"); calendarView(); } catch (x) { e.target.querySelector(".err").textContent = x.message; } };
     $("#dlBox").ontoggle = () => cal.openDl = $("#dlBox").open;
     wireDeadline(cs, null, calendarView);
+    window.calAdd = () => addSheet(t, cs);
     $("#feedBox").parentElement.ontoggle = async function () { if (!this.open || $("#feedBox").dataset.done) return; try { const f = await api("/api/calendar/feed"); $("#feedBox").dataset.done = 1; $("#feedBox").innerHTML = feedHelp(f); wireFeed(); } catch (e) { $("#feedBox").textContent = e.message; } };
   };
+  function calendarView() { return VIEWS.calendar(); }   // for the helpers below
+  // one day's items as a list (phone month panel, phone week/day)
+  function dayList(d, byDay, firm, head) {
+    const its = (byDay[d] || []).slice().sort((a, b) => (mins(a.time) ?? -1) - (mins(b.time) ?? -1));
+    return `<section class="box daylist"><div class="bh"><h2>${d === todayStr() ? "Today · " : ""}${esc(D(d).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" }))}</h2><button type="button" class="btn sm ghost" data-addday="${d}">${ic("plus", 16, 2)}Add</button></div>
+      ${its.map(i => `<div class="dli">${chip(i, i._k, firm)}</div>`).join("") || `<div class="empty">Nothing scheduled.</div>`}</section>`;
+  }
+  // details for one calendar item
+  function evSheet(i, cs) {
+    if (!i) return;
+    const isEv = i.src === "event";
+    openSheet(i.title, `<div class="row" style="gap:6px"><span class="tag ${KCLS[i.kind] || "k-o"}">${KWORD[i.kind] || "Other"}</span>${i.cite ? `<span class="tag k">${esc(i.cite)}</span>` : ""}${i.done ? `<span class="tag g">Done</span>` : ""}${!isEv ? `<span class="tag k">From the court record</span>` : ""}</div>
+      <dl class="kv" style="margin:0"><div><b>When</b>${esc(niceDate(i.date))}${i.time ? " · " + esc(i.time) : " · all day"}</div>${i.location ? `<div><b>Where</b>${esc(i.location)}</div>` : ""}${i.who ? `<div><b>Attorney</b>${esc(i.who)}</div>` : ""}</dl>
+      ${i.case ? `<div><button type="button" class="caselink" id="evCase">${esc(i.case.style || i.case.cause_no)}</button><div class="mute">Cause ${esc(i.case.cause_no)}${i.case.county ? " · " + esc(i.case.county) + " County" : ""}</div></div>` : ""}
+      ${i.notes ? `<div class="mute" style="white-space:pre-wrap;font-size:14px;color:var(--ink2)">${esc(i.notes)}</div>` : ""}
+      ${isEv ? `<div class="row">${i.kind === "deadline" && !i.done ? (i.confirmed ? `<span class="ok">${ic("check", 16, 2)}Confirmed</span>` : `<button type="button" class="btn ghost" id="evConf">Confirm date</button>`) : ""}
+        <button type="button" class="btn ghost" id="evDone">${i.done ? "Reopen" : "Mark done"}</button><button type="button" class="btn danger" id="evDel">Delete</button></div>` : `<p class="mute" style="margin:0">Updates automatically when the court record changes.</p>`}`, sh => {
+      const c = sh.querySelector("#evCase"); if (c) c.onclick = () => { closeSheet(); caseHub(i.case.id); };
+      const cf = sh.querySelector("#evConf"); if (cf) cf.onclick = async () => { await api(`/api/events/${i.id}`, { method: "PATCH", body: { confirm: true } }); closeSheet(); toast("Date confirmed"); calendarView(); };
+      const dn = sh.querySelector("#evDone"); if (dn) dn.onclick = async () => { await api(`/api/events/${i.id}`, { method: "PATCH", body: { done: !i.done } }); closeSheet(); toast(i.done ? "Reopened" : "Marked done"); calendarView(); };
+      const dl = sh.querySelector("#evDel"); if (dl) dl.onclick = () => sure(dl, async () => { await api(`/api/events/${i.id}`, { method: "DELETE" }); closeSheet(); toast("Deleted"); calendarView(); });
+    });
+  }
+  // add a hearing, meeting or other item on a day
+  function addSheet(day, cs) {
+    openSheet("Add to calendar", `<form id="evF"><div class="grid">
+        <div class="full"><label for="evT">What</label><input id="evT" name="title" required placeholder="Mediation with opposing counsel"></div>
+        <div><label for="evD">Date</label><input id="evD" type="date" name="on_date" required value="${esc(day)}"></div><div><label for="evH">Time</label><input id="evH" name="at_time" placeholder="10:00 AM"></div>
+        <div><label for="evK">Type</label><select id="evK" name="kind"><option value="hearing">Hearing</option><option value="deadline">Deadline</option><option value="meeting">Meeting</option><option value="event" selected>Other</option></select></div>
+        <div class="full"><label for="evC">Case</label><select id="evC" name="case_id">${caseOptions(cs)}</select></div>
+        <div class="full"><label for="evW">Where</label><input id="evW" name="location"></div><div class="full"><label for="evN">Notes</label><input id="evN" name="notes"></div></div>
+        <div class="err"></div><button class="btn wide">Add</button></form>
+      <p class="mute" style="margin:0">For a rule-based deadline, use the Texas deadline calculator below the calendar.</p>`, sh => {
+      sh.querySelector("#evF").onsubmit = async e => { e.preventDefault(); try { await api("/api/events", { method: "POST", body: Object.fromEntries(new FormData(e.target)) }); closeSheet(); toast("Added"); cal.anchor = e.target.on_date.value; calendarView(); } catch (x) { e.target.querySelector(".err").textContent = x.message; } };
+    });
+  }
+
   function wireDeadline(cs, caseId, after) {
     const sync = () => { const r = rules.find(x => x.key === $("#dlRule").value); $("#dlTrigLabel").textContent = r.trigger; $("#dlOpts").innerHTML =
       (r.mail ? `<label style="display:flex;gap:6px;align-items:center;font-size:14px;color:var(--ink)"><input type="checkbox" id="dlMail" style="width:auto"> Served by mail (+3 days, TRCP 21a(c))</label>` : "") +
