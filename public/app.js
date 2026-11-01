@@ -603,7 +603,7 @@ function renderAnalysis(r, at) {
      ${p.examples?.length ? `<div style="margin-top:8px;font-size:14px">${p.examples.map(op).join("<br>")}</div>` : ""}</div>`).join("") || `<p class="mute">Not enough appellate cases on these issues to rank paths. Try broader issues.</p>`}
    ${thin.length ? `<p class="mute" style="margin-bottom:0">Too few cases to rank: ${thin.map(p => `${esc(p.label)} (${p.n})`).join(", ")}</p>` : ""}</div>
   <div class="card"><h3>Top authorities</h3><p class="mute">Ranked by court (Texas Supreme Court first), how recent, and how often cited.</p>
-   ${r.authorities.map((o, i) => `<div style="margin:10px 0">${i + 1}. ${op(o)}<div class="mute">${esc(o.binding)} · cited ${o.cite_count}×</div>${o.snippet ? `<div style="font-size:13px">${esc(o.snippet)}…</div>` : ""}</div>`).join("") || `<p class="mute">No opinions found.</p>`}</div>
+   ${r.authorities.map((o, i) => `<div style="margin:10px 0">${i + 1}. ${op(o)}<div class="mute">${esc(o.binding)} · cited ${o.cite_count}×</div>${o.snippet ? `<div style="font-size:13px">${esc(cleanSnip(o.snippet))}…</div>` : ""}</div>`).join("") || `<p class="mute">No opinions found.</p>`}</div>
   <div class="card mute" style="font-size:13px"><b>How this works:</b> ${esc(r.method)}<br>Search used: <code>${esc(r.query)}</code></div>`;
   $$("#ar [data-c]").forEach(a => a.onclick = () => { law.open = +a.dataset.c; tab = "law"; renderNav(); opinionView(law.open); window.scrollTo(0, 0); });
 }
@@ -629,13 +629,15 @@ async function runSearch() {
   try { law.results = await api(`/api/law/search?${new URLSearchParams(prm)}`); renderResults(); }
   catch (e) { $("#res").innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
 }
+// opinion previews often start with long rule lines (════, ————); show them as a simple separator
+const cleanSnip = s => String(s || "").replace(/[═─━—–_=~*\-]{3,}/g, " · ").replace(/\s+/g, " ").replace(/(\s·\s*){2,}/g, " · ").replace(/^\s*·\s*|\s*·\s*$/g, "").trim();
 function renderResults() {
   const r = law.results;
   $("#res").innerHTML = `<div class="mute" style="margin:0 4px 8px">${(r.count || 0).toLocaleString()} opinions${r.stale ? " (cached)" : ""}</div>` +
     (r.results.map(o => `<div class="card"><div class="mute">${esc(o.court)} · ${esc(o.date_filed || "")}</div>
      <h3 style="margin-top:4px"><a class="link" data-c="${o.cluster_id}">${esc(o.case_name)}</a></h3>
      <div class="mute">${esc(o.citation || "No reporter cite")} · cited ${o.cite_count}×${o.origin_county ? ` · appeal from ${esc(o.origin_county)} County` : ""}</div>
-     ${o.snippet ? `<p style="margin:6px 0 0;font-size:14px">${esc(o.snippet)}…</p>` : ""}</div>`).join("") || `<div class="card mute">No opinions found.</div>`);
+     ${o.snippet ? `<p style="margin:6px 0 0;font-size:14px">${esc(cleanSnip(o.snippet))}…</p>` : ""}</div>`).join("") || `<div class="card mute">No opinions found.</div>`);
   $$("[data-c]").forEach(a => a.onclick = () => { law.open = +a.dataset.c; opinionView(law.open); window.scrollTo(0, 0); });
 }
 async function opinionView(cid) {
