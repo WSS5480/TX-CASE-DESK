@@ -223,6 +223,147 @@ CREATE TABLE IF NOT EXISTS tx_cites (
   PRIMARY KEY (citing, cited)
 );
 CREATE INDEX IF NOT EXISTS tx_cites_cited ON tx_cites(cited);
+-- ===== Practice management (calendar, clients, documents, tasks, billing, trust, portal) =====
+ALTER TABLE users ADD COLUMN IF NOT EXISTS rate NUMERIC(10,2);           -- default hourly rate
+ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_token TEXT;               -- private calendar feed (Outlook/Google subscribe)
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS rate NUMERIC(10,2);           -- case rate override
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS billing TEXT DEFAULT 'hourly'; -- hourly | flat | contingency
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS closed_days JSONB DEFAULT '[]'; -- extra days the courts/clerk are closed
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS stripe_enc TEXT;              -- firm's own Stripe secret key (encrypted)
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS stripe_hint TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS card_fee_pct NUMERIC(5,2);    -- shown up front on invoices
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS card_fee_fixed NUMERIC(6,2);
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS invoice_seq INT DEFAULT 1000;
+CREATE TABLE IF NOT EXISTS events (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  case_id INT REFERENCES cases(id) ON DELETE CASCADE,
+  user_id INT REFERENCES users(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL DEFAULT 'event',      -- hearing | deadline | meeting | event
+  title TEXT NOT NULL,
+  on_date DATE NOT NULL,
+  at_time TEXT,                            -- '10:00 AM' or null (all day)
+  location TEXT,
+  notes TEXT,
+  rule TEXT, cite TEXT,                    -- deadline calculator rule + citation
+  done BOOLEAN DEFAULT false,
+  created_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS events_firm_date ON events(firm_id, on_date);
+CREATE TABLE IF NOT EXISTS contacts (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'client',     -- client | opposing | witness | other
+  name TEXT NOT NULL,
+  company TEXT, email TEXT, phone TEXT, address TEXT, notes TEXT,
+  portal_token TEXT UNIQUE,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS contacts_firm ON contacts(firm_id, lower(name));
+CREATE TABLE IF NOT EXISTS case_contacts (
+  case_id INT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  contact_id INT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'client',     -- client | opposing party | opposing counsel | witness | other
+  PRIMARY KEY (case_id, contact_id)
+);
+CREATE TABLE IF NOT EXISTS documents (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  case_id INT REFERENCES cases(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  mime TEXT, size INT,
+  data BYTEA,
+  shared BOOLEAN DEFAULT false,            -- visible in the client portal
+  uploaded_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS documents_case ON documents(case_id);
+CREATE TABLE IF NOT EXISTS tasks (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  case_id INT REFERENCES cases(id) ON DELETE CASCADE,
+  assignee INT REFERENCES users(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  due_date DATE,
+  done BOOLEAN DEFAULT false, done_at TIMESTAMPTZ,
+  created_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS tasks_firm ON tasks(firm_id, done, due_date);
+CREATE TABLE IF NOT EXISTS task_templates (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  case_type TEXT NOT NULL,                 -- a case type, or '*' for every new case
+  title TEXT NOT NULL,
+  due_days INT,                            -- days after the case is added
+  sort INT DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS time_entries (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  case_id INT REFERENCES cases(id) ON DELETE CASCADE,
+  user_id INT REFERENCES users(id) ON DELETE SET NULL,
+  on_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  minutes INT NOT NULL DEFAULT 0,
+  rate NUMERIC(10,2) DEFAULT 0,
+  amount NUMERIC(12,2),                    -- flat amount (expense or flat fee) instead of minutes x rate
+  description TEXT,
+  billable BOOLEAN DEFAULT true,
+  invoice_id INT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS time_firm ON time_entries(firm_id, on_date);
+CREATE TABLE IF NOT EXISTS invoices (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  case_id INT REFERENCES cases(id) ON DELETE SET NULL,
+  contact_id INT REFERENCES contacts(id) ON DELETE SET NULL,
+  number TEXT NOT NULL,
+  issued DATE DEFAULT CURRENT_DATE,
+  due DATE,
+  status TEXT DEFAULT 'draft',             -- draft | sent | paid | void
+  total NUMERIC(12,2) DEFAULT 0,
+  paid NUMERIC(12,2) DEFAULT 0,
+  pay_token TEXT UNIQUE,
+  notes TEXT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS invoice_lines (
+  id SERIAL PRIMARY KEY,
+  invoice_id INT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+  time_id INT,
+  description TEXT, qty NUMERIC(10,2), rate NUMERIC(10,2), amount NUMERIC(12,2)
+);
+CREATE TABLE IF NOT EXISTS payments (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  invoice_id INT REFERENCES invoices(id) ON DELETE CASCADE,
+  amount NUMERIC(12,2) NOT NULL,
+  method TEXT,                             -- card | bank | check | cash | trust | other
+  ref TEXT,
+  on_date DATE DEFAULT CURRENT_DATE,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE (invoice_id, ref)
+);
+CREATE TABLE IF NOT EXISTS trust_tx (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  contact_id INT NOT NULL REFERENCES contacts(id) ON DELETE RESTRICT,
+  case_id INT REFERENCES cases(id) ON DELETE SET NULL,
+  on_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  amount NUMERIC(12,2) NOT NULL,           -- + deposit, - disbursement
+  memo TEXT, ref TEXT,
+  created_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS trust_firm ON trust_tx(firm_id, contact_id);
+CREATE TABLE IF NOT EXISTS trust_recon (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  as_of DATE NOT NULL, bank_balance NUMERIC(12,2) NOT NULL, book_balance NUMERIC(12,2) NOT NULL, ledgers_total NUMERIC(12,2) NOT NULL,
+  ok BOOLEAN, created_by INT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMPTZ DEFAULT now()
+);
 CREATE INDEX IF NOT EXISTS cases_firm_county ON cases(firm_id, county);
 CREATE INDEX IF NOT EXISTS audit_firm ON audit_log(firm_id, at DESC);
 `;

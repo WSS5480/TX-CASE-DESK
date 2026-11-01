@@ -14,6 +14,7 @@ const analysis = require("./analysis");
 const lawdb = require("./lawdb");
 const inbound = require("./inbound");
 const mail = require("./mail");
+const practice = require("./practice");
 const myapps = require("./myapps");
 const cl = require("./courtlistener");
 const { COUNTIES, APPEALS, CONNECTORS } = require("./counties");
@@ -265,6 +266,7 @@ app.post("/api/cases", requireAuth, wrap(async (req, res) => {
     ON CONFLICT(firm_id,county,cause_no) DO NOTHING RETURNING *`, [req.user.firm_id, req.user.id, ...cols.map(k => c[k])]);
   if (!rows[0]) return res.status(409).json({ error: "That cause # is already in your firm's list for this county." });
   await audit(req, "case_added", { id: rows[0].id, county: c.county, cause_no: c.cause_no });
+  await practice.onCaseCreated(rows[0], req.user.id);
   res.json({ case: rows[0] });
 }));
 app.patch("/api/cases/:id", requireAuth, wrap(async (req, res) => {
@@ -347,9 +349,9 @@ app.post("/api/cases/import", requireAuth, wrap(async (req, res) => {
     if (!(req.user.counties || []).includes(county)) { skipped.push(`${c.cause_no}: ${county} not in your counties`); continue; }
     c.county = county;
     const cols = Object.keys(c);
-    const ins = await q(`INSERT INTO cases(firm_id,user_id,source,${cols.join(",")}) VALUES($1,$2,'csv',${cols.map((_, i) => "$" + (i + 3)).join(",")}) ON CONFLICT DO NOTHING`,
+    const ins = await q(`INSERT INTO cases(firm_id,user_id,source,${cols.join(",")}) VALUES($1,$2,'csv',${cols.map((_, i) => "$" + (i + 3)).join(",")}) ON CONFLICT DO NOTHING RETURNING *`,
       [req.user.firm_id, req.user.id, ...cols.map(k => c[k])]);
-    if (ins.rowCount) added++; else skipped.push(`${c.cause_no}: already in list`);
+    if (ins.rowCount) { added++; await practice.onCaseCreated(ins.rows[0], req.user.id); } else skipped.push(`${c.cause_no}: already in list`);
   }
   await audit(req, "cases_imported", { added, skipped: skipped.length });
   res.json({ added, skipped });
@@ -619,6 +621,9 @@ app.post("/api/research", requireAuth, wrap(async (req, res) => {
 app.delete("/api/research/:id", requireAuth, wrap(async (req, res) => {
   await q("DELETE FROM saved_research WHERE id=$1 AND user_id=$2", [+req.params.id, req.user.id]); res.json({ ok: true });
 }));
+
+// ---------- practice management (calendar, clients, documents, tasks, billing, trust, portal) ----------
+practice.mount(app, { requireAuth, requireAdmin, wrap, audit });
 
 // ---------- static + errors ----------
 app.use(express.static(path.join(__dirname, "public"), { index: "index.html", setHeaders: r => r.setHeader("Cache-Control", "no-cache") }));

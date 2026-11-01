@@ -107,7 +107,7 @@ async function processEmail(u, { from = "", subject = "", text, html, ext_id = n
       const ins = await q(`INSERT INTO cases(firm_id,user_id,county,cause_no,court,style,status,next_setting,source,tracked,watch_dates)
         VALUES($1,$2,$3,$4,$5,$6,'Active',$7,'email',true,true) ON CONFLICT DO NOTHING RETURNING id, upper(cause_no) c, next_setting, watch_dates`,
         [u.firm_id, u.id, parsed.county, parsed.cause_no, parsed.court_name || parsed.court || null, parsed.style || null, parsed.next_setting || null]);
-      if (ins.rows[0]) { created.push(ins.rows[0].id); m.rows.push({ ...ins.rows[0], fresh: true }); }
+      if (ins.rows[0]) { created.push(ins.rows[0].id); m.rows.push({ ...ins.rows[0], fresh: true }); require("./practice").onCaseCreated({ ...ins.rows[0], firm_id: u.firm_id, user_id: u.id }, u.id).catch(() => {}); }
     }
     const line = [parsed.filing_desc, parsed.filing_type && !parsed.filing_desc ? parsed.filing_type : null].filter(Boolean).join(" · ") || subject || "Court update";
     for (const r of m.rows) {

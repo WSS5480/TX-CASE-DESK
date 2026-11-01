@@ -12,7 +12,9 @@ async function api(path, opts = {}) {
   return data;
 }
 
-let META = null, me = null, tab = "cases";
+let META = null, me = null, tab = "today";
+const VIEWS = {}; // extra views registered by practice.js
+let moreOpen = false;
 const caseF = { view: "mine", county: "", type: "", attorney: "" };
 let firmUsers = null;
 let inboxUnread = 0;
@@ -71,18 +73,26 @@ function start() {
   if (me.must_change_pw) return changePwView(true);
   api("/api/inbox").then(r => { if (r.unread !== inboxUnread) { inboxUnread = r.unread; renderNav(); } }).catch(() => {});
   $("#who").textContent = `${me.name}${me.bar_number ? " · Bar #" + me.bar_number : ""}`;
-  if (!me.counties.length && tab === "cases") tab = "counties";
+  if (!me.counties.length && (tab === "cases" || tab === "today")) { tab = "counties"; moreOpen = true; }
   renderNav(); show();
 }
 function renderNav() {
-  const tabs = [["cases", "Pending Cases"], ["inbox", "Inbox" + (inboxUnread ? ` (${inboxUnread})` : "")], ["law", "Case Law"], ["saved", "Saved"], ["counties", "My Counties"], ["court", "Court Updates"]];
-  if (me.role === "admin") tabs.push(["firm", "Firm Seats"]);
-  tabs.push(["account", "Account"]);
+  const main = [["today", "Today"], ["cases", "Cases"], ["calendar", "Calendar"], ["inbox", "Inbox" + (inboxUnread ? ` (${inboxUnread})` : "")], ["clients", "Clients"], ["tasks", "Tasks"]];
+  if (me.role !== "paralegal") main.push(["billing", "Billing"]);
+  const more = [["law", "Case Law"], ["saved", "Saved"]];
+  if (me.role !== "paralegal") more.push(["trust", "Trust"]);
+  more.push(["counties", "My Counties"], ["court", "Court Updates"]);
+  if (me.role === "admin") more.push(["firm", "Firm Settings"]);
+  more.push(["account", "Account"]);
+  const inMore = more.some(([k]) => k === tab);
+  const b = ([k, v]) => `<button data-t="${k}" class="${tab === k ? "on" : ""}">${v}</button>`;
   const n = $("#nav"); n.hidden = false;
-  n.innerHTML = tabs.map(([k, v]) => `<button data-t="${k}" class="${tab === k ? "on" : ""}">${v}</button>`).join("");
-  n.querySelectorAll("button").forEach(b => b.onclick = () => { tab = b.dataset.t; renderNav(); show(); });
+  n.innerHTML = main.map(b).join("") + `<button data-more="1" class="${inMore ? "on" : ""}">More ${moreOpen || inMore ? "▴" : "▾"}</button>` +
+    (moreOpen || inMore ? `<div style="flex-basis:100%;display:flex;gap:4px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:4px;margin-top:2px">${more.map(b).join("")}</div>` : "");
+  n.querySelectorAll("button[data-t]").forEach(x => x.onclick = () => { tab = x.dataset.t; moreOpen = more.some(([k]) => k === tab); renderNav(); show(); });
+  n.querySelector("[data-more]").onclick = () => { moreOpen = !moreOpen; renderNav(); };
 }
-function show() { subView = false; clearTimeout(courtPoll); ({ inbox: inboxView, cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab](); window.scrollTo(0, 0); }
+function show() { subView = false; clearTimeout(courtPoll); const v = VIEWS[tab] || ({ inbox: inboxView, cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab] || casesView; v(); window.scrollTo(0, 0); }
 
 // ---------------- inbox (court emails) ----------------
 const TYPE_TAG = { "Hearing / setting": "y", "New filing": "g", "Order / judgment": "r", "Case notice": "n", "Account activation": "n", "Email": "n" };
@@ -314,6 +324,7 @@ async function casesView() {
     el.querySelector("[data-a=track]").onclick = async () => { try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { tracked: !c.tracked } }); casesView(); } catch (e) { fail(e); } };
     el.querySelector("[data-a=law]").onclick = () => { law.q = (c.case_type || "").replace(/^.*– /, ""); law.results = null; law.open = null; tab = "law"; renderNav(); lawView(true); };
     el.querySelector("[data-a=edit]").onclick = () => { el.innerHTML = caseForm(c); bindCaseForm(el.querySelector("form"), c); };
+    el.querySelector("[data-a=open]").onclick = () => window.caseHub && caseHub(c.id);
     el.querySelector("[data-a=watch]").onchange = async e => { try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { watch_dates: e.target.checked } }); c.watch_dates = e.target.checked; toast(e.target.checked ? "Watching court dates" : "Stopped watching"); } catch (err) { fail(err); } };
     el.querySelector("[data-a=analyze]").onclick = () => analysisView(c);
     el.querySelector("[data-a=lawwatch]").onchange = async e => { if (e.target.checked && !c.issues) { e.target.checked = false; return toast("Add the case's issues first (Edit → Issues)"); } try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { law_watch: e.target.checked } }); toast(e.target.checked ? "Watching for new case law" : "Stopped"); } catch (err) { fail(err); } };
@@ -337,7 +348,7 @@ function caseCard(c) {
    ${c.notes ? `<p class="mute" style="margin:8px 0 0">${esc(c.notes)}</p>` : ""}
    ${c.source === "county_sync" ? `<p class="mute" style="margin:6px 0 0">↻ Pulled from county portal${c.last_synced ? " · " + new Date(c.last_synced).toLocaleString() : ""}</p>` : ""}
    ${c.external_url ? `<a class="btn sm ghost" style="margin-top:8px;display:inline-block;text-decoration:none" href="${esc(c.external_url)}" target="_blank" rel="noopener">Open on county portal ↗</a>` : ""}
-   <div class="row" style="margin-top:10px"><button class="btn sm ghost" data-a="edit">Edit</button><button class="btn sm ghost" data-a="track">${c.tracked ? "★ Untrack" : "☆ Track"}</button><button class="btn sm" data-a="analyze">Analyze case law</button><button class="btn sm ghost" data-a="law">Search case law</button></div>
+   <div class="row" style="margin-top:10px"><button class="btn sm" data-a="open">Open case</button><button class="btn sm ghost" data-a="edit">Edit</button><button class="btn sm ghost" data-a="track">${c.tracked ? "★ Untrack" : "☆ Track"}</button><button class="btn sm" data-a="analyze">Analyze case law</button><button class="btn sm ghost" data-a="law">Search case law</button></div>
    <label style="margin-top:10px;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink)"><input type="checkbox" data-a="watch" style="width:auto" ${c.watch_dates ? "checked" : ""}> Watch court dates (alert me when the setting changes)</label>
    <label style="margin-top:4px;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink)"><input type="checkbox" data-a="lawwatch" style="width:auto" ${c.law_watch ? "checked" : ""}> Watch for new case law on these issues (checked daily)</label>
    <a class="link mute" data-a="hist" style="font-size:13px">Date history</a><div data-a="histOut"></div></div>`;
@@ -548,7 +559,8 @@ async function firmView() {
     ${u.id !== me.id ? `<div class="row" style="margin-top:6px"><button class="btn sm ghost" data-a="reset">Reset password & 2FA</button><button class="btn sm ${u.active ? "danger" : "ghost"}" data-a="toggle">${u.active ? "Disable" : "Enable"}</button></div>` : ""}</div>`).join("")}</div>
    <div class="card"><h2>Add a seat</h2><form id="af"><div class="grid"><div><label>Name</label><input name="name" required></div><div><label>Email</label><input name="email" type="email" required></div>
    <div><label>Bar # (attorneys)</label><input name="bar" inputmode="numeric"></div><div><label>Role</label><select name="role"><option value="attorney">Attorney</option><option value="paralegal">Paralegal</option><option value="admin">Firm admin</option></select></div></div>
-   <div class="err" id="aerr"></div><button class="btn">Add seat</button></form><div id="temp"></div></div>`;
+   <div class="err" id="aerr"></div><button class="btn">Add seat</button></form><div id="temp"></div></div><div id="firmExtras"></div>`;
+  if (window.renderFirmExtras) renderFirmExtras(us);
   const showTemp = (who, pw) => $("#temp").innerHTML = `<div class="card" style="background:#fff4d6;margin-top:10px"><b>Temporary password for ${esc(who)}:</b><div class="secret" style="margin-top:6px">${esc(pw)}</div><p class="mute">Shown once. Give it to them privately — they'll set their own password and 2FA at first sign-in.</p></div>`;
   if ($("#mkF")) $("#mkF").onsubmit = async e => {
     e.preventDefault(); const f = e.target, btn = f.querySelector("button.btn"); $("#mkErr").textContent = ""; btn.disabled = true; btn.textContent = "Testing with Microsoft…";
