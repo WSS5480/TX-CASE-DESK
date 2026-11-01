@@ -13,6 +13,9 @@
   const firmToggle = () => me.sees_firm && me.firm_kind !== "solo";
   let people = null, caseCache = null, caseAt = 0;
   async function loadPeople() { if (!people) people = (await api("/api/firm/people")).people; return people; }
+  let counties = null, countiesAt = 0;      // every county with a case this person can see (not just "my counties")
+  async function loadCounties() { if (!counties || Date.now() - countiesAt > 5 * 60e3) { counties = (await api("/api/case-counties").catch(() => ({ counties: me.counties || [] }))).counties; countiesAt = Date.now(); } return counties; }
+  const countySelect = (list, sel) => `<select name="county" aria-label="County"><option value="">All counties</option>${list.map(c => `<option ${sel === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>`;
   async function loadCases() { if (!caseCache || Date.now() - caseAt > 60e3) { caseCache = (await api("/api/cases?view=firm")).cases; caseAt = Date.now(); } return caseCache; }
   const caseOptions = (cs, sel) => `<option value="">— No case —</option>` + cs.map(c => `<option value="${c.id}" ${+sel === c.id ? "selected" : ""}>${esc(c.cause_no)} · ${esc((c.style || "").slice(0, 50))}</option>`).join("");
   const peopleOptions = (ps, sel) => ps.map(p => `<option value="${p.id}" ${+sel === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("");
@@ -21,16 +24,17 @@
   // ---------- shared filter bar ----------
   async function filterBar(id, onChange, title) {
     const ps = firmToggle() ? await loadPeople().catch(() => []) : [];
+    const cos = await loadCounties();
     setTimeout(() => {
       const el = $("#" + id); if (!el) return;
-      if (el.querySelector("[name=who]")) el.querySelector("[name=who]").value = pf.who; el.querySelector("[name=county]").value = pf.county;
+      if (el.querySelector("[name=who]")) el.querySelector("[name=who]").value = pf.who; if (el.querySelector("[name=county]")) el.querySelector("[name=county]").value = pf.county;
       const at = el.querySelector("[name=attorney]"); if (at) at.value = pf.attorney;
       el.querySelectorAll("select").forEach(s => s.onchange = () => { pf[s.name] = s.value; if (s.name === "attorney" && s.value) pf.who = "firm"; onChange(); });
     });
     return `<div class="ph" id="${id}" aria-label="${esc(title || "Filters")}"><div class="row">
       ${firmToggle() ? `<select name="who" aria-label="Show"><option value="mine">Mine</option><option value="firm">Whole firm</option></select>` : ""}
       ${firmToggle() ? `<select name="attorney" aria-label="Attorney"><option value="">All attorneys</option>${peopleOptions(ps.filter(p => p.role !== "paralegal"))}</select>` : ""}
-      <select name="county" aria-label="County"><option value="">All my counties</option>${me.counties.map(c => `<option>${esc(c)}</option>`).join("")}</select></div></div>`;
+      ${cos.length > 1 || pf.county ? countySelect(cos, pf.county) : ""}</div></div>`;
   }
   const qs = extra => new URLSearchParams({ who: pf.who, attorney: pf.attorney, county: pf.county, ...(extra || {}) });
 
@@ -73,7 +77,7 @@
   const TODAY_CARDS = [["court", "In court today"], ["deadlines", "Deadlines"], ["mail", "New from court email"], ["next", "Next 14 days"], ["timer", "Timer"], ["tasks", "My tasks"], ["glance", "At a glance (numbers)"], ["caseload", "Open cases by county"]];
   VIEWS.today = async function todayView() {
     $("#app").innerHTML = `<div class="card mute">Loading today…</div>`;
-    const ps = firmToggle() ? await loadPeople().catch(() => []) : [];
+    const [ps, cos] = await Promise.all([firmToggle() ? loadPeople().catch(() => []) : [], loadCounties()]);
     const hid = new Set((me.prefs && me.prefs.today_hidden) || []);
     let d, cs, ib; try { [d, cs, ib] = await Promise.all([api("/api/dashboard?" + qs()), isLawyer() ? loadCases() : Promise.resolve([]), api("/api/inbox").catch(() => ({ emails: [], unread: 0 }))]); } catch (e) { return fail(e); }
     const t = d.today, hr = new Date().getHours(), first = String(me.name || "").split(/\s+/)[0];
@@ -107,15 +111,16 @@
       <div class="ph"><div><div class="eyebrow">${esc(longDate)}</div><h1 class="pt">${hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening"}${first ? ", " + esc(first) : ""}</h1></div>
         <div class="row" id="pfToday">${firmToggle() ? `<div class="seg" role="group" aria-label="Show"><button type="button" data-who="mine" aria-pressed="${mine}">Mine</button><button type="button" data-who="firm" aria-pressed="${!mine}">Whole firm</button></div>` : ""}
         ${firmToggle() ? `<select name="attorney" aria-label="Attorney"><option value="">All attorneys</option>${peopleOptions(ps.filter(p => p.role !== "paralegal"), pf.attorney)}</select>` : ""}
-        ${me.counties.length > 1 ? `<select name="county" aria-label="County"><option value="">All my counties</option>${me.counties.map(c => `<option ${pf.county === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>` : ""}
+        ${cos.length > 1 || pf.county ? countySelect(cos, pf.county) : ""}
         <button type="button" class="btn ghost" id="tdCust">Customize</button></div></div>
+      ${d.court_queue ? `<div class="banner"><span>${ic("inbox", 18)}<b>${d.court_queue} court notice${d.court_queue === 1 ? "" : "s"} need${d.court_queue === 1 ? "s" : ""} assigning</b><span class="mute">from the shared court inbox</span></span><button type="button" class="btn sm" data-court>Assign</button></div>` : ""}
       <div class="cols"><div class="cmain">
         <section class="box" data-card="court" aria-labelledby="tdCourt"><div class="bh"><h2 id="tdCourt">In court today</h2><a data-go="calendar">Open calendar</a></div>
           <ul style="list-style:none;margin:0;padding:0">${courtToday.map(courtRow).join("") || `<li class="empty">Nothing in court today.${nextCourt ? ` Next: <b>${esc(nextCourt.title)}</b> on ${esc(niceDate(nextCourt.date))}${nextCourt.time ? " at " + esc(nextCourt.time) : ""}${nextCourt.case ? " · " + caseLink(nextCourt.case) : ""}` : ""}</li>`}</ul>
           <div class="mute" style="padding:10px 18px;border-top:1px solid var(--line2)">Court dates on watched cases are checked every hour.</div></section>
         <section class="box" data-card="deadlines" aria-labelledby="tdDl"><div class="bh"><h2 id="tdDl">Deadlines</h2><a data-qa="deadline">Calculate a deadline</a></div>
           <ul style="list-style:none;margin:0;padding:0">${dls.map(dlRow).join("") || `<li class="empty">No deadlines in the next two weeks.</li>`}</ul></section>
-        <section class="box" data-card="mail" aria-labelledby="tdMail"><div class="bh"><h2 id="tdMail">New from court email</h2><a data-go="inbox">Open court mail</a></div>
+        <section class="box" data-card="mail" aria-labelledby="tdMail"><div class="bh"><h2 id="tdMail">New from court email</h2><a data-court>Open court notices</a></div>
           <ul style="list-style:none;margin:0;padding:0">${mail.map(mailRow).join("") || `<li class="empty">No new court email.</li>`}</ul></section>
         <section class="box" data-card="next" aria-labelledby="tdNext"><div class="bh"><h2 id="tdNext">Next 14 days</h2><a data-go="calendar">Open calendar</a></div>
           ${Object.entries(byDay).map(([day, items]) => `<div class="dayh">${day === t ? "Today" : esc(niceDate(day))}</div><div class="dayb">${items.map(i => itemRow(i)).join("")}</div>`).join("") || `<div class="empty">Nothing else on the calendar for the next two weeks.</div>`}</section>
@@ -140,6 +145,7 @@
         try { const x = await api("/api/me/prefs", { method: "PUT", body: { today_hidden } }); me.prefs = x.prefs; closeSheet(); toast("Today updated"); todayView(); } catch (e) { fail(e); } };
     });
     $$("#app [data-go]").forEach(b => b.onclick = e => { e.preventDefault(); go(b.dataset.go); });
+    $$("#app [data-court]").forEach(b => b.onclick = e => { e.preventDefault(); window.mailOpenCourt ? mailOpenCourt() : go("inbox"); });
     $$("#app [data-qa]").forEach(b => b.onclick = e => { e.preventDefault(); quickAdd(b.dataset.qa); });
     $$("#app [data-case]").forEach(a => a.onclick = () => caseHub(+a.dataset.case));
     $$("#app [data-mail]").forEach(a => a.onclick = () => { tab = "inbox"; renderNav(); emailView(+a.dataset.mail); });
@@ -608,7 +614,7 @@
     const back = titleOf(tab);
     if (hub.id !== id) { hub.id = id; hub.sec = "overview"; }
     const SECS = [["overview", "Overview"], ["dates", "Dates", r.events.filter(e => e.date >= t && !e.done).length], ["people", "People", r.contacts.length], ["tasks", "Tasks", r.tasks.filter(x => !x.done).length], ["docs", "Documents", r.documents.length]];
-    if (isLawyer()) SECS.push(["billing", "Time & billing"]);
+    if (isLawyer()) SECS.push(["law", "Case law"], ["billing", "Time & billing"]);
     const st = c.status || "Open", stCls = /closed|dismiss|dispos/i.test(st) ? "k" : /new/i.test(st) ? "n" : "g";
     const up = r.events.filter(e => e.date >= t && !e.done), nextH = up.find(e => e.kind === "hearing");
     const openTasks = r.tasks.filter(x => !x.done);
@@ -658,6 +664,7 @@
           <div class="row"><label style="display:flex;gap:6px;align-items:center;font-size:13px;color:var(--ink)"><input type="checkbox" data-share="${d.id}" ${d.shared ? "checked" : ""} style="width:auto"> Show on client page</label><button class="btn sm ghost" data-docdel="${d.id}" style="margin-left:auto">Delete</button></div></div>`).join("")}
         ${r.emails.length ? `<h3 style="margin-top:12px">Court emails</h3>${r.emails.map(m => `<div style="border-top:1px solid var(--line);padding:6px 0"><a class="link" data-mail="${m.id}">${esc(m.subject || "(no subject)")}</a><div class="mute">${new Date(m.received_at).toLocaleString()}</div></div>`).join("")}` : ""}
         ${!r.documents.length && !r.emails.length ? `<div class="mute" style="margin-top:6px">Upload files, or draft a notice or letter from the case details.</div>` : ""}</div>
+      ${isLawyer() ? `<div data-sec="law">${analysisPanel(c)}</div>` : ""}
       ${isLawyer() ? `<div class="card" data-sec="billing"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Time & billing</h3><button class="btn sm" id="hbTime">+ Time</button></div>
         <div id="hbTimeBox" hidden style="margin-top:8px">${timeForm(cs, c.id)}</div>
         <div class="kv"><div><b>Unbilled</b>${usd(unbilled)}</div><div><b>Billing</b>${esc(c.billing || "hourly")}</div><div><b>Case rate</b>${c.rate != null ? usd(c.rate) + "/h" : "attorney's rate"}</div></div>
@@ -667,6 +674,7 @@
         ${r.time.slice(0, 8).map(x => `<div class="mute" style="border-top:1px solid var(--line);padding:4px 0">${d10(x.on_date)} · ${esc(x.description || "—")} · ${x.amount != null ? usd(x.amount) : (x.minutes / 60).toFixed(2) + " h"}${x.invoice_id ? " · billed" : ""}</div>`).join("")}</div>` : ""}
       </div></div>`;
     $("#bk").onclick = $("#bk2").onclick = () => { subView = false; show(); };
+    if (isLawyer()) wireAnalysis(c);
     // sections: tabs on desktop, a dropdown on phones
     const setSec = k => { hub.sec = k; $$("#app [data-sec]").forEach(s => s.hidden = s.dataset.sec !== k); $$(".secnav [data-sec-go]").forEach(b => b.dataset.secGo === k ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")); $("#secSel").value = k; };
     setSec(SECS.some(([k]) => k === hub.sec) ? hub.sec : "overview");

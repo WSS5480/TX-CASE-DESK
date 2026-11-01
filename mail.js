@@ -13,7 +13,8 @@ const PROVIDERS = {
     id: () => (process.env.MS_CLIENT_ID || "").trim(), secret: () => (process.env.MS_CLIENT_SECRET || "").trim(),
     auth: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
     token: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-    scope: "openid email offline_access User.Read Mail.Read"
+    // full mail (read, organize, send) + calendar, so the app works like Outlook; older connections keep the read-only scope until they reconnect
+    scope: "openid email offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite"
   },
   google: {
     name: "Gmail / Google Workspace",
@@ -30,6 +31,7 @@ const NEAR_MISS = /(county|court|clerk|judic|\.tx\.us|\.gov$|tyler|efile|texas)/
 const domainOf = a => String(a || "").split("@")[1]?.toLowerCase() || "";
 const GMAIL_QUERY = "from:(efiletexas.gov OR tylertech.com OR tylertech.cloud OR tylerhost.net OR txcourts.gov OR tx.us OR clerk)";
 const redirect = p => `${APP}/api/mail/callback/${p}`;
+const MS_OLD_SCOPE = "openid email offline_access User.Read Mail.Read";   // what mailboxes connected before Nov 2026 approved
 const configured = () => Object.fromEntries(Object.entries(PROVIDERS).map(([k, v]) => [k, !!(v.id() && v.secret())]));
 const NAMES = { ...Object.fromEntries(Object.entries(PROVIDERS).map(([k, v]) => [k, v.name])), imap: "Email (password sign-in)" };
 
@@ -56,11 +58,11 @@ const msAuth = (tenant, kind) => `https://login.microsoftonline.com/${tenant || 
 
 // OAuth state lives server-side (our session cookie is SameSite=Strict, so it won't come back on the provider redirect)
 const states = new Map();
-async function startUrl(provider, user) {
+async function startUrl(provider, user, opts = {}) {
   const P = PROVIDERS[provider];
   const keys = provider === "microsoft" ? await msKeys(user.firm_id) : { id: P.id(), source: "app" };
   const state = crypto.randomBytes(16).toString("hex");
-  states.set(state, { userId: user.id, firmId: user.firm_id, provider, keySource: keys.source, exp: Date.now() + 10 * 60e3 });
+  states.set(state, { userId: user.id, firmId: user.firm_id, provider, keySource: keys.source, shared: !!opts.shared, exp: Date.now() + 10 * 60e3 });
   for (const [k, v] of states) if (v.exp < Date.now()) states.delete(k);
   const p = new URLSearchParams({ client_id: keys.id, response_type: "code", redirect_uri: redirect(provider), scope: P.scope, state });
   if (provider === "google") { p.set("access_type", "offline"); p.set("prompt", "consent"); p.set("include_granted_scopes", "true"); }
@@ -88,19 +90,24 @@ async function finish(provider, code, state) {
   const t = await tokenCall(provider, { grant_type: "authorization_code", code, redirect_uri: redirect(provider) }, keys);
   if (!t.refresh_token) throw new Error("The provider didn't grant ongoing access. Tap Connect again and approve all permissions.");
   const email = emailFromIdToken(t.id_token);
-  const { rows } = await q(`INSERT INTO mailboxes(user_id, provider, email, enc_refresh, enc_access, access_expires, status, last_error, key_source)
-    VALUES($1,$2,$3,$4,$5,now() + ($6 || ' seconds')::interval,'ok',NULL,$7)
-    ON CONFLICT(user_id, provider) DO UPDATE SET email=$3, enc_refresh=$4, enc_access=$5, access_expires=EXCLUDED.access_expires, status='ok', last_error=NULL, key_source=$7, last_seen=NULL, stats=NULL
-    RETURNING id`, [st.userId, provider, email, box.seal(t.refresh_token), box.seal(t.access_token), String((t.expires_in || 3600) - 120), keys ? keys.source : "app"]);
-  await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [st.userId, { provider, email }]);
+  // the firm's shared court inbox (one per firm), connected by the firm admin
+  const { rows } = st.shared ? await q(`INSERT INTO mailboxes(user_id, provider, email, enc_refresh, enc_access, access_expires, status, last_error, key_source, scope_req, scope_got, shared_firm)
+    VALUES($1,$2,$3,$4,$5,now() + ($6 || ' seconds')::interval,'ok',NULL,$7,$8,$9,$10)
+    ON CONFLICT(shared_firm) WHERE shared_firm IS NOT NULL DO UPDATE SET user_id=$1, provider=$2, email=$3, enc_refresh=$4, enc_access=$5, access_expires=EXCLUDED.access_expires, status='ok', last_error=NULL, key_source=$7, last_seen=NULL, stats=NULL, scope_req=$8, scope_got=$9
+    RETURNING id`, [st.userId, provider, email, box.seal(t.refresh_token), box.seal(t.access_token), String((t.expires_in || 3600) - 120), keys ? keys.source : "app", PROVIDERS[provider].scope, t.scope || null, st.firmId])
+  : await q(`INSERT INTO mailboxes(user_id, provider, email, enc_refresh, enc_access, access_expires, status, last_error, key_source, scope_req, scope_got)
+    VALUES($1,$2,$3,$4,$5,now() + ($6 || ' seconds')::interval,'ok',NULL,$7,$8,$9)
+    ON CONFLICT(user_id, provider) WHERE shared_firm IS NULL DO UPDATE SET email=$3, enc_refresh=$4, enc_access=$5, access_expires=EXCLUDED.access_expires, status='ok', last_error=NULL, key_source=$7, last_seen=NULL, stats=NULL, scope_req=$8, scope_got=$9
+    RETURNING id`, [st.userId, provider, email, box.seal(t.refresh_token), box.seal(t.access_token), String((t.expires_in || 3600) - 120), keys ? keys.source : "app", PROVIDERS[provider].scope, t.scope || null]);
+  await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [st.userId, { provider, email, ...(st.shared ? { shared: true } : {}) }]);
   syncMailbox(rows[0].id, { days: 30 }).catch(() => {}); // first pull: last 30 days
-  return { userId: st.userId, email };
+  return { userId: st.userId, email, shared: st.shared };
 }
 
 async function accessToken(mb) {
   if (mb.enc_access && mb.access_expires && new Date(mb.access_expires) > new Date()) return box.open(mb.enc_access);
   const keys = mb.provider === "microsoft" ? await msKeys(mb.firm_id, mb.key_source || "app") : null;
-  const t = await tokenCall(mb.provider, { grant_type: "refresh_token", refresh_token: box.open(mb.enc_refresh), ...(mb.provider === "microsoft" ? { scope: PROVIDERS.microsoft.scope } : {}) }, keys);
+  const t = await tokenCall(mb.provider, { grant_type: "refresh_token", refresh_token: box.open(mb.enc_refresh), ...(mb.provider === "microsoft" ? { scope: mb.scope_req || MS_OLD_SCOPE } : {}) }, keys);
   await q("UPDATE mailboxes SET enc_access=$2, access_expires=now() + ($3 || ' seconds')::interval, enc_refresh=COALESCE($4, enc_refresh) WHERE id=$1",
     [mb.id, box.seal(t.access_token), String((t.expires_in || 3600) - 120), t.refresh_token ? box.seal(t.refresh_token) : null]);
   return t.access_token;
@@ -188,7 +195,7 @@ async function imapGuess(email) {
 }
 function imapClient(c) {
   const { ImapFlow } = require("imapflow");
-  return new ImapFlow({ host: c.host, port: c.port || 993, secure: true, auth: { user: c.user, pass: c.pass }, logger: false,
+  return new ImapFlow({ host: c.host, port: c.port || 993, secure: c.tls !== false, ...(c.tls === false ? { doSTARTTLS: false } : {}), auth: { user: c.user, pass: c.pass }, logger: false,
     socketTimeout: 60000, connectionTimeout: 15000, greetingTimeout: 15000 });
 }
 function imapError(e, label) {
@@ -199,7 +206,7 @@ function imapError(e, label) {
       : "If two-step login is on for this email, create an app password and use that instead.")), { reconnect: true, auth: true });
   return new Error(`Couldn't reach ${label} (${m.slice(0, 120)}).`);
 }
-async function connectImap(user, { email, password, host }) {
+async function connectImap(user, { email, password, host }, opts = {}) {
   email = String(email || "").trim().toLowerCase(); password = String(password || "");
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || !password) throw new Error("Enter your email address and its password.");
   const g = await imapGuess(email);
@@ -211,9 +218,12 @@ async function connectImap(user, { email, password, host }) {
     const c = { host: hn, port: +hp || 993, user: email, pass: password };
     const cl = imapClient(c);
     try { await cl.connect(); await cl.logout().catch(() => {});
-      const { rows } = await q(`INSERT INTO mailboxes(user_id, provider, email, enc_refresh, status, last_error, key_source) VALUES($1,'imap',$2,$3,'ok',NULL,'imap')
-        ON CONFLICT(user_id, provider) DO UPDATE SET email=$2, enc_refresh=$3, status='ok', last_error=NULL, last_seen=NULL, stats=NULL RETURNING id`, [user.id, email, box.seal(JSON.stringify(c))]);
-      await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [user.id, { provider: "imap", email, host: h }]);
+      const { rows } = opts.shared
+        ? await q(`INSERT INTO mailboxes(user_id, provider, email, enc_refresh, status, last_error, key_source, shared_firm) VALUES($1,'imap',$2,$3,'ok',NULL,'imap',$4)
+            ON CONFLICT(shared_firm) WHERE shared_firm IS NOT NULL DO UPDATE SET user_id=$1, provider='imap', email=$2, enc_refresh=$3, enc_access=NULL, status='ok', last_error=NULL, key_source='imap', last_seen=NULL, stats=NULL, scope_req=NULL, scope_got=NULL RETURNING id`, [user.id, email, box.seal(JSON.stringify(c)), user.firm_id])
+        : await q(`INSERT INTO mailboxes(user_id, provider, email, enc_refresh, status, last_error, key_source) VALUES($1,'imap',$2,$3,'ok',NULL,'imap')
+            ON CONFLICT(user_id, provider) WHERE shared_firm IS NULL DO UPDATE SET email=$2, enc_refresh=$3, status='ok', last_error=NULL, last_seen=NULL, stats=NULL RETURNING id`, [user.id, email, box.seal(JSON.stringify(c))]);
+      await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [user.id, { provider: "imap", email, host: h, ...(opts.shared ? { shared: true } : {}) }]);
       console.log(`[mail] imap connected for user ${user.id} @${domainOf(email)} via ${h}`);
       syncMailbox(rows[0].id, { days: 30 }).catch(() => {});
       return { id: rows[0].id, email, host: h, label: g.label };
@@ -265,14 +275,14 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
   running.add(id);
   try {
     const { rows } = await q("SELECT m.*, u.firm_id, u.counties, u.active, u.name AS user_name FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE m.id=$1", [id]);
-    const mb = rows[0]; if (!mb || !mb.active) return { skipped: "gone" };
+    const mb = rows[0]; if (!mb || (!mb.active && !mb.shared_firm)) return { skipped: "gone" };
     // No court email found yet = keep looking back 30 days, not just 2.
     const lookback = fresh || !mb.last_seen ? Math.max(days, 30) : days;
     const since = !fresh && mb.last_seen ? new Date(new Date(mb.last_seen).getTime() - 60e3) : new Date(Date.now() - lookback * 864e5);
     const token = mb.provider === "imap" ? null : await accessToken(mb);
     const r = mb.provider === "imap" ? await fetchImap(JSON.parse(box.open(mb.enc_refresh)), since)
       : mb.provider === "microsoft" ? await fetchMicrosoft(token, since) : await fetchGoogle(token, since);
-    const user = { id: mb.user_id, firm_id: mb.firm_id, counties: mb.counties };
+    const user = mb.shared_firm ? { id: null, firm_id: mb.shared_firm, shared: true } : { id: mb.user_id, firm_id: mb.firm_id, counties: mb.counties };
     let added = 0, created = 0, matched = 0, dup = 0, newest = fresh ? null : mb.last_seen;
     for (const m of r.msgs) {
       const x = await inbound.processEmail(user, { ...m, source: mb.provider });
@@ -313,12 +323,12 @@ async function rescanOld() {
   return rows.length;
 }
 async function syncAll() {
-  const { rows } = await q("SELECT m.id FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE u.active AND m.status <> 'reconnect' ORDER BY m.last_sync NULLS FIRST LIMIT 200");
+  const { rows } = await q("SELECT m.id FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE (u.active OR m.shared_firm IS NOT NULL) AND m.status <> 'reconnect' ORDER BY m.last_sync NULLS FIRST LIMIT 200");
   for (const r of rows) await syncMailbox(r.id);
   return rows.length;
 }
 
-module.exports = { PROVIDERS, NAMES, configured, configuredFor, msKeys, testFirmKeys, startUrl, finish, syncMailbox, syncAll, rescanOld, running, connectImap, imapGuess };
+module.exports = { PROVIDERS, NAMES, configured, configuredFor, msKeys, testFirmKeys, startUrl, finish, syncMailbox, syncAll, rescanOld, running, connectImap, imapGuess, accessToken, imapClient, imapError, COURT_SENDER };
 
 // ======================= Auto-detect who hosts an email domain =======================
 const dns = require("dns").promises;
@@ -411,8 +421,10 @@ async function syncFirm(firmId, { days = 2 } = {}) {
   const key = "firm" + firmId; if (running.has(key)) return { skipped: "running" }; running.add(key);
   try {
     const f = (await q("SELECT * FROM firm_mail WHERE firm_id=$1", [firmId])).rows[0]; if (!f) return { skipped: "none" };
+    const fc = (await q("SELECT court_email, court_seen, court_mode FROM firms WHERE id=$1", [firmId])).rows[0] || {};
+    const courtAddr = fc.court_mode !== "each" && fc.court_email && domainOf(fc.court_email) === String(f.domain).toLowerCase() ? fc.court_email.toLowerCase() : null;
     const users = (await q(`SELECT u.id, u.firm_id, u.counties, u.email, c.last_seen FROM users u LEFT JOIN mail_cursor c ON c.user_id=u.id
-      WHERE u.firm_id=$1 AND u.active AND lower(split_part(u.email,'@',2))=lower($2)`, [firmId, f.domain])).rows;
+      WHERE u.firm_id=$1 AND u.active AND lower(split_part(u.email,'@',2))=lower($2)`, [firmId, f.domain])).rows.filter(u => u.email.toLowerCase() !== courtAddr);
     let checked = 0, added = 0, created = 0, people = 0; const errors = [];
     const appTok = f.provider === "microsoft" ? await msAppToken(f.tenant, await msKeys(firmId, f.key_source || "app")) : null;
     for (const u of users) {
@@ -430,6 +442,27 @@ async function syncFirm(firmId, { days = 2 } = {}) {
         checked += msgs.length; people++;
         await q("INSERT INTO mail_cursor(user_id, last_seen) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET last_seen=COALESCE($2, mail_cursor.last_seen)", [u.id, newest]);
       } catch (e) { errors.push(`${u.email}: ${e.message}`); if (e.reconnect && f.provider === "microsoft") throw e; }
+    }
+    // the firm's shared court inbox (e.g. a Microsoft 365 shared mailbox with no password of its own)
+    if (courtAddr) {
+      const cs = { address: courtAddr, at: new Date().toISOString(), checked: 0, added: 0, routed: 0, waiting: 0, created: 0 };
+      try {
+        const since = fc.court_seen ? new Date(new Date(fc.court_seen).getTime() - 60e3) : new Date(Date.now() - 30 * 864e5);
+        const fr = f.provider === "microsoft" ? await fetchMicrosoft(appTok, since, `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(courtAddr)}/messages`)
+          : await fetchGoogle(await googleDelegatedToken(courtAddr), since);
+        let newest = fr.last && (!fc.court_seen || fr.last > new Date(fc.court_seen).toISOString()) ? fr.last : fc.court_seen;
+        for (const m of fr.msgs) {
+          const r = await inbound.processEmail({ id: null, firm_id: firmId, shared: true }, { ...m, source: f.provider + "-shared" });
+          if (r.ok) { cs.added++; cs.created += (r.created || []).length; if (r.owner) cs.routed++; else cs.waiting++; }
+          if (!newest || m.received > new Date(newest).toISOString()) newest = m.received;
+        }
+        cs.checked = fr.msgs.length; cs.scanned = fr.scanned;
+        await q("UPDATE firms SET court_seen=COALESCE($2, court_seen), court_stats=$3 WHERE id=$1", [firmId, newest, cs]);
+        checked += fr.msgs.length; added += cs.added; created += cs.created;
+      } catch (e) {
+        errors.push(`${courtAddr}: ${e.message}`);
+        await q("UPDATE firms SET court_stats=$2 WHERE id=$1", [firmId, { ...cs, error: e.message.slice(0, 300) }]).catch(() => {});
+      }
     }
     const stats = { people, checked, added, created, errors: errors.slice(0, 5), at: new Date().toISOString() };
     await q("UPDATE firm_mail SET status='ok', last_sync=now(), last_error=$2, stats=$3 WHERE firm_id=$1", [firmId, errors.length ? errors.slice(0, 3).join(" | ").slice(0, 300) : null, stats]);

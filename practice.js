@@ -110,6 +110,12 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const tm = t => { const m = String(t || "").match(/(\d+):(\d+)\s*([AP])M/i); return m ? (+m[1] % 12 + (m[3].toUpperCase() === "P" ? 12 : 0)) * 60 + +m[2] : -1; };
     return [...ev, ...settings].sort((a, b) => a.date.localeCompare(b.date) || tm(a.time) - tm(b.time));
   }
+  // counties for the shared filter (Today, Calendar, Tasks): every county that has a case this person can see, plus their own counties
+  R.get("/case-counties", requireAuth, wrap(async (req, res) => {
+    const pr = [req.user.firm_id]; const cond = access.caseCond(req.user, "c", pr);
+    const { rows } = await q(`SELECT DISTINCT c.county FROM cases c WHERE c.firm_id=$1 AND c.county IS NOT NULL AND ${cond}`, pr);
+    res.json({ counties: [...new Set([...rows.map(r => r.county), ...(req.user.counties || [])])].sort() });
+  }));
   R.get("/calendar", requireAuth, wrap(async (req, res) => {
     const from = isDate(req.query.from) ? req.query.from : addDays(today(), -7), to = isDate(req.query.to) ? req.query.to : addDays(today(), 60);
     const userId = req.query.who === "firm" ? (+req.query.attorney || null) : req.user.id;
@@ -266,7 +272,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
       q("SELECT te.*, u.name AS who FROM time_entries te LEFT JOIN users u ON u.id=te.user_id WHERE te.case_id=$1 ORDER BY te.on_date DESC, te.id DESC LIMIT 200", [c.id]),
       q("SELECT id, number, issued, due, status, total, paid FROM invoices WHERE case_id=$1 ORDER BY id DESC", [c.id]),
       q("SELECT u.id, u.name, u.role FROM case_team t JOIN users u ON u.id=t.user_id WHERE t.case_id=$1 ORDER BY u.name", [c.id]),
-      q("SELECT id, subject, from_addr, received_at FROM inbound_emails WHERE $1 = ANY(causes) AND user_id IN (SELECT id FROM users WHERE firm_id=$2) ORDER BY received_at DESC LIMIT 50", [String(c.cause_no).toUpperCase(), req.user.firm_id]).catch(() => ({ rows: [] }))
+      q("SELECT id, subject, from_addr, received_at FROM inbound_emails WHERE $1 = ANY(causes) AND firm_id=$2 AND dismissed_at IS NULL ORDER BY received_at DESC LIMIT 50", [String(c.cause_no).toUpperCase(), req.user.firm_id]).catch(() => ({ rows: [] }))
     ]);
     const events = await calendarItems(req.user.firm_id, { from: addDays(today(), -365), to: addDays(today(), 1500), caseId: c.id });
     res.json({ case: c, contacts: contacts.rows, tasks: tasks.rows, documents: docs.rows, time: time.rows, invoices: invoices.rows, emails: emails.rows, events,
@@ -382,9 +388,12 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const upcoming = (await calendarItems(firm, { from: t, to: addDays(t, 14), userId, county, viewer: req.user })).filter(i => !i.done);
     const overdueDl = (await calendarItems(firm, { from: addDays(t, -60), to: addDays(t, -1), userId, county, viewer: req.user })).filter(i => !i.done && i.kind === "deadline" && i.src === "event");
     const hoursToday = (await q("SELECT coalesce(sum(minutes),0)::int m FROM time_entries WHERE firm_id=$1 AND user_id=$2 AND on_date=$3", [firm, req.user.id, t])).rows[0].m;
+    // court notices from the firm's shared inbox waiting for someone to assign them (admin + the people they picked)
+    const courtQueue = req.user.role === "admin" || req.user.court_handler
+      ? (await q("SELECT count(*)::int n FROM inbound_emails WHERE firm_id=$1 AND shared AND user_id IS NULL AND dismissed_at IS NULL", [firm])).rows[0].n : null;
     res.json({ today: t, open: open.rows[0].n, alerts: alerts.rows[0].n, byCounty: byCounty.rows, byCourt: byCourt.rows, upcoming, overdueDl, hoursToday: Math.round(hoursToday / 6) / 10,
       tasksDue: tasksDue.rows, overdue: overdue.rows[0].n, hours: Math.round(hours.rows[0].m / 6) / 10, unbilled: money(unbilled.rows[0].v),
-      outstanding: money(outstanding.rows[0].v), outstandingCount: outstanding.rows[0].n, collected: money(collected.rows[0].v), trust: access.trustOk(req.user) ? money(trust.rows[0].v) : null, sees_firm: !lim });
+      outstanding: money(outstanding.rows[0].v), outstandingCount: outstanding.rows[0].n, collected: money(collected.rows[0].v), trust: access.trustOk(req.user) ? money(trust.rows[0].v) : null, sees_firm: !lim, court_queue: courtQueue });
   }));
 
   // ===================== Dashboards =====================

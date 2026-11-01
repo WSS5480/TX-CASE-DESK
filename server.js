@@ -57,16 +57,19 @@ async function audit(req, action, detail = {}) {
   const u = req.user || {};
   await q("INSERT INTO audit_log(user_id, firm_id, action, detail, ip) VALUES($1,$2,$3,$4,$5)", [u.id || req.session?.pendingUid || null, u.firm_id || null, action, detail, req.ip]).catch(() => {});
 }
+// who works the firm's unassigned court notices (shared court inbox): the admin plus anyone the admin picks
+const courtHandler = u => !!u && (u.role === "admin" || !!u.court_handler);
 function publicUser(u) {
   return { id: u.id, email: u.email, name: u.name, bar_number: u.bar_number, role: u.role, firm_id: u.firm_id, firm_name: u.firm_name,
     counties: u.counties || [], totp_enabled: u.totp_enabled, must_change_pw: u.must_change_pw,
     phone: u.phone || "", title: u.title || "", doc_email: u.doc_email || "", firm_logo: u.logo_token ? `/brand/${u.logo_token}` : null,
     access: u.access || "own", works_with: u.works_with || [], sees_firm: access.seesFirm(u), trust_access: access.trustOk(u),
     firm_dash: access.firmDash(u), firm_kind: u.firm_kind || "firm", prefs: u.prefs || {},
-    licensed_on: u.licensed_on ? new Date(u.licensed_on).toISOString().slice(0, 10) : "", has_bar_card: !!u.bar_card_at };
+    licensed_on: u.licensed_on ? new Date(u.licensed_on).toISOString().slice(0, 10) : "", has_bar_card: !!u.bar_card_at,
+    court_handler: courtHandler(u), court_mode: u.court_mode || "each" };
 }
 async function loadUser(id) {
-  const { rows } = await q("SELECT u.*, f.name AS firm_name, f.logo_token, f.kind AS firm_kind, f.plan, f.plan_expires, f.plan_source, f.plan_checked, f.disabled AS firm_disabled FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
+  const { rows } = await q("SELECT u.*, f.name AS firm_name, f.logo_token, f.kind AS firm_kind, f.court_mode, f.plan, f.plan_expires, f.plan_source, f.plan_checked, f.disabled AS firm_disabled FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
   return rows[0];
 }
 const requireAuth = wrap(async (req, res, next) => {
@@ -309,7 +312,7 @@ app.put("/api/me/profile", requireAuth, wrap(async (req, res) => {
   res.json({ user: publicUser(await loadUser(req.user.id)) });
 }));
 app.get("/api/firm/users", requireAuth, requireAdmin, wrap(async (req, res) => {
-  const { rows } = await q(`SELECT id,email,name,bar_number,role,counties,totp_enabled,active,last_login,access,works_with,trust_access,title,phone,must_change_pw,
+  const { rows } = await q(`SELECT id,email,name,bar_number,role,counties,totp_enabled,active,last_login,access,works_with,trust_access,title,phone,must_change_pw,court_handler,
     to_char(licensed_on,'YYYY-MM-DD') AS licensed_on, bar_card_at, (SELECT count(*)::int FROM mailboxes m WHERE m.user_id=users.id) AS mailboxes FROM users WHERE firm_id=$1 ORDER BY name`, [req.user.firm_id]);
   res.json({ users: rows });
 }));
@@ -564,7 +567,7 @@ app.get("/api/admin/inspect/:county", requireAuth, requireAdmin, rateLimit({ win
 
 // ---------- connected mailboxes (Connect Outlook / Connect Gmail) ----------
 app.get("/api/mail", requireAuth, wrap(async (req, res) => {
-  const { rows } = await q("SELECT id, provider, email, status, last_sync, last_error, stats FROM mailboxes WHERE user_id=$1 ORDER BY provider", [req.user.id]);
+  const { rows } = await q("SELECT id, provider, email, status, last_sync, last_error, stats FROM mailboxes WHERE user_id=$1 AND shared_firm IS NULL ORDER BY provider", [req.user.id]);
   for (const r of rows) if (mail.running.has(r.id)) r.status = "syncing";
   const g = await mail.imapGuess(req.user.email).catch(() => ({ label: null }));
   res.json({ configured: await mail.configuredFor(req.user.firm_id), names: mail.NAMES, other: { label: g.label, provider: g.det?.provider || null }, mailboxes: rows });
@@ -641,17 +644,128 @@ app.get("/api/mail/callback/:provider", async (req, res) => {
   try {
     if (req.query.error) throw new Error(req.query.error_description || "Access was not allowed.");
     const r = await mail.finish(req.params.provider, String(req.query.code || ""), String(req.query.state || ""));
-    res.redirect("/?connected=" + encodeURIComponent(r.email || req.params.provider));
+    res.redirect("/?connected=" + encodeURIComponent(r.shared ? `firm court inbox ${r.email || ""}`.trim() : r.email || req.params.provider));
   } catch (e) { console.error("[mail] connect failed", e.message); res.redirect("/?mailerror=" + encodeURIComponent(e.message.slice(0, 200))); }
 });
 app.post("/api/mail/:id/sync", requireAuth, wrap(async (req, res) => {
-  const { rows } = await q("SELECT id FROM mailboxes WHERE id=$1 AND user_id=$2", [+req.params.id, req.user.id]);
+  const { rows } = await q("SELECT id FROM mailboxes WHERE id=$1 AND user_id=$2 AND shared_firm IS NULL", [+req.params.id, req.user.id]);
   if (!rows[0]) return res.status(404).json({ error: "Not found" });
   mail.syncMailbox(rows[0].id).catch(() => {}); res.json({ started: true });
 }));
 app.delete("/api/mail/:id", requireAuth, wrap(async (req, res) => {
-  await q("DELETE FROM mailboxes WHERE id=$1 AND user_id=$2", [+req.params.id, req.user.id]);
+  await q("DELETE FROM mailboxes WHERE id=$1 AND user_id=$2 AND shared_firm IS NULL", [+req.params.id, req.user.id]);
   await audit(req, "mailbox_disconnected", { id: +req.params.id }); res.json({ ok: true });
+}));
+
+// ---------- shared court inbox (one firm address; admins or chosen staff assign what can't be matched) ----------
+async function courtInboxInfo(firmId) {
+  const f = (await q("SELECT court_mode, court_email, court_stats, court_token FROM firms WHERE id=$1", [firmId])).rows[0] || {};
+  const mb = (await q("SELECT id, provider, email, status, last_sync, last_error, stats FROM mailboxes WHERE shared_firm=$1", [firmId])).rows[0] || null;
+  if (mb && mail.running.has(mb.id)) mb.status = "syncing";
+  const fm = (await q("SELECT provider, domain, status FROM firm_mail WHERE firm_id=$1", [firmId])).rows[0] || null;
+  const queue = (await q("SELECT count(*)::int n FROM inbound_emails WHERE firm_id=$1 AND shared AND user_id IS NULL AND dismissed_at IS NULL", [firmId])).rows[0].n;
+  const routed = (await q("SELECT count(*)::int n FROM inbound_emails WHERE firm_id=$1 AND shared AND user_id IS NOT NULL AND received_at > now() - interval '30 days'", [firmId])).rows[0].n;
+  const fwd = f.court_token ? inbound.addressFor(f.court_token) : null;
+  return { mode: f.court_mode || "each", mailbox: mb, court_email: f.court_email || null, court_stats: f.court_stats || null, firm_mail: fm,
+    forward: fwd, forward_on: !!inbound.addressFor("x"), queue, routed30: routed,
+    connected: !!(mb || (f.court_email && fm) || f.court_token) };
+}
+app.get("/api/firm/court-inbox", requireAuth, requireAdmin, wrap(async (req, res) => {
+  const info = await courtInboxInfo(req.user.firm_id);
+  const people = (await q("SELECT id, name, role, court_handler FROM users WHERE firm_id=$1 AND active ORDER BY name", [req.user.firm_id])).rows;
+  res.json({ ...info, people, configured: await mail.configuredFor(req.user.firm_id) });
+}));
+app.put("/api/firm/court-inbox", requireAuth, requireAdmin, wrap(async (req, res) => {
+  const b = req.body || {}, fid = req.user.firm_id;
+  if (b.mode !== undefined) {
+    if (!["each", "shared", "both"].includes(b.mode)) return res.status(400).json({ error: "Pick how your firm gets court emails." });
+    await q("UPDATE firms SET court_mode=$2 WHERE id=$1", [fid, b.mode]);
+  }
+  if (Array.isArray(b.handlers)) {
+    const ids = b.handlers.map(Number).filter(Boolean);
+    await q("UPDATE users SET court_handler = (id = ANY($2::int[])) WHERE firm_id=$1", [fid, ids]);
+  }
+  if (b.court_email !== undefined) {
+    const e = String(b.court_email || "").trim().toLowerCase();
+    if (!e) await q("UPDATE firms SET court_email=NULL, court_stats=NULL WHERE id=$1", [fid]);
+    else {
+      const fm = (await q("SELECT domain FROM firm_mail WHERE firm_id=$1", [fid])).rows[0];
+      if (!fm) return res.status(400).json({ error: "Turn on the firm-wide Microsoft 365 or Google connection first, or sign in to the shared inbox instead." });
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e) || e.split("@")[1] !== String(fm.domain).toLowerCase()) return res.status(400).json({ error: `Use an @${fm.domain} address — the firm-wide connection only reaches your firm's own mailboxes.` });
+      await q("UPDATE firms SET court_email=$2, court_seen=NULL, court_stats=NULL WHERE id=$1", [fid, e]);
+      mail.syncFirm(fid).catch(() => {});
+    }
+  }
+  if (b.forward === true) await q("UPDATE firms SET court_token=COALESCE(court_token, $2) WHERE id=$1", [fid, "court-" + crypto.randomBytes(8).toString("hex")]);
+  if (b.forward === false) await q("UPDATE firms SET court_token=NULL WHERE id=$1", [fid]);
+  await audit(req, "court_inbox_settings", { mode: b.mode, handlers: Array.isArray(b.handlers) ? b.handlers.length : undefined, court_email: b.court_email !== undefined ? !!b.court_email : undefined, forward: b.forward });
+  res.json(await courtInboxInfo(fid));
+}));
+app.get("/api/firm/court-inbox/connect/microsoft", requireAuth, requireAdmin, wrap(async (req, res) => {
+  if (!(await mail.configuredFor(req.user.firm_id)).microsoft) return res.redirect("/?mailerror=" + encodeURIComponent("Outlook sign-in isn't switched on yet."));
+  res.redirect(await mail.startUrl("microsoft", req.user, { shared: true }));
+}));
+app.post("/api/firm/court-inbox/imap", requireAuth, requireAdmin, wrap(async (req, res) => {
+  try { const r = await mail.connectImap(req.user, req.body || {}, { shared: true }); await audit(req, "court_inbox_connected", { provider: "imap", host: r.host }); res.json(r); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+}));
+app.post("/api/firm/court-inbox/sync", requireAuth, requireAdmin, wrap(async (req, res) => {
+  const mb = (await q("SELECT id FROM mailboxes WHERE shared_firm=$1", [req.user.firm_id])).rows[0];
+  if (mb) mail.syncMailbox(mb.id).catch(() => {});
+  const f = (await q("SELECT court_email FROM firms WHERE id=$1", [req.user.firm_id])).rows[0];
+  if (f?.court_email) mail.syncFirm(req.user.firm_id).catch(() => {});
+  res.json({ started: !!(mb || f?.court_email) });
+}));
+app.delete("/api/firm/court-inbox/mailbox", requireAuth, requireAdmin, wrap(async (req, res) => {
+  await q("DELETE FROM mailboxes WHERE shared_firm=$1", [req.user.firm_id]); await audit(req, "court_inbox_disconnected"); res.json({ ok: true });
+}));
+
+// Court notices that came to the shared inbox and couldn't be matched to a case or an attorney
+const needHandler = (req, res, next) => courtHandler(req.user) ? next() : res.status(403).json({ error: "Only the firm admin and people they pick can assign court notices." });
+app.get("/api/court-queue", requireAuth, needHandler, wrap(async (req, res) => {
+  const { rows } = await q(`SELECT id, from_addr, subject, body, kind, causes, parsed, received_at FROM inbound_emails
+    WHERE firm_id=$1 AND shared AND user_id IS NULL AND dismissed_at IS NULL ORDER BY received_at DESC LIMIT 100`, [req.user.firm_id]);
+  const cm = await caseMap(req.user.firm_id, [...new Set(rows.flatMap(r => r.causes || []))]);
+  const people = (await q("SELECT id, name, role FROM users WHERE firm_id=$1 AND active AND role IN ('admin','partner','manager','attorney') ORDER BY name", [req.user.firm_id])).rows;
+  res.json({ people, emails: rows.map(r => { const sm = inbound.summarize(r, cm); const p = r.parsed || {};
+    return { id: r.id, from_addr: r.from_addr, subject: r.subject, received_at: r.received_at, type: sm.type, dates: sm.dates, cases: sm.cases,
+      preview: sm.lines[0] || String(r.body || "").replace(/\s+/g, " ").slice(0, 160),
+      notice: { cause_no: p.cause_no || (r.causes || [])[0] || "", county: p.county || inbound.countyIn(r.body || "") || "", style: p.style || "", court: p.court_name || p.court || "", next_setting: p.next_setting || "" } }; }) });
+}));
+app.post("/api/court-queue/:id/assign", requireAuth, needHandler, wrap(async (req, res) => {
+  const fid = req.user.firm_id, b = req.body || {};
+  const e = (await q("SELECT * FROM inbound_emails WHERE id=$1 AND firm_id=$2 AND shared", [+req.params.id, fid])).rows[0];
+  if (!e) return res.status(404).json({ error: "Not found" });
+  let owner = null, caseId = null, created = false;
+  if (b.case_id || b.link_cause) {
+    const c = b.case_id ? (await q("SELECT id, user_id, cause_no FROM cases WHERE id=$1 AND firm_id=$2", [+b.case_id, fid])).rows[0]
+      : (await q("SELECT id, user_id, cause_no FROM cases WHERE firm_id=$1 AND upper(cause_no)=$2 ORDER BY id LIMIT 1", [fid, String(b.link_cause).trim().toUpperCase()])).rows[0];
+    if (!c) return res.status(404).json({ error: b.link_cause ? "No case with that cause # in the app — pick \"A new case — add it\" instead." : "Case not found" });
+    owner = c.user_id; caseId = c.id;
+  } else {
+    const a = (await q("SELECT id FROM users WHERE id=$1 AND firm_id=$2 AND active", [+b.attorney || 0, fid])).rows[0];
+    if (!a) return res.status(400).json({ error: "Pick the attorney." });
+    owner = a.id;
+    if (b.create) {
+      const cause = String(b.create.cause_no || "").trim().toUpperCase().slice(0, 60), county = String(b.create.county || "").trim();
+      if (!cause || !COUNTIES.includes(county)) return res.status(400).json({ error: "A new case needs the cause # and the county." });
+      const ins = await q(`INSERT INTO cases(firm_id,user_id,county,cause_no,court,style,status,next_setting,source,tracked,watch_dates)
+        VALUES($1,$2,$3,$4,$5,$6,'Active',$7,'email',true,true) ON CONFLICT DO NOTHING RETURNING id, user_id, cause_no, county`,
+        [fid, owner, county, cause, String(b.create.court || "").slice(0, 200) || null, String(b.create.style || "").slice(0, 300) || null, String(b.create.next_setting || "").slice(0, 300) || null]);
+      if (ins.rows[0]) { caseId = ins.rows[0].id; created = true; practice.onCaseCreated({ ...ins.rows[0], firm_id: fid }, owner).catch(() => {}); }
+      else { const ex = (await q("SELECT id, user_id FROM cases WHERE firm_id=$1 AND county=$2 AND upper(cause_no)=$3", [fid, county, cause])).rows[0]; if (ex) { caseId = ex.id; owner = ex.user_id; } }
+    }
+  }
+  if (caseId) await q("UPDATE cases SET filing_alert=$2, filing_alert_at=now(), updated_at=now() WHERE id=$1", [caseId, `${created ? "New case added from court email: " : ""}${e.subject || "Court update"}`.slice(0, 600)]);
+  await q(`UPDATE inbound_emails SET user_id=$2, routed='manual', assigned_by=$3, assigned_at=now(), read_at=NULL,
+    matched_case_ids = CASE WHEN $4::int IS NULL THEN matched_case_ids ELSE array(SELECT DISTINCT unnest(coalesce(matched_case_ids,'{}') || ARRAY[$4::int])) END WHERE id=$1`, [e.id, owner, req.user.id, caseId]);
+  await audit(req, "court_notice_assigned", { email: e.id, to: owner, case: caseId, created });
+  res.json({ ok: true, owner, case_id: caseId, created });
+}));
+app.post("/api/court-queue/:id/dismiss", requireAuth, needHandler, wrap(async (req, res) => {
+  const r = await q("UPDATE inbound_emails SET dismissed_at=now(), assigned_by=$3 WHERE id=$1 AND firm_id=$2 AND shared AND user_id IS NULL", [+req.params.id, req.user.firm_id, req.user.id]);
+  if (!r.rowCount) return res.status(404).json({ error: "Not found" });
+  await audit(req, "court_notice_dismissed", { email: +req.params.id }); res.json({ ok: true });
 }));
 
 // ---------- re:SearchTX alert emails (Postmark inbound webhook) ----------
@@ -670,9 +784,10 @@ app.get("/api/email-alerts", requireAuth, wrap(async (req, res) => {
     emails: rows.filter(r => r.kind !== "forward_confirm").map(r => ({ ...r, unmatched: (r.causes || []).filter(c => !known.includes(c)) })) });
 }));
 app.get("/api/email-alerts/:id", requireAuth, wrap(async (req, res) => {
-  const { rows } = await q("SELECT id, from_addr, subject, body, html, kind, causes, received_at FROM inbound_emails WHERE id=$1 AND user_id=$2", [+req.params.id, req.user.id]);
+  const { rows } = await q(`SELECT id, from_addr, subject, body, html, kind, causes, received_at, user_id, shared FROM inbound_emails WHERE id=$1 AND (user_id=$2 OR ($4 AND shared AND firm_id=$3 AND user_id IS NULL))`,
+    [+req.params.id, req.user.id, req.user.firm_id, courtHandler(req.user)]);
   if (!rows[0]) return res.status(404).json({ error: "Not found" });
-  await q("UPDATE inbound_emails SET read_at=now() WHERE id=$1 AND read_at IS NULL", [rows[0].id]);
+  if (rows[0].user_id === req.user.id) await q("UPDATE inbound_emails SET read_at=now() WHERE id=$1 AND read_at IS NULL", [rows[0].id]);
   const cm = await caseMap(req.user.firm_id, rows[0].causes || []);
   res.json({ email: rows[0], summary: inbound.summarize(rows[0], cm) });
 }));
@@ -775,6 +890,7 @@ app.delete("/api/research/:id", requireAuth, wrap(async (req, res) => {
 
 // ---------- practice management (calendar, clients, documents, tasks, billing, trust, portal) ----------
 practice.mount(app, { requireAuth, requireAdmin, wrap, audit });
+require("./mailbox").mount(app, { requireAuth, wrap, audit });   // full mail client (Outlook-style)
 
 // ---------- static + errors ----------
 app.use(express.static(path.join(__dirname, "public"), { index: "index.html", setHeaders: r => r.setHeader("Cache-Control", "no-cache") }));

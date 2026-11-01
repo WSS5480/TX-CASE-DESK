@@ -40,6 +40,12 @@ async function handle(msg) {
   const hash = (msg.MailboxHash || (msg.ToFull || []).map(t => t.MailboxHash).find(Boolean) || "").trim();
   if (!hash) { console.log(`[inbound] received email with no address tag (subject "${String(msg.Subject || "").slice(0, 60)}")`); return { ignored: "no address tag" }; }
   if (hash === "selftest") { console.log(`[inbound] SELFTEST OK — Postmark → app webhook works (subject "${String(msg.Subject || "").slice(0, 60)}")`); return { ok: true, selftest: true }; }
+  // the firm's shared court inbox forwarding here (court-<token>)
+  if (hash.startsWith("court-")) {
+    const f = (await q("SELECT id FROM firms WHERE court_token=$1", [hash])).rows[0];
+    if (!f) return { ignored: "unknown firm tag" };
+    return processEmail({ id: null, firm_id: f.id, shared: true }, { from: msg.FromFull?.Email || msg.From || "", subject: msg.Subject, text: msg.TextBody, html: msg.HtmlBody, ext_id: msg.MessageID ? "pm:" + msg.MessageID : null, source: "forward-shared" });
+  }
   const { rows } = await q("SELECT id, firm_id, counties FROM users WHERE inbox_token=$1 AND active", [hash]);
   const u = rows[0];
   if (!u) return { ignored: "unknown tag" };
@@ -83,8 +89,25 @@ function parseNotice(text) {
   return out;
 }
 
+// Which firm attorney a court notice is about: their bar number or full name in the email. Exactly one match or nobody.
+async function attorneyIn(firmId, text) {
+  const { rows } = await q("SELECT id, name, bar_number FROM users WHERE firm_id=$1 AND active AND role IN ('admin','partner','manager','attorney')", [firmId]);
+  const T = " " + String(text).toUpperCase().replace(/[^A-Z0-9,' -]+/g, " ").replace(/\s+/g, " ").replace(/ ,/g, ",") + " ";
+  const hits = rows.filter(r => {
+    const bar = String(r.bar_number || "").replace(/\D/g, "");
+    if (bar.length >= 6 && new RegExp(`(^|\\D)0*${bar}(\\D|$)`).test(String(text))) return true;
+    const parts = String(r.name || "").toUpperCase().replace(/[^A-Z' -]+/g, " ").trim().split(/\s+/).filter(Boolean);
+    if (parts.length < 2) return false;
+    const first = parts[0], last = parts[parts.length - 1];
+    return [parts.join(" "), `${first} ${last}`, `${last}, ${first}`].some(v => T.includes(" " + v + " ") || T.includes(" " + v + ","));
+  });
+  return hits.length === 1 ? hits[0].id : null;
+}
+
 // Shared pipeline for forwarded and connected-mailbox emails: store, match/create cases, raise alerts.
+// u = the attorney whose mailbox it came from, or { id: null, firm_id, shared: true } for the firm's shared court inbox.
 async function processEmail(u, { from = "", subject = "", text, html, ext_id = null, source = "forward", received = null }) {
+  const shared = !!u.shared;
   subject = String(subject || "").slice(0, 300);
   let body = (text && String(text).trim() ? String(text) : strip(html)).slice(0, 50000);
   const hrefs = [...new Set([...String(html || "").matchAll(/href=["']([^"']+)["']/gi)].map(m => m[1].replace(/&amp;/g, "&")).filter(x => /^https?:\/\//i.test(x)))].slice(0, 30);
@@ -96,18 +119,30 @@ async function processEmail(u, { from = "", subject = "", text, html, ext_id = n
   } else if (/re:?search|txcourts|tylertech|tylerhost|efiletexas|\.tx\.us|clerk/i.test(from + " " + subject + " " + body.slice(0, 2000))) kind = "research_alert";
   const parsed = kind === "forward_confirm" ? {} : parseNotice(body);
   const causes = kind === "forward_confirm" ? [] : [...new Set([parsed.cause_no, ...causesIn(subject + "\n" + body)].filter(Boolean))].slice(0, 50);
-  // de-dupe the same message (mailbox re-reads)
-  if (ext_id && (await q("SELECT 1 FROM inbound_emails WHERE user_id=$1 AND ext_id=$2", [u.id, ext_id])).rowCount) return { duplicate: true };
+  // de-dupe the same message (mailbox re-reads). Shared-inbox copies are tagged so they never collide with the attorney's own copy.
+  const extKey = ext_id && shared ? "shared:" + ext_id : ext_id;
+  if (ext_id) {
+    const dup = shared ? await q("SELECT 1 FROM inbound_emails WHERE firm_id=$1 AND shared AND ext_id=$2", [u.firm_id, extKey])
+      : await q("SELECT 1 FROM inbound_emails WHERE user_id=$1 AND (ext_id=$2 OR ext_id=$3)", [u.id, ext_id, "shared:" + ext_id]);
+    if (dup.rowCount) return { duplicate: true };
+  }
 
-  let matched = [], created = [];
+  let matched = [], created = [], owner = shared ? null : u.id, routed = shared ? null : undefined;
   if (causes.length) {
-    const m = await q("SELECT id, upper(cause_no) c, next_setting, watch_dates FROM cases WHERE firm_id=$1 AND upper(cause_no) = ANY($2)", [u.firm_id, causes]);
-    // New case from a court notice: create it (tracked, so it shows even outside the attorney's county list)
+    const m = await q("SELECT id, user_id, upper(cause_no) c, next_setting, watch_dates FROM cases WHERE firm_id=$1 AND upper(cause_no) = ANY($2)", [u.firm_id, causes]);
+    // shared inbox: the notice belongs to whoever has the case
+    if (shared && m.rows.length) { const main = m.rows.find(r => r.c === parsed.cause_no) || m.rows[0]; owner = main.user_id; routed = "case"; }
+    // New case from a court notice: create it (tracked, so it shows even outside the attorney's county list).
+    // From the shared inbox, only when the notice names exactly one of the firm's attorneys — otherwise it waits to be assigned.
     if (parsed.cause_no && kind === "research_alert" && !m.rows.some(r => r.c === parsed.cause_no) && parsed.county) {
-      const ins = await q(`INSERT INTO cases(firm_id,user_id,county,cause_no,court,style,status,next_setting,source,tracked,watch_dates)
-        VALUES($1,$2,$3,$4,$5,$6,'Active',$7,'email',true,true) ON CONFLICT DO NOTHING RETURNING id, upper(cause_no) c, next_setting, watch_dates`,
-        [u.firm_id, u.id, parsed.county, parsed.cause_no, parsed.court_name || parsed.court || null, parsed.style || null, parsed.next_setting || null]);
-      if (ins.rows[0]) { created.push(ins.rows[0].id); m.rows.push({ ...ins.rows[0], fresh: true }); require("./practice").onCaseCreated({ ...ins.rows[0], firm_id: u.firm_id, user_id: u.id }, u.id).catch(() => {}); }
+      let who = u.id;
+      if (shared) { who = await attorneyIn(u.firm_id, subject + "\n" + body); if (who && !owner) { owner = who; routed = "attorney"; } }
+      if (who) {
+        const ins = await q(`INSERT INTO cases(firm_id,user_id,county,cause_no,court,style,status,next_setting,source,tracked,watch_dates)
+          VALUES($1,$2,$3,$4,$5,$6,'Active',$7,'email',true,true) ON CONFLICT DO NOTHING RETURNING id, user_id, upper(cause_no) c, next_setting, watch_dates`,
+          [u.firm_id, who, parsed.county, parsed.cause_no, parsed.court_name || parsed.court || null, parsed.style || null, parsed.next_setting || null]);
+        if (ins.rows[0]) { created.push(ins.rows[0].id); m.rows.push({ ...ins.rows[0], fresh: true }); require("./practice").onCaseCreated({ ...ins.rows[0], firm_id: u.firm_id, user_id: who }, who).catch(() => {}); }
+      }
     }
     const line = [parsed.filing_desc, parsed.filing_type && !parsed.filing_desc ? parsed.filing_type : null].filter(Boolean).join(" · ") || subject || "Court update";
     for (const r of m.rows) {
@@ -123,12 +158,14 @@ async function processEmail(u, { from = "", subject = "", text, html, ext_id = n
       }
     }
   }
-  await q(`INSERT INTO inbound_emails(user_id, firm_id, from_addr, subject, body, kind, causes, matched_case_ids, confirm_code, html, ext_id, source, parsed, received_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,now())) ON CONFLICT DO NOTHING`,
-    [u.id, u.firm_id, String(from).slice(0, 200), subject, body, kind, causes, matched, confirm, String(html || "").slice(0, 400000) || null, ext_id, source, parsed, received]);
-  await q("INSERT INTO audit_log(user_id, firm_id, action, detail) VALUES($1,$2,'email_alert',$3)", [u.id, u.firm_id, { source, kind, subject, causes: causes.length, matched: matched.length, created: created.length }]);
-  console.log(`[inbound] user ${u.id} ${source} kind=${kind} causes=${causes.length} matched=${matched.length} created=${created.length} subject="${subject.slice(0, 80)}"`);
-  return { ok: true, kind, causes, matched, created };
+  // the attorney already got this exact email in their own connected mailbox — the case is updated, don't list it twice
+  if (shared && owner && ext_id && (await q("SELECT 1 FROM inbound_emails WHERE user_id=$1 AND ext_id=$2", [owner, ext_id])).rowCount) return { duplicate: true, matched, created };
+  await q(`INSERT INTO inbound_emails(user_id, firm_id, from_addr, subject, body, kind, causes, matched_case_ids, confirm_code, html, ext_id, source, parsed, received_at, shared, routed)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,now()),$15,$16) ON CONFLICT DO NOTHING`,
+    [owner, u.firm_id, String(from).slice(0, 200), subject, body, kind, causes, matched, confirm, String(html || "").slice(0, 400000) || null, extKey, source, parsed, received, shared, routed || null]);
+  await q("INSERT INTO audit_log(user_id, firm_id, action, detail) VALUES($1,$2,'email_alert',$3)", [owner, u.firm_id, { source, kind, subject, causes: causes.length, matched: matched.length, created: created.length, ...(shared ? { shared: true, routed: routed || "unassigned" } : {}) }]);
+  console.log(`[inbound] ${shared ? `firm ${u.firm_id} shared inbox → ${owner ? "user " + owner + " (" + routed + ")" : "needs assigning"}` : "user " + u.id} ${source} kind=${kind} causes=${causes.length} matched=${matched.length} created=${created.length} subject="${subject.slice(0, 80)}"`);
+  return { ok: true, kind, causes, matched, created, owner, routed };
 }
 
 // Rule-based summary (no AI): what kind of email, which cases, dates/times, the key lines, and links.
@@ -154,4 +191,4 @@ function summarize(e, caseMap = {}) {
   return { type, dates, lines, links, cases, action };
 }
 
-module.exports = { processEmail, parseNotice, summarize, handle, tokenFor, addressFor, causesIn, countyIn };
+module.exports = { processEmail, parseNotice, summarize, handle, tokenFor, addressFor, causesIn, countyIn, attorneyIn };

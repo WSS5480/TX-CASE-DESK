@@ -182,6 +182,26 @@ CREATE TABLE IF NOT EXISTS firm_mail (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS key_source TEXT DEFAULT 'app';   -- app = TX Case Desk's Microsoft keys, firm = the firm's own
+ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS scope_req TEXT;   -- scopes asked for at connect (refresh asks for the same)
+ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS scope_got TEXT;   -- scopes Microsoft granted (full mail needs Mail.ReadWrite + Mail.Send)
+-- Shared court inbox: one firm address that receives court emails (efile@firm.com). Admins or chosen staff assign what can't be matched.
+ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS shared_firm INT REFERENCES firms(id) ON DELETE CASCADE;   -- set = this is the firm's shared court inbox
+ALTER TABLE mailboxes DROP CONSTRAINT IF EXISTS mailboxes_user_id_provider_key;
+CREATE UNIQUE INDEX IF NOT EXISTS mailboxes_personal ON mailboxes(user_id, provider) WHERE shared_firm IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS mailboxes_shared ON mailboxes(shared_firm) WHERE shared_firm IS NOT NULL;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS court_mode TEXT DEFAULT 'each';   -- each (every attorney's own email) | shared | both
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS court_email TEXT;                 -- shared address read through the firm-wide Microsoft/Google connection
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS court_seen TIMESTAMPTZ;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS court_stats JSONB;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS court_token TEXT;                 -- forwarding tag for the shared inbox
+ALTER TABLE users ADD COLUMN IF NOT EXISTS court_handler BOOLEAN DEFAULT false;   -- works the firm's unassigned court notices
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS shared BOOLEAN DEFAULT false;
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS routed TEXT;            -- case | attorney | manual
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS assigned_by INT;
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ;
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS dismissed_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS inbound_shared_ext ON inbound_emails(firm_id, ext_id) WHERE shared AND ext_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS inbound_queue ON inbound_emails(firm_id, received_at DESC) WHERE shared AND user_id IS NULL;
 ALTER TABLE firm_mail ADD COLUMN IF NOT EXISTS key_source TEXT DEFAULT 'app';
 -- a firm's own Microsoft (Azure) app, entered by the firm admin in Firm Seats
 ALTER TABLE firms ADD COLUMN IF NOT EXISTS ms_client_id TEXT;

@@ -103,7 +103,7 @@ const ICON = {
 const ic = (k, s = 18, w = 1.75) => `<svg aria-hidden="true" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round">${ICON[k] || ""}</svg>`;
 const initials = n => String(n || "").split(/\s+/).filter(Boolean).slice(0, 2).map(x => x[0].toUpperCase()).join("") || "?";
 function navGroups() {
-  const g = [["Practice", [["today", "Today"], ["dashboard", "Dashboard"], ["cases", "Cases"], ["calendar", "Calendar"], ["inbox", "Court mail"], ["clients", "Clients"], ["tasks", "Tasks"]]]];
+  const g = [["Practice", [["today", "Today"], ["dashboard", "Dashboard"], ["cases", "Cases"], ["calendar", "Calendar"], ["inbox", "Mail"], ["clients", "Clients"], ["tasks", "Tasks"]]]];
   const money = []; if (me.role !== "paralegal") money.push(["billing", "Billing"]); if (me.trust_access) money.push(["trust", "Trust"]);
   if (money.length) g.push(["Money", money]);
   g.push(["Research", [["law", "Case law"], ["saved", "Saved"]]]);
@@ -111,7 +111,7 @@ function navGroups() {
   g.push(["Setup", set]);
   return g;
 }
-const PRIMARY = [["today", "Today"], ["cases", "Cases"], ["calendar", "Calendar"], ["inbox", "Court mail"]];
+const PRIMARY = [["today", "Today"], ["cases", "Cases"], ["calendar", "Calendar"], ["inbox", "Mail"]];
 function titleOf(k) { if (k === "account") return "Account"; for (const [, items] of navGroups()) for (const [kk, v] of items) if (kk === k) return v; return "TX Case Desk"; }
 function shellOff() {
   document.body.classList.add("out"); ["#side", "#tabs", "#fab", "#srch", "#tact"].forEach(s => $(s).hidden = true);
@@ -259,13 +259,49 @@ function wireImap(after) {
     catch (x) { err.textContent = x.message; btn.disabled = false; btn.textContent = "Connect email"; }
   });
 }
+// Court notices from the firm's shared inbox that couldn't be matched — the admin and the people they picked assign them.
+function queueCards(qd) {
+  if (!qd || !qd.emails.length) return "";
+  const att = qd.people.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
+  return `<div class="card" style="border-left:4px solid var(--warn)"><h2 style="margin:0">Needs assigning <span class="tag y">${qd.emails.length}</span></h2>
+    <p class="mute" style="margin:4px 0 0">Court notices from the shared inbox that didn't match a case or name one of your attorneys. Pick who gets each one.</p></div>
+    ${qd.emails.map(m => `<div class="card" data-q="${m.id}">
+      <div class="row"><span class="tag ${TYPE_TAG[m.type] || "n"}">${esc(m.type)}</span><span class="mute" style="margin-left:auto">${new Date(m.received_at).toLocaleString()}</span></div>
+      <h3 class="brk" style="margin-top:6px">${esc(m.subject || "(no subject)")}</h3><div class="mute brk">${esc(m.from_addr)}</div>
+      ${m.notice.cause_no || m.notice.style ? `<div class="chips" style="margin-top:6px">${m.notice.cause_no ? `<span class="chip">${esc(m.notice.cause_no)}</span>` : ""}${m.notice.county ? `<span class="chip">${esc(m.notice.county)} County</span>` : ""}${m.notice.style ? `<span class="chip brk">${esc(m.notice.style)}</span>` : ""}</div>` : ""}
+      <div class="brk" style="font-size:14px;margin-top:6px">${esc(m.preview)}</div>
+      <div class="row" style="margin-top:10px"><button type="button" class="btn sm" data-qa="assign">Assign</button><button type="button" class="btn sm ghost" data-qa="open">Open email</button><button type="button" class="btn sm ghost" data-qa="dismiss">Not a court notice</button></div>
+      <form class="qf" hidden style="margin-top:10px"><div class="grid">
+        <div><label>What is it?</label><select name="what"><option value="new"${m.notice.cause_no ? " selected" : ""}>A new case — add it</option><option value="link">A case already in the app</option><option value="send"${m.notice.cause_no ? "" : " selected"}>Just send it to an attorney</option></select></div>
+        <div data-w="new send"><label>Attorney</label><select name="attorney"><option value="">Pick…</option>${att}</select></div>
+        <div data-w="new"><label>Cause #</label><input name="cause_no" value="${esc(m.notice.cause_no)}"></div>
+        <div data-w="new"><label>County</label><select name="county"><option value="">Pick…</option>${(META.counties || []).map(c => `<option${c === m.notice.county ? " selected" : ""}>${esc(c)}</option>`).join("")}</select></div>
+        <div class="full" data-w="new"><label>Case style</label><input name="style" value="${esc(m.notice.style)}"></div>
+        <div class="full" data-w="link"><label>Cause # of the case in the app</label><input name="link_cause" value="${esc(m.notice.cause_no)}"></div></div>
+        <div class="err"></div><div class="row"><button class="btn">Assign</button><button type="button" class="btn ghost" data-qa="cancel">Cancel</button></div></form></div>`).join("")}`;
+}
+function wireQueue(qd, after) {
+  $$("[data-q]").forEach(card => {
+    const id = +card.dataset.q, m = qd.emails.find(x => String(x.id) === card.dataset.q), f = card.querySelector(".qf");
+    const sync = () => { const w = f.what.value; f.querySelectorAll("[data-w]").forEach(el => el.hidden = !el.dataset.w.split(" ").includes(w)); };
+    f.what.onchange = sync; sync();
+    card.querySelector("[data-qa=assign]").onclick = () => { f.hidden = !f.hidden; };
+    f.querySelector("[data-qa=cancel]").onclick = () => { f.hidden = true; };
+    card.querySelector("[data-qa=open]").onclick = () => emailView(id);
+    card.querySelector("[data-qa=dismiss]").onclick = async e => { const b = e.currentTarget; if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to remove"; return; } try { await api(`/api/court-queue/${id}/dismiss`, { method: "POST" }); toast("Removed"); after(); } catch (x) { fail(x); } };
+    f.onsubmit = async e => { e.preventDefault(); const w = f.what.value, er = f.querySelector(".err"); er.textContent = "";
+      const body = w === "link" ? { link_cause: f.link_cause.value } : { attorney: +f.attorney.value || 0, ...(w === "new" ? { create: { cause_no: f.cause_no.value, county: f.county.value, style: f.style.value, court: m.notice.court, next_setting: m.notice.next_setting } } : {}) };
+      try { const r = await api(`/api/court-queue/${id}/assign`, { method: "POST", body }); toast(r.created ? "Case added and assigned" : "Assigned"); after(); } catch (x) { er.textContent = x.message; } };
+  });
+}
 async function inboxView(quiet) {
   subView = false;
   if (!quiet) $("#app").innerHTML = `<div class="card mute">Loading inbox…</div>`;
-  let r, mb; try { [r, mb] = await Promise.all([api("/api/inbox"), api("/api/mail").catch(() => null)]); } catch (e) { return fail(e); }
+  let r, mb, qd = null; try { [r, mb, qd] = await Promise.all([api("/api/inbox"), api("/api/mail").catch(() => null), me.court_handler ? api("/api/court-queue").catch(() => null) : null]); } catch (e) { return fail(e); }
   inboxUnread = r.unread; renderNav();
   const conn = mb && mb.mailboxes.find(x => x.status === "ok" || x.status === "syncing");
-  const connCard = !mb ? "" : conn
+  const sharedOnly = me.court_mode === "shared";
+  const connCard = !mb ? "" : sharedOnly && !conn ? `<div class="card"><span class="tag g">Shared court inbox</span> <span class="mute">Your firm's court emails come in through one shared inbox. Notices for your cases land here automatically.</span></div>` : conn
     ? `<div class="card"><span class="tag g">Connected</span> <b>${esc(conn.email || mb.names[conn.provider])}</b> <span class="mute">· court emails are checked every hour</span>
        ${conn.stats && conn.stats.scanned != null ? `<div class="mute" style="font-size:13px;margin-top:4px">Last check ${new Date(conn.stats.at).toLocaleString()}: looked at ${conn.stats.scanned} emails, found ${conn.stats.court} from courts${conn.stats.created ? `, added ${conn.stats.created} cases` : ""}.</div>` : ""}
        ${conn.stats && conn.stats.note ? `<p class="err" style="margin:6px 0 0">${esc(conn.stats.note)}</p>${conn.provider !== "imap" ? imapForm(mb, true) : ""}` : ""}</div>`
@@ -275,7 +311,7 @@ async function inboxView(quiet) {
        ${mb.configured.google ? `<a class="btn" href="/api/mail/connect/google" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Gmail</a>` : ""}
        ${imapForm(mb, mb.other && !mb.other.provider)}
        <p class="mute" style="margin-bottom:0;font-size:13px">Read-only. Personal email is ignored and never stored. Disconnect anytime under Court Updates.</p></div>`;
-  $("#app").innerHTML = `${connCard}<div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Inbox</h2>${r.unread ? `<button class="btn sm ghost" id="readAll">Mark all read</button>` : ""}</div>
+  $("#app").innerHTML = `${queueCards(qd)}${connCard}<div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Inbox</h2>${r.unread ? `<button class="btn sm ghost" id="readAll">Mark all read</button>` : ""}</div>
    <p class="mute" style="margin-bottom:0">Every court email from your connected email. Tap one for the summary and the exact email.</p></div>
    ${r.emails.map(m => `<div class="card" data-open="${m.id}" style="cursor:pointer;${m.read ? "" : "border-left:4px solid var(--acc)"}">
      <div class="row"><span class="tag ${TYPE_TAG[m.type] || "n"}">${esc(m.type)}</span>${m.read ? "" : `<span class="tag r">New</span>`}<span class="mute" style="margin-left:auto">${new Date(m.received_at).toLocaleString()}</span></div>
@@ -285,6 +321,7 @@ async function inboxView(quiet) {
      ${m.dates.length ? `<div class="mute" style="margin-top:4px">${m.dates.map(esc).join(" · ")}</div>` : ""}
      <div style="font-size:14px;margin-top:4px">${esc(m.preview)}</div></div>`).join("") || `<div class="card mute">No emails yet. Set up your address under <a class="link" id="goCU">Court Updates</a>.</div>`}`;
   wireImap(() => setTimeout(() => inboxView(), 2500));
+  if (qd) wireQueue(qd, () => inboxView(true));
   if ($("#readAll")) $("#readAll").onclick = async () => { await api("/api/inbox/read-all", { method: "POST" }); inboxView(); };
   if ($("#goCU")) $("#goCU").onclick = () => { tab = "court"; renderNav(); show(); };
   $$("[data-open]").forEach(c => c.onclick = () => emailView(+c.dataset.open));
@@ -295,7 +332,7 @@ async function emailView(id) {
   let r; try { r = await api(`/api/email-alerts/${id}`); } catch (e) { return fail(e); }
   const m = r.email, sm = r.summary;
   const linkify = t => esc(t).replace(/(https?:\/\/[^\s<]+)/g, u => `<a class="link" href="${u}" target="_blank" rel="noopener">${u.length > 70 ? u.slice(0, 70) + "…" : u}</a>`);
-  $("#app").innerHTML = `<button class="btn sm ghost" id="bk">← Inbox</button>
+  $("#app").innerHTML = `<button class="btn sm ghost" id="bk">← Court notices</button>
    <div class="card" style="margin-top:10px"><div class="row"><span class="tag ${TYPE_TAG[sm.type] || "n"}">${esc(sm.type)}</span><span class="mute" style="margin-left:auto">${new Date(m.received_at).toLocaleString()}</span></div>
    <h2 style="margin-top:8px">${esc(m.subject || "(no subject)")}</h2><div class="mute">From: ${esc(m.from_addr)}</div></div>
    <div class="card"><h3>Summary</h3>
@@ -313,8 +350,8 @@ async function emailView(id) {
   const showT = () => { $("#exact").innerHTML = `<div class="optext" style="font-family:inherit;font-size:14px">${linkify(m.body || "(empty)")}</div>`; $("#vT").className = "btn sm"; if ($("#vF")) $("#vF").className = "btn sm ghost"; };
   if ($("#vF")) $("#vF").onclick = showF; $("#vT").onclick = showT;
   m.html ? showF() : showT();
-  $("#bk").onclick = () => inboxView();
-  $$("[data-case]").forEach(a => a.onclick = () => { tab = "cases"; caseF.view = "firm"; renderNav(); show(); });
+  $("#bk").onclick = () => { tab = "inbox"; renderNav(); window.mailOpenCourt ? mailOpenCourt() : show(); };
+  $$("[data-case]").forEach(a => a.onclick = () => window.caseHub ? caseHub(+a.dataset.case) : (tab = "cases", renderNav(), show()));
   inboxUnread = Math.max(0, inboxUnread - 1); renderNav();
 }
 
@@ -524,25 +561,32 @@ function bindCaseForm(form, c) {
 }
 
 // ---------------- case analysis (rule-based) ----------------
-async function analysisView(c) {
-  window.scrollTo(0, 0);
-  $("#app").innerHTML = `<button class="btn sm ghost" id="bk">← Back to cases</button>
-   <div class="card" style="margin-top:10px"><h2>Case-law analysis</h2><div class="mute">${esc(c.cause_no)} · ${esc(c.style || "")} · ${esc(c.county)} County</div>
-   <label style="margin-top:10px">Issues (comma-separated)</label><input id="iss" value="${esc(c.issues || "")}" placeholder="slip and fall, constructive notice, grocery store">
+// The panel is shared: the case screen's "Case law" tab and the older full-screen view from the case list.
+function analysisPanel(c) {
+  return `<div class="card"><h2 style="margin-top:0">Case-law analysis</h2><div class="mute">Pick the strongest path and the authorities to cite for your arguments.</div>
+   <label for="iss" style="margin-top:10px">Issues (comma-separated)</label><input id="iss" value="${esc(c.issues || "")}" placeholder="slip and fall, constructive notice, grocery store">
    <div class="row" style="margin-top:10px"><button class="btn" id="run">Run analysis</button>
-   <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink)"><input type="checkbox" id="lw" style="width:auto" ${c.law_watch ? "checked" : ""}> Watch for new case law (daily)</label></div>
+   <label class="ck" style="margin:0"><input type="checkbox" id="lw" ${c.law_watch ? "checked" : ""}>Watch for new case law (daily)</label></div>
    <p class="mute" style="margin-bottom:0">Takes about a minute. Uses public Texas opinions only — no AI.</p></div><div id="ar"></div>`;
-  $("#bk").onclick = () => casesView();
+}
+async function wireAnalysis(c) {
   $("#lw").onchange = async e => { if (e.target.checked && !$("#iss").value.trim()) { e.target.checked = false; return toast("Enter issues first"); }
     try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { law_watch: e.target.checked, issues: $("#iss").value } }); c.law_watch = e.target.checked; c.issues = $("#iss").value; toast(e.target.checked ? "Watching for new case law" : "Stopped"); } catch (err) { fail(err); } };
   $("#run").onclick = async () => {
+    if (!$("#iss").value.trim()) { toast("Enter the case's issues first"); $("#iss").focus(); return; }
     const btn = $("#run"); btn.disabled = true; btn.textContent = "Analyzing…";
     $("#ar").innerHTML = `<div class="card mute">Searching Texas opinions and counting outcomes…</div>`;
     try { const r = await api(`/api/cases/${c.id}/analyze`, { method: "POST", body: { issues: $("#iss").value } }); c.issues = r.issues; renderAnalysis(r.result, r.created_at); }
     catch (e) { $("#ar").innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
     btn.disabled = false; btn.textContent = "Run again";
   };
-  try { const a = (await api(`/api/cases/${c.id}/analysis`)).analysis; if (a) { renderAnalysis(a.result, a.created_at); $("#run").textContent = "Run again"; } } catch (e) {}
+  try { const a = (await api(`/api/cases/${c.id}/analysis`)).analysis; if (a && $("#ar")) { renderAnalysis(a.result, a.created_at); $("#run").textContent = "Run again"; } } catch (e) {}
+}
+async function analysisView(c) {
+  window.scrollTo(0, 0);
+  $("#app").innerHTML = `<button class="btn sm ghost" id="bk">← Back to cases</button><div class="mute" style="margin:10px 4px 0">${esc(c.cause_no)} · ${esc(c.style || "")} · ${esc(c.county)} County</div>` + analysisPanel(c);
+  $("#bk").onclick = () => casesView();
+  wireAnalysis(c);
 }
 function renderAnalysis(r, at) {
   const bar = pct => `<div style="background:var(--chip);border-radius:6px;height:8px;margin-top:6px"><div style="width:${pct}%;background:var(--ok);height:8px;border-radius:6px"></div></div>`;
@@ -657,6 +701,7 @@ async function firmView() {
   let fm = null; try { fm = await api("/api/firm/mail"); } catch (e) {}
   let mk = null; try { mk = await api("/api/firm/ms-keys"); } catch (e) {}
   let fp = null; try { fp = (await api("/api/firm/profile")).profile; } catch (e) { fp = { name: me.firm_name }; }
+  let ci = null; try { ci = await api("/api/firm/court-inbox"); } catch (e) {}
   const mkCard = !mk ? "" : `<div class="card" data-fs="email"><h2>Your firm's Microsoft connection</h2>
    ${mk.own ? `<p><span class="tag g">Using your firm's own keys</span></p>
      <div class="kv"><div><b>Application (client) ID</b>${esc(mk.client_id)}</div><div><b>Directory (tenant) ID</b>${esc(mk.tenant)}</div><div><b>Secret</b>${esc(mk.hint || "saved")} (hidden)</div><div><b>Saved</b>${mk.at ? new Date(mk.at).toLocaleString() : ""}${mk.by ? " by " + esc(mk.by) : ""}</div></div>
@@ -672,7 +717,7 @@ async function firmView() {
      <li><b>Name:</b>${copyBox("TX Case Desk")}<b>Supported account types:</b> <i>Single tenant only</i> (your organization only).</li>
      <li><b>Redirect URI:</b> pick <b>Web</b> and paste:${copyBox(mk.redirects[0])}Click <b>Register</b>.</li>
      <li>Left menu → <b>Authentication</b> → <b>Add Redirect URI</b> → paste the second one → <b>Configure</b>:${copyBox(mk.redirects[1])}</li>
-     <li>Left menu → <b>API permissions</b> → <b>+ Add a permission</b> → <b>Microsoft Graph</b> → <b>Delegated permissions</b> → tick <b>Mail.Read</b>, <b>User.Read</b>, <b>offline_access</b>, <b>openid</b>, <b>email</b>, <b>Calendars.ReadWrite</b> (calendar sync) and <b>Mail.Send</b> (morning agenda email) → <b>Add permissions</b>.<br>
+     <li>Left menu → <b>API permissions</b> → <b>+ Add a permission</b> → <b>Microsoft Graph</b> → <b>Delegated permissions</b> → tick <b>Mail.ReadWrite</b> and <b>Mail.Send</b> (full email in the app), <b>Calendars.ReadWrite</b> (calendar sync), <b>User.Read</b>, <b>offline_access</b>, <b>openid</b> and <b>email</b> → <b>Add permissions</b>.<br>
        For firm-wide connect also add → <b>Application permissions</b> → <b>Mail.Read</b>. Then click <b>✓ Grant admin consent</b> for your organization.</li>
      <li>Left menu → <b>Certificates &amp; secrets</b> → <b>+ New client secret</b> → 24 months → <b>Add</b>. Copy the <b>Value</b> right away (shown only once — not the Secret ID).</li>
      <li>Left menu → <b>Overview</b>: copy the <b>Application (client) ID</b> and the <b>Directory (tenant) ID</b>, and paste all three below.</li>
@@ -697,7 +742,7 @@ async function firmView() {
        <li>Client ID:<div class="secret">${esc(fm.google_sa_client_id)}</div></li><li>OAuth scope:<div class="secret">https://www.googleapis.com/auth/gmail.readonly</div></li><li>Tap <b>Authorize</b>, then come back and tap the button below.</li></ol>
        <button class="btn" id="fmG" style="width:100%;padding:14px">I've authorized it — turn on for the whole firm</button><div class="err" id="fmGerr"></div>` : `<button class="btn ghost" disabled style="width:100%;padding:14px">Google Workspace firm connect — coming soon</button>`}`
    : `<p class="mute">Your firm's email (@${esc(fm.detect.domain)}) is hosted by ${esc(fm.detect.host)}. Firm-wide connect works with Microsoft 365 and Google Workspace. Each attorney can connect their own email in a minute with <b>Connect with your email password</b> (Inbox or Court Updates).</p>`}</div>`;
-  $("#app").innerHTML = setupCard(fp, us, fm) + secTabs(FS_SECS, fsSec, "fs") + profileCard(fp) + fmCard + mkCard + `<div class="card" data-fs="people"><h2>${esc(me.firm_name)} – seats</h2>${us.map(u => `<div style="border-top:1px solid var(--line);padding:10px 0" data-u="${u.id}">
+  $("#app").innerHTML = setupCard(fp, us, fm, ci) + secTabs(FS_SECS, fsSec, "fs") + profileCard(fp) + courtCard(ci) + fmCard + mkCard + `<div class="card" data-fs="people"><h2>${esc(me.firm_name)} – seats</h2>${us.map(u => `<div style="border-top:1px solid var(--line);padding:10px 0" data-u="${u.id}">
     <b>${esc(u.name)}</b> <span class="tag ${u.active ? "g" : "r"}">${u.active ? u.role : "disabled"}</span> ${u.totp_enabled ? "" : `<span class="tag y">2FA not set</span>`}
     <div class="mute">${esc(u.email)}${u.phone ? " · " + esc(u.phone) : ""}</div><div class="mute">Counties: ${esc((u.counties || []).join(", ") || "none")} · Last login: ${u.last_login ? new Date(u.last_login).toLocaleString() : "never"}</div>
     <div class="row" style="gap:6px;margin-top:6px;font-size:13px">${u.bar_number ? `<span class="tag k">Bar #${esc(u.bar_number)}</span>` : u.role !== "paralegal" ? `<span class="tag y">Bar # missing</span>` : ""}${u.licensed_on ? `<span class="tag k">Licensed ${esc(new Date(u.licensed_on + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }))}</span>` : ""}
@@ -717,7 +762,7 @@ async function firmView() {
    <div class="err" id="aerr"></div><button class="btn">Add person and get sign-in</button></form><div id="temp"></div></div><div id="firmExtras"></div>`;
   const setFs = k => { fsSec = k; $$("#app [data-fs]").forEach(s => s.hidden = s.dataset.fs !== k); $$("[data-fs-go]").forEach(b => b.dataset.fsGo === k ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")); $("#fsSel").value = k; };
   $$("[data-fs-go]").forEach(b => b.onclick = () => setFs(b.dataset.fsGo)); $("#fsSel").onchange = e => setFs(e.target.value);
-  setFs(fsSec); wireProfileCard(fp);
+  setFs(fsSec); wireProfileCard(fp); wireCourtCard(ci);
   Promise.resolve(window.renderFirmExtras && renderFirmExtras(us)).then(() => setFs(fsSec));
   const showTemp = (name, email, pw, phone) => { $("#temp").innerHTML = credCard(name, email, pw, phone); $("#temp").scrollIntoView({ behavior: "smooth", block: "center" }); };
   if ($("#mkF")) $("#mkF").onsubmit = async e => {
@@ -793,19 +838,83 @@ function credCard(name, email, pw, phone) {
       <button type="button" class="btn ghost" data-copy="${esc(msg)}">Copy the message</button></div>
     <p class="mute" style="font-size:13px;margin:10px 0 0">Safest: send the link and email one way, and the temporary password another (for example, text).</p></div>`;
 }
-function setupCard(f, us, fm) {
+function setupCard(f, us, fm, ci) {
   const solo = me.firm_kind === "solo", act = us.filter(u => u.active), law = act.filter(u => u.role !== "paralegal");
   const items = [
     ["Firm profile: address and phone", !!(f.address && f.phone), "profile", f.address && f.phone ? (f.logo ? "Logo added" : "Add your logo too") : "Shows on drafts, letters and invoices"],
     ...(solo ? [] : [["Add your partners, attorneys and staff", act.length > 1, "people", `${act.length} ${act.length === 1 ? "person" : "people"}`]]),
     ["Bar numbers and bar cards on file", law.length > 0 && law.every(u => u.bar_number && u.bar_card_at), "people", `${law.filter(u => u.bar_card_at).length} of ${law.length} bar cards`],
     ...(solo ? [] : [["Everyone has signed in", act.every(u => !u.must_change_pw), "people", act.filter(u => u.must_change_pw).map(u => u.name).join(", ") || "All signed in"]]),
-    ["Court email connected", !!(fm && fm.firm) || law.every(u => u.mailboxes > 0), "email", fm && fm.firm ? "Firm-wide connect is on" : `${law.filter(u => u.mailboxes > 0).length} of ${law.length} attorneys connected`]];
+    courtStep(ci, fm, law)];
   const done = items.filter(x => x[1]).length;
   if (done === items.length) return `<div class="setupok"><span class="ok">${ic("check", 16, 2)}Setup complete</span><span class="mute">Everyone is set up.</span></div>`;
   return `<div class="card setup"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Firm setup</h2><span class="mute">${done} of ${items.length} done</span></div>
     <div class="meter" aria-hidden="true"><span style="width:${Math.round(done / items.length * 100)}%"></span></div>
     <ol class="steps">${items.map(([t, ok, sec, sub]) => `<li class="${ok ? "done" : ""}"><span class="stx" aria-hidden="true">${ok ? ic("check", 14, 2.5) : ""}</span><span class="sbody"><b>${t}</b><small>${esc(sub)}</small></span>${ok ? `<span class="sr">Done</span>` : `<button type="button" class="btn sm ghost" data-fs-go="${sec}">Go</button>`}</li>`).join("")}</ol></div>`;
+}
+
+// ---------------- shared court inbox (one firm address that gets court emails) ----------------
+const CI_MODES = [["each", "Each attorney's own email", "Every attorney connects the email they get court notices at."],
+  ["shared", "One shared firm inbox", "Courts send to one firm address (like efile@yourfirm.com). The admin or staff assign anything that can't be matched."],
+  ["both", "Both", "A shared firm inbox, and attorneys can also connect their own email."]];
+function courtStep(ci, fm, law) {
+  const own = law.filter(u => u.mailboxes > 0).length;
+  if (ci && ci.mode === "shared") return ["Court email connected", ci.connected, "email", ci.connected ? "Shared court inbox is on" : "Connect the shared court inbox"];
+  if (ci && ci.mode === "both") return ["Court email connected", ci.connected || own === law.length, "email", ci.connected ? `Shared inbox on · ${own} of ${law.length} attorneys connected their own` : "Connect the shared court inbox"];
+  return ["Court email connected", !!(fm && fm.firm) || own === law.length, "email", fm && fm.firm ? "Firm-wide connect is on" : `${own} of ${law.length} attorneys connected`];
+}
+function courtCard(ci) {
+  if (!ci) return "";
+  const mb = ci.mailbox, st = ci.court_stats, m = ci.mode;
+  const stat = s => s === "ok" ? `<span class="tag g">Connected</span>` : s === "syncing" ? `<span class="tag n">Checking now</span>` : s === "reconnect" ? `<span class="tag r">Sign in again</span>` : `<span class="tag r">Error</span>`;
+  const how = mb ? `<div class="row">${stat(mb.status)}<b class="brk">${esc(mb.email || "")}</b><span class="mute">${mb.provider === "microsoft" ? "Outlook / Microsoft 365" : "Email password sign-in"}</span></div>
+      <div class="mute" style="margin-top:4px">${mb.last_sync ? "Last checked " + new Date(mb.last_sync).toLocaleString() : "First check running…"}${mb.stats && mb.stats.scanned != null ? ` · ${mb.stats.court} court emails found` : ""} · checked every hour</div>
+      ${mb.last_error ? `<p class="err">${esc(mb.last_error)}</p>` : ""}
+      <div class="row" style="margin-top:8px"><button type="button" class="btn sm" id="ciSync">Check now</button><button type="button" class="btn sm danger" id="ciDel">Disconnect</button></div>`
+    : ci.court_email ? `<div class="row"><span class="tag ${st && st.error ? "r" : "g"}">${st && st.error ? "Error" : "Connected"}</span><b class="brk">${esc(ci.court_email)}</b><span class="mute">through the firm-wide ${ci.firm_mail && ci.firm_mail.provider === "google" ? "Google" : "Microsoft 365"} connection</span></div>
+      <div class="mute" style="margin-top:4px">${st && st.at ? "Last checked " + new Date(st.at).toLocaleString() + ` · ${st.added || 0} new notices` : "First check running…"}</div>${st && st.error ? `<p class="err">${esc(st.error)}</p>` : ""}
+      <div class="row" style="margin-top:8px"><button type="button" class="btn sm" id="ciSync">Check now</button><button type="button" class="btn sm danger" id="ciEmailDel">Stop reading it</button></div>`
+    : ci.forward ? `<div class="row"><span class="tag g">Forwarding on</span><span class="mute">Set the shared inbox to forward court emails to:</span></div>${copyBox(ci.forward)}
+      <div class="row" style="margin-top:8px"><button type="button" class="btn sm danger" id="ciFwdOff">Stop forwarding</button></div>`
+    : `<p style="margin:0 0 8px">Connect the address the courts already send to. <b>Don't change anyone's State Bar eService email</b> — just connect the inbox it goes to.</p>
+      <details class="opt" open><summary>Sign in to the shared inbox</summary>
+        ${ci.configured && ci.configured.microsoft ? `<a class="btn" href="/api/firm/court-inbox/connect/microsoft" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:12px">Sign in with Outlook / Microsoft 365</a>` : ""}
+        <form id="ciImap"><div class="grid"><div><label for="ciE">Shared inbox address</label><input id="ciE" name="email" type="email" placeholder="efile@yourfirm.com" required></div>
+          <div><label for="ciP">Its email password (or app password)</label><input id="ciP" name="password" type="password" autocomplete="off" required></div>
+          <div class="full"><details><summary class="mute" style="font-size:13px">Advanced: mail server</summary><label for="ciH">Incoming (IMAP) server — leave blank to detect</label><input id="ciH" name="host" placeholder="imap.example.com"></details></div></div>
+          <div class="err"></div><button class="btn">Connect shared inbox</button>
+          <p class="mute" style="font-size:13px;margin:6px 0 0">For Titan, GoDaddy, Gmail (app password), Yahoo, Zoho and others. The password is encrypted.</p></form></details>
+      ${ci.firm_mail ? `<details class="opt"><summary>It's a Microsoft 365 shared mailbox (no password)</summary><p class="mute" style="margin:6px 0">Your firm-wide ${ci.firm_mail.provider === "google" ? "Google" : "Microsoft 365"} connection can read it. Enter its @${esc(ci.firm_mail.domain)} address.</p>
+        <form id="ciAddr" class="row"><input name="court_email" type="email" placeholder="efile@${esc(ci.firm_mail.domain)}" required style="flex:1;min-width:200px"><button class="btn">Use this address</button><div class="err" style="width:100%"></div></form></details>` : ""}
+      ${ci.forward_on ? `<details class="opt"><summary>Forward court emails instead</summary><p class="mute" style="margin:6px 0">Get a private address, then set a forwarding rule in the shared inbox.</p><button type="button" class="btn sm" id="ciFwdOn">Get forwarding address</button></details>` : ""}`;
+  return `<div class="card" data-fs="email"><h2>Court emails</h2><p class="mute" style="margin-top:0">How does your firm get emails from the courts (eFileTexas, clerks, re:SearchTX)?</p>
+    <fieldset class="radios" id="ciMode">${CI_MODES.map(([k, t, d]) => `<label class="rad"><input type="radio" name="ciMode" value="${k}"${m === k ? " checked" : ""}><span><b>${t}</b><small>${d}</small></span></label>`).join("")}</fieldset>
+    ${m === "each" ? "" : `<h3 style="margin:16px 0 8px">Shared court inbox</h3>${how}
+    <h3 style="margin:18px 0 6px">How notices are sorted</h3>
+    <ol class="mute" style="margin:0;padding-left:20px;line-height:1.6"><li><b>Cause # matches a case</b> → goes to that case's attorney and updates the case.</li>
+      <li><b>New case, and the notice names one of your attorneys</b> (name or bar #) → the case is added for that attorney.</li>
+      <li><b>Anything else</b> → waits in <b>Needs assigning</b> for the people below.</li></ol>
+    ${ci.queue ? `<p style="margin:10px 0 0"><span class="tag y">${ci.queue} waiting</span> <button type="button" class="lk" id="ciQueue">Open Needs assigning</button></p>` : ""}
+    <h3 style="margin:18px 0 6px">Who assigns notices that can't be matched</h3>
+    <p class="mute" style="margin:0 0 6px">The firm admin always can. Pick anyone else — clerks, paralegals, a managing partner. To let them edit those cases too, give them <b>Whole firm</b> access under People.</p>
+    <div class="chk" id="ciWho">${(ci.people || []).filter(p => p.role !== "admin").map(p => `<label class="ck"><input type="checkbox" value="${p.id}"${p.court_handler ? " checked" : ""}>${esc(p.name)} <span class="mute">· ${esc(ROLE_LBL[p.role] || p.role)}</span></label>`).join("") || `<span class="mute">Add people first.</span>`}</div>
+    <div class="err" id="ciErr"></div><button type="button" class="btn sm" id="ciWhoSave" style="margin-top:6px">Save who assigns</button>`}</div>`;
+}
+function wireCourtCard(ci) {
+  if (!ci) return;
+  const put = async body => { try { await api("/api/firm/court-inbox", { method: "PUT", body }); return true; } catch (x) { const e = $("#ciErr"); if (e) e.textContent = x.message; else toast(x.message); return false; } };
+  $$("#ciMode input").forEach(r => r.onchange = async () => { if (await put({ mode: r.value })) { toast("Saved"); fsSec = "email"; firmView(); } });
+  if ($("#ciWhoSave")) $("#ciWhoSave").onclick = async () => { if (await put({ handlers: $$("#ciWho input:checked").map(x => +x.value) })) toast("Saved — they'll see them under Mail → Court notices"); };
+  if ($("#ciImap")) $("#ciImap").onsubmit = async e => { e.preventDefault(); const f = e.target, btn = f.querySelector("button.btn"), er = f.querySelector(".err"); er.textContent = ""; btn.disabled = true; btn.textContent = "Checking…";
+    try { const r = await api("/api/firm/court-inbox/imap", { method: "POST", body: Object.fromEntries(new FormData(f)) }); toast(`Connected ${r.email} — checking court emails now`); fsSec = "email"; firmView(); }
+    catch (x) { er.textContent = x.message; btn.disabled = false; btn.textContent = "Connect shared inbox"; } };
+  if ($("#ciAddr")) $("#ciAddr").onsubmit = async e => { e.preventDefault(); try { await api("/api/firm/court-inbox", { method: "PUT", body: { court_email: e.target.court_email.value } }); toast("Reading it now"); fsSec = "email"; firmView(); } catch (x) { e.target.querySelector(".err").textContent = x.message; } };
+  if ($("#ciFwdOn")) $("#ciFwdOn").onclick = async () => { if (await put({ forward: true })) { fsSec = "email"; firmView(); } };
+  if ($("#ciFwdOff")) $("#ciFwdOff").onclick = async () => { const b = $("#ciFwdOff"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to stop"; return; } if (await put({ forward: false })) { fsSec = "email"; firmView(); } };
+  if ($("#ciEmailDel")) $("#ciEmailDel").onclick = async () => { const b = $("#ciEmailDel"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to stop"; return; } if (await put({ court_email: "" })) { fsSec = "email"; firmView(); } };
+  if ($("#ciSync")) $("#ciSync").onclick = async () => { await api("/api/firm/court-inbox/sync", { method: "POST" }); toast("Checking the shared inbox…"); setTimeout(() => { fsSec = "email"; firmView(); }, 2500); };
+  if ($("#ciDel")) $("#ciDel").onclick = async () => { const b = $("#ciDel"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to disconnect"; return; } await api("/api/firm/court-inbox/mailbox", { method: "DELETE" }); fsSec = "email"; firmView(); };
+  if ($("#ciQueue")) $("#ciQueue").onclick = () => { tab = "inbox"; renderNav(); show(); };
 }
 
 // ---------------- roles and access (admin sets them per person) ----------------
@@ -834,7 +943,7 @@ function wireAccess(box) {
 }
 
 // ---------------- firm settings: sections + firm profile + logo ----------------
-const FS_SECS = [["profile", "Firm profile"], ["people", "People & sign-ins"], ["email", "Email & Microsoft"], ["money", "Payments & rates"], ["court", "Court days & checklists"], ["data", "Export"]];
+const FS_SECS = [["profile", "Firm profile"], ["people", "People & sign-ins"], ["email", "Email & court notices"], ["money", "Payments & rates"], ["court", "Court days & checklists"], ["data", "Export"]];
 let fsSec = "profile";
 function secTabs(secs, cur, attr) {
   return `<nav class="secnav" aria-label="Sections">${secs.map(([k, v]) => `<button type="button" data-${attr}-go="${k}"${cur === k ? ' aria-current="page"' : ""}>${v}</button>`).join("")}</nav>
@@ -924,7 +1033,7 @@ function busy() { const a = document.activeElement; return a && /INPUT|TEXTAREA|
 async function autoRefresh() {
   if (document.hidden || !me || !me.id || busy()) return;
   await checkVersion();
-  if (tab === "inbox" && !subView) { const y = window.scrollY; await inboxView(true); window.scrollTo(0, y); }
+  if (tab === "inbox" && !subView && window.mailRefresh) await mailRefresh();
   else if (tab === "inbox" || tab === "cases") { try { const r = await api("/api/inbox"); inboxUnread = r.unread; renderNav(); } catch {} }
 }
 setInterval(autoRefresh, 60e3);
@@ -943,7 +1052,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) auto
   }, { passive: true });
   addEventListener("touchend", async () => {
     if (y0 === null) return; y0 = null;
-    if (pull > 80 && me && me.id) { ind.textContent = "Refreshing…"; await checkVersion(); if (tab === "inbox" && subView) await inboxView(); else show(); }
+    if (pull > 80 && me && me.id) { ind.textContent = "Refreshing…"; await checkVersion(); show(); }
     ind.style.transform = "translateY(-100%)"; pull = 0;
   });
 })();
@@ -953,7 +1062,7 @@ checkVersion();
 (async () => {
   try { META = await api("/api/meta"); } catch (e) { $("#app").innerHTML = `<div class="card err">Can't reach server.</div>`; return; }
   const qs = new URLSearchParams(location.search);
-  if (qs.get("connected") || qs.get("mailerror")) { tab = /firm/.test(qs.get("connected") || "") ? "firm" : "inbox"; history.replaceState(null, "", "/"); setTimeout(() => toast(qs.get("connected") ? `Email connected: ${qs.get("connected")} — checking court emails now` : qs.get("mailerror")), 600); }
+  if (qs.get("connected") || qs.get("mailerror")) { tab = /firm/.test(qs.get("connected") || "") ? "firm" : "inbox"; if (/court inbox/.test(qs.get("connected") || "")) fsSec = "email"; history.replaceState(null, "", "/"); setTimeout(() => toast(qs.get("connected") ? `Email connected: ${qs.get("connected")} — checking court emails now` : qs.get("mailerror")), 600); }
   try { me = (await api("/api/me")).user; start(); }
   catch (e) { e.code === "CHANGE_PW" ? (me = { must_change_pw: true }, changePwView(true)) : authView(qs.get("signup") || qs.get("code") ? "signup" : "login"); }
 })();
