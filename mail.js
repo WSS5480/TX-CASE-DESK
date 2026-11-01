@@ -24,7 +24,10 @@ const PROVIDERS = {
   }
 };
 // Court senders we read. Everything else in the mailbox is ignored and never stored.
-const COURT_SENDER = /(efiletexas\.gov|tylertech\.(com|cloud)|tylerhost\.net|txcourts\.gov|courts\.state\.tx\.us|\.tx\.us\b|texasbar\.com|odyssey|research\.tylertech|clerk|courts?\b)/i;
+const COURT_SENDER = /(efiletexas\.gov|efile|tylertech\.(com|cloud)|tylerhost\.net|txcourts\.gov|courts\.state\.tx\.us|\.tx\.us\b|countytx\.gov|county(tx)?\.(us|org|gov|net)\b|hctx\.net|bexar\.org|texasbar\.com|odyssey|research\.tylertech|clerk|courts?\b)/i;
+// Senders that look official but aren't on the list above — logged by domain only, so missed court senders can be added.
+const NEAR_MISS = /(county|court|clerk|judic|\.tx\.us|\.gov$|tyler|efile|texas)/i;
+const domainOf = a => String(a || "").split("@")[1]?.toLowerCase() || "";
 const GMAIL_QUERY = "from:(efiletexas.gov OR tylertech.com OR tylertech.cloud OR tylerhost.net OR txcourts.gov OR tx.us OR clerk)";
 const redirect = p => `${APP}/api/mail/callback/${p}`;
 const configured = () => Object.fromEntries(Object.entries(PROVIDERS).map(([k, v]) => [k, !!(v.id() && v.secret())]));
@@ -86,18 +89,25 @@ async function api(url, token) {
 
 // ---- fetch new court emails since `since` ----
 async function fetchMicrosoft(token, since, base = "https://graph.microsoft.com/v1.0/me/messages") {
-  const out = [];
-  let url = `${base}?$filter=receivedDateTime ge ${since.toISOString()}&$orderby=receivedDateTime asc&$top=50&$select=id,from,subject,body,receivedDateTime`;
-  for (let page = 0; url && page < 10; page++) {
+  // 1) scan headers only (fast, up to 20,000 messages), 2) download bodies only for court emails.
+  const hits = [], near = {}; let scanned = 0, first = null, last = null;
+  let url = `${base}?$filter=receivedDateTime ge ${since.toISOString()}&$orderby=receivedDateTime asc&$top=500&$select=id,from,subject,receivedDateTime`;
+  for (let page = 0; url && page < 40; page++) {
     const j = await api(url, token);
     for (const m of j.value || []) {
+      scanned++; first = first || m.receivedDateTime; last = m.receivedDateTime;
       const from = m.from?.emailAddress?.address || "";
-      if (!COURT_SENDER.test(from + " " + (m.subject || ""))) continue;
-      out.push({ ext_id: "ms:" + m.id, from, subject: m.subject, html: m.body?.contentType === "html" ? m.body.content : null, text: m.body?.contentType === "text" ? m.body.content : null, received: m.receivedDateTime });
+      if (COURT_SENDER.test(from + " " + (m.subject || ""))) hits.push({ id: m.id, from, subject: m.subject, received: m.receivedDateTime });
+      else { const d = domainOf(from); if (NEAR_MISS.test(d)) near[d] = (near[d] || 0) + 1; }
     }
     url = j["@odata.nextLink"];
   }
-  return out;
+  const out = [];
+  for (const h of hits) {
+    const b = await api(`${base}/${h.id}?$select=body`, token);
+    out.push({ ext_id: "ms:" + h.id, from: h.from, subject: h.subject, html: b.body?.contentType === "html" ? b.body.content : null, text: b.body?.contentType === "text" ? b.body.content : null, received: h.received });
+  }
+  return { msgs: out, scanned, first, last, near, more: !!url };
 }
 function gmailBody(payload) {
   let text = "", html = "";
@@ -126,29 +136,35 @@ async function fetchGoogle(token, since) {
     }
     pageToken = list.nextPageToken; if (!pageToken) break;
   }
-  return out.sort((a, b) => a.received.localeCompare(b.received));
+  out.sort((a, b) => a.received.localeCompare(b.received));
+  return { msgs: out, scanned: out.length, first: out[0]?.received || null, last: out[out.length - 1]?.received || null, near: {}, more: false };
 }
 
 const running = new Set();
-async function syncMailbox(id, { days = 2 } = {}) {
+async function syncMailbox(id, { days = 2, fresh = false } = {}) {
   if (running.has(id)) return { skipped: "running" };
   running.add(id);
   try {
-    const { rows } = await q("SELECT m.*, u.firm_id, u.counties, u.active FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE m.id=$1", [id]);
+    const { rows } = await q("SELECT m.*, u.firm_id, u.counties, u.active, u.name AS user_name FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE m.id=$1", [id]);
     const mb = rows[0]; if (!mb || !mb.active) return { skipped: "gone" };
-    const since = mb.last_seen ? new Date(new Date(mb.last_seen).getTime() - 60e3) : new Date(Date.now() - days * 864e5);
+    // No court email found yet = keep looking back 30 days, not just 2.
+    const lookback = fresh || !mb.last_seen ? Math.max(days, 30) : days;
+    const since = !fresh && mb.last_seen ? new Date(new Date(mb.last_seen).getTime() - 60e3) : new Date(Date.now() - lookback * 864e5);
     const token = await accessToken(mb);
-    const msgs = mb.provider === "microsoft" ? await fetchMicrosoft(token, since) : await fetchGoogle(token, since);
+    const r = mb.provider === "microsoft" ? await fetchMicrosoft(token, since) : await fetchGoogle(token, since);
     const user = { id: mb.user_id, firm_id: mb.firm_id, counties: mb.counties };
-    let added = 0, created = 0, matched = 0, newest = mb.last_seen;
-    for (const m of msgs) {
-      const r = await inbound.processEmail(user, { ...m, source: mb.provider });
-      if (r.ok) { added++; created += (r.created || []).length; matched += (r.matched || []).length; }
-      if (!newest || m.received > new Date(newest).toISOString()) newest = m.received;
+    let added = 0, created = 0, matched = 0, dup = 0, newest = fresh ? null : mb.last_seen;
+    for (const m of r.msgs) {
+      const x = await inbound.processEmail(user, { ...m, source: mb.provider });
+      if (x.ok) { added++; created += (x.created || []).length; matched += (x.matched || []).length; } else if (x.duplicate) dup++;
     }
-    const stats = { checked: msgs.length, added, matched, created, at: new Date().toISOString() };
-    await q("UPDATE mailboxes SET status='ok', last_sync=now(), last_seen=COALESCE($2,last_seen), last_error=NULL, stats=$3 WHERE id=$1", [id, newest, stats]);
-    console.log(`[mail] ${mb.provider} mailbox ${id}: ${msgs.length} court emails, ${added} new, ${created} cases created, ${matched} matched`);
+    // Advance the cursor past everything scanned (court or not) so the next check starts where this one ended.
+    const seen = r.more ? r.last : (r.last && (!newest || r.last > new Date(newest).toISOString()) ? r.last : newest);
+    const nearTop = Object.entries(r.near).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    const stats = { scanned: r.scanned, from: r.first, to: r.last, court: r.msgs.length, checked: r.msgs.length, added, matched, created, dup, near: Object.fromEntries(nearTop), at: new Date().toISOString() };
+    await q("UPDATE mailboxes SET status='ok', last_sync=now(), last_seen=COALESCE($2,last_seen), last_error=NULL, stats=$3 WHERE id=$1", [id, seen || null, stats]);
+    console.log(`[mail] ${mb.provider} mailbox ${id} (${mb.user_name}, @${domainOf(mb.email)}): scanned ${r.scanned} emails since ${since.toISOString().slice(0, 10)}${r.more ? " (more left, continues next check)" : ""}; ${r.msgs.length} court emails, ${added} new, ${dup} already had, ${created} cases created, ${matched} matched` +
+      (nearTop.length ? `; other official-looking senders not read: ${nearTop.map(([d, n]) => d + "×" + n).join(", ")}` : ""));
     return stats;
   } catch (e) {
     console.error(`[mail] mailbox ${id} failed: ${e.message}`);
@@ -156,13 +172,19 @@ async function syncMailbox(id, { days = 2 } = {}) {
     return { error: e.message };
   } finally { running.delete(id); }
 }
+// One-time: mailboxes checked by the old 500-email scan get a fresh 30-day look.
+async function rescanOld() {
+  const { rows } = await q("SELECT m.id FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE u.active AND m.status <> 'reconnect' AND (m.stats IS NULL OR m.stats->>'scanned' IS NULL)");
+  for (const r of rows) await syncMailbox(r.id, { days: 30, fresh: true });
+  return rows.length;
+}
 async function syncAll() {
   const { rows } = await q("SELECT m.id FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE u.active AND m.status <> 'reconnect' ORDER BY m.last_sync NULLS FIRST LIMIT 200");
   for (const r of rows) await syncMailbox(r.id);
   return rows.length;
 }
 
-module.exports = { PROVIDERS, configured, startUrl, finish, syncMailbox, syncAll, running };
+module.exports = { PROVIDERS, configured, startUrl, finish, syncMailbox, syncAll, rescanOld, running };
 
 // ======================= Auto-detect who hosts an email domain =======================
 const dns = require("dns").promises;
@@ -248,10 +270,10 @@ async function syncFirm(firmId, { days = 2 } = {}) {
     for (const u of users) {
       try {
         const since = u.last_seen ? new Date(new Date(u.last_seen).getTime() - 60e3) : new Date(Date.now() - days * 864e5);
-        let msgs;
-        if (f.provider === "microsoft") msgs = await fetchMicrosoft(appTok, since, `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(u.email)}/messages`);
-        else msgs = await fetchGoogle(await googleDelegatedToken(u.email), since);
-        let newest = u.last_seen;
+        const fr = f.provider === "microsoft" ? await fetchMicrosoft(appTok, since, `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(u.email)}/messages`)
+          : await fetchGoogle(await googleDelegatedToken(u.email), since);
+        const msgs = fr.msgs;
+        let newest = fr.last && (!u.last_seen || fr.last > new Date(u.last_seen).toISOString()) ? fr.last : u.last_seen;
         for (const m of msgs) {
           const r = await inbound.processEmail(u, { ...m, source: f.provider + "-firm" });
           if (r.ok) { added++; created += (r.created || []).length; }
