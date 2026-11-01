@@ -62,7 +62,8 @@ function publicUser(u) {
     counties: u.counties || [], totp_enabled: u.totp_enabled, must_change_pw: u.must_change_pw,
     phone: u.phone || "", title: u.title || "", doc_email: u.doc_email || "", firm_logo: u.logo_token ? `/brand/${u.logo_token}` : null,
     access: u.access || "own", works_with: u.works_with || [], sees_firm: access.seesFirm(u), trust_access: access.trustOk(u),
-    firm_dash: access.firmDash(u), firm_kind: u.firm_kind || "firm", prefs: u.prefs || {} };
+    firm_dash: access.firmDash(u), firm_kind: u.firm_kind || "firm", prefs: u.prefs || {},
+    licensed_on: u.licensed_on ? new Date(u.licensed_on).toISOString().slice(0, 10) : "", has_bar_card: !!u.bar_card_at };
 }
 async function loadUser(id) {
   const { rows } = await q("SELECT u.*, f.name AS firm_name, f.logo_token, f.kind AS firm_kind, f.plan, f.plan_expires, f.plan_source, f.plan_checked, f.disabled AS firm_disabled FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
@@ -261,6 +262,29 @@ app.delete("/api/firm/logo", requireAuth, requireAdmin, wrap(async (req, res) =>
   await q("UPDATE firms SET logo=NULL, logo_mime=NULL, logo_w=NULL, logo_h=NULL, logo_token=NULL WHERE id=$1", [req.user.firm_id]);
   await audit(req, "firm_logo_removed", {}); res.json({ ok: true });
 }));
+// bar card (photo or PDF): the admin can add it for anyone in the firm; each person can add their own
+const cardType = b => { const i = imageInfo(b); if (i) return i.mime; return b && b.length > 4 && b.slice(0, 5).toString() === "%PDF-" ? "application/pdf" : null; };
+async function saveCard(req, res, uid) {
+  const mime = cardType(req.body); if (!mime) return res.status(400).json({ error: "Use a photo (PNG or JPG) or a PDF of the bar card, 5 MB or smaller." });
+  await q("INSERT INTO bar_cards(user_id, data, mime, at) VALUES($1,$2,$3,now()) ON CONFLICT(user_id) DO UPDATE SET data=$2, mime=$3, at=now()", [uid, req.body, mime]);
+  await q("UPDATE users SET bar_card_at=now() WHERE id=$1", [uid]);
+  await audit(req, "bar_card_saved", { user: uid }); res.json({ ok: true });
+}
+const sameFirm = async (req, id) => (await q("SELECT id FROM users WHERE id=$1 AND firm_id=$2", [+id, req.user.firm_id])).rows[0];
+app.put("/api/me/bar-card", requireAuth, express.raw({ type: () => true, limit: "5mb" }), wrap(async (req, res) => saveCard(req, res, req.user.id)));
+app.put("/api/firm/users/:id/bar-card", requireAuth, requireAdmin, express.raw({ type: () => true, limit: "5mb" }), wrap(async (req, res) => {
+  if (!(await sameFirm(req, req.params.id))) return res.status(404).json({ error: "Not found" }); return saveCard(req, res, +req.params.id);
+}));
+app.delete("/api/firm/users/:id/bar-card", requireAuth, requireAdmin, wrap(async (req, res) => {
+  if (!(await sameFirm(req, req.params.id))) return res.status(404).json({ error: "Not found" });
+  await q("DELETE FROM bar_cards WHERE user_id=$1", [+req.params.id]); await q("UPDATE users SET bar_card_at=NULL WHERE id=$1", [+req.params.id]); await audit(req, "bar_card_removed", { user: +req.params.id }); res.json({ ok: true });
+}));
+app.get("/api/users/:id/bar-card", requireAuth, wrap(async (req, res) => {
+  const id = +req.params.id; if (id !== req.user.id && req.user.role !== "admin") return res.status(403).send("Only the firm admin or the attorney can view this.");
+  const r = (await q("SELECT b.data AS bar_card, b.mime AS bar_card_mime, u.name FROM bar_cards b JOIN users u ON u.id=b.user_id WHERE u.id=$1 AND u.firm_id=$2", [id, req.user.firm_id])).rows[0];
+  if (!r) return res.status(404).send("No bar card on file");
+  res.set({ "Content-Type": r.bar_card_mime, "Content-Disposition": `inline; filename="bar-card-${String(r.name).replace(/[^\w]+/g, "-")}.${r.bar_card_mime === "application/pdf" ? "pdf" : r.bar_card_mime === "image/png" ? "png" : "jpg"}"`, "Cache-Control": "private, no-store", "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; object-src 'self'" }).send(r.bar_card);
+}));
 const TODAY_CARDS = ["court", "deadlines", "mail", "next", "timer", "tasks", "glance", "caseload"];
 app.put("/api/me/prefs", requireAuth, wrap(async (req, res) => {
   const hidden = (Array.isArray(req.body?.today_hidden) ? req.body.today_hidden : []).filter(k => TODAY_CARDS.includes(k));
@@ -278,13 +302,15 @@ app.put("/api/me/profile", requireAuth, wrap(async (req, res) => {
   if (!name) return res.status(400).json({ error: "Your name is required." });
   if (req.user.role !== "paralegal" && bar && bar.length !== 8) return res.status(400).json({ error: "Texas bar numbers are 8 digits." });
   if (!okEmail(docEmail)) return res.status(400).json({ error: "Check the email for documents." });
-  await q("UPDATE users SET name=$2, bar_number=$3, phone=$4, title=$5, doc_email=$6 WHERE id=$1",
-    [req.user.id, name, bar || null, pclean(b.phone, 30) || null, pclean(b.title, 80) || null, docEmail || null]);
+  const lic = /^\d{4}-\d{2}-\d{2}$/.test(String(b.licensed_on || "")) ? b.licensed_on : null;
+  await q("UPDATE users SET name=$2, bar_number=$3, phone=$4, title=$5, doc_email=$6, licensed_on=$7 WHERE id=$1",
+    [req.user.id, name, bar || null, pclean(b.phone, 30) || null, pclean(b.title, 80) || null, docEmail || null, lic]);
   await audit(req, "profile_saved", {});
   res.json({ user: publicUser(await loadUser(req.user.id)) });
 }));
 app.get("/api/firm/users", requireAuth, requireAdmin, wrap(async (req, res) => {
-  const { rows } = await q("SELECT id,email,name,bar_number,role,counties,totp_enabled,active,last_login,access,works_with,trust_access,title,phone FROM users WHERE firm_id=$1 ORDER BY name", [req.user.firm_id]);
+  const { rows } = await q(`SELECT id,email,name,bar_number,role,counties,totp_enabled,active,last_login,access,works_with,trust_access,title,phone,must_change_pw,
+    to_char(licensed_on,'YYYY-MM-DD') AS licensed_on, bar_card_at, (SELECT count(*)::int FROM mailboxes m WHERE m.user_id=users.id) AS mailboxes FROM users WHERE firm_id=$1 ORDER BY name`, [req.user.firm_id]);
   res.json({ users: rows });
 }));
 const ROLES = ["admin", "partner", "manager", "attorney", "paralegal"], ACCESS = ["own", "team", "firm"];
@@ -305,8 +331,9 @@ app.post("/api/firm/users", requireAuth, requireAdmin, wrap(async (req, res) => 
   const ww = await cleanWorksWith(req.user.firm_id, req.body.works_with);
   const trust = role === "admin" ? true : !!req.body.trust_access && role !== "paralegal";
   const pw = tempPw();
-  const { rows } = await q("INSERT INTO users(firm_id,email,name,bar_number,role,pw_hash,must_change_pw,access,works_with,trust_access) VALUES($1,$2,$3,$4,$5,$6,true,$7,$8,$9) RETURNING id",
-    [req.user.firm_id, em, String(name).trim(), bar ? String(bar).trim() : null, role, await bcrypt.hash(pw, 12), acc, ww, trust]);
+  const lic = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.licensed_on || "")) ? req.body.licensed_on : null;
+  const { rows } = await q("INSERT INTO users(firm_id,email,name,bar_number,role,pw_hash,must_change_pw,access,works_with,trust_access,phone,title,licensed_on) VALUES($1,$2,$3,$4,$5,$6,true,$7,$8,$9,$10,$11,$12) RETURNING id",
+    [req.user.firm_id, em, String(name).trim(), bar ? String(bar).trim() : null, role, await bcrypt.hash(pw, 12), acc, ww, trust, pclean(req.body.phone, 30) || null, pclean(req.body.title, 80) || null, lic]);
   await audit(req, "seat_added", { id: rows[0].id, email: em, role, access: acc });
   res.json({ id: rows[0].id, temp_password: pw });
 }));
@@ -328,6 +355,13 @@ app.patch("/api/firm/users/:id", requireAuth, requireAdmin, wrap(async (req, res
   if (ACCESS.includes(b.access)) await q("UPDATE users SET access=$1 WHERE id=$2 AND role IN ('attorney','paralegal')", [b.access, id]);
   if (Array.isArray(b.works_with)) await q("UPDATE users SET works_with=$1 WHERE id=$2", [await cleanWorksWith(req.user.firm_id, b.works_with.filter(x => +x !== id)), id]);
   if (typeof b.trust_access === "boolean") await q("UPDATE users SET trust_access=$1 WHERE id=$2 AND role <> 'paralegal'", [b.trust_access, id]);
+  if (b.details) {   // name, bar card number, date licensed, phone, title
+    const d = b.details, nm = pclean(d.name, 80), bn = pclean(d.bar_number, 8).replace(/\D/g, "");
+    if (!nm) return res.status(400).json({ error: "Name is required." });
+    if (bn && bn.length !== 8) return res.status(400).json({ error: "Texas bar numbers are 8 digits." });
+    const lic = /^\d{4}-\d{2}-\d{2}$/.test(String(d.licensed_on || "")) ? d.licensed_on : null;
+    await q("UPDATE users SET name=$2, bar_number=$3, licensed_on=$4, phone=$5, title=$6 WHERE id=$1", [id, nm, bn || null, lic, pclean(d.phone, 30) || null, pclean(d.title, 80) || null]);
+  }
   let temp_password;
   if (req.body.reset) { temp_password = tempPw(); await q("UPDATE users SET pw_hash=$1, must_change_pw=true, totp_enabled=false, totp_secret=NULL WHERE id=$2", [await bcrypt.hash(temp_password, 12), id]); }
   await audit(req, "seat_updated", { id, ...req.body });

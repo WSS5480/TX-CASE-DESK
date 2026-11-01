@@ -257,7 +257,15 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS works_with INT[] DEFAULT '{}';  -- at
 ALTER TABLE users ADD COLUMN IF NOT EXISTS trust_access BOOLEAN DEFAULT false;
 UPDATE users SET access = CASE WHEN role = 'attorney' THEN 'own' ELSE 'firm' END WHERE access IS NULL;
 UPDATE users SET trust_access = true WHERE role = 'admin' AND NOT trust_access;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS prefs JSONB DEFAULT '{}';   -- per person: which cards show on Today
+ALTER TABLE users ADD COLUMN IF NOT EXISTS prefs JSONB DEFAULT '{}';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS licensed_on DATE;            -- bar card: date licensed in Texas
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bar_card_at TIMESTAMPTZ;      -- when a bar card was put on file (the file lives in bar_cards)
+CREATE TABLE IF NOT EXISTS bar_cards (                                     -- bar card photo or PDF, kept apart from users so sign-in stays light
+  user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  data BYTEA NOT NULL,
+  mime TEXT NOT NULL,
+  at TIMESTAMPTZ DEFAULT now()
+);   -- per person: which cards show on Today
 ALTER TABLE firms ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'firm';     -- solo | firm
 CREATE TABLE IF NOT EXISTS case_team (                                   -- people added to a case beyond its lead attorney
   case_id INT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,

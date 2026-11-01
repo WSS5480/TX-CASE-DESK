@@ -696,21 +696,29 @@ async function firmView() {
        <li>Client ID:<div class="secret">${esc(fm.google_sa_client_id)}</div></li><li>OAuth scope:<div class="secret">https://www.googleapis.com/auth/gmail.readonly</div></li><li>Tap <b>Authorize</b>, then come back and tap the button below.</li></ol>
        <button class="btn" id="fmG" style="width:100%;padding:14px">I've authorized it — turn on for the whole firm</button><div class="err" id="fmGerr"></div>` : `<button class="btn ghost" disabled style="width:100%;padding:14px">Google Workspace firm connect — coming soon</button>`}`
    : `<p class="mute">Your firm's email (@${esc(fm.detect.domain)}) is hosted by ${esc(fm.detect.host)}. Firm-wide connect works with Microsoft 365 and Google Workspace. Each attorney can connect their own email in a minute with <b>Connect with your email password</b> (Inbox or Court Updates).</p>`}</div>`;
-  $("#app").innerHTML = secTabs(FS_SECS, fsSec, "fs") + profileCard(fp) + fmCard + mkCard + `<div class="card" data-fs="people"><h2>${esc(me.firm_name)} – seats</h2>${us.map(u => `<div style="border-top:1px solid var(--line);padding:10px 0" data-u="${u.id}">
+  $("#app").innerHTML = setupCard(fp, us, fm) + secTabs(FS_SECS, fsSec, "fs") + profileCard(fp) + fmCard + mkCard + `<div class="card" data-fs="people"><h2>${esc(me.firm_name)} – seats</h2>${us.map(u => `<div style="border-top:1px solid var(--line);padding:10px 0" data-u="${u.id}">
     <b>${esc(u.name)}</b> <span class="tag ${u.active ? "g" : "r"}">${u.active ? u.role : "disabled"}</span> ${u.totp_enabled ? "" : `<span class="tag y">2FA not set</span>`}
-    <div class="mute">${esc(u.email)}${u.bar_number ? " · Bar #" + esc(u.bar_number) : ""}</div><div class="mute">Counties: ${esc((u.counties || []).join(", ") || "none")} · Last login: ${u.last_login ? new Date(u.last_login).toLocaleString() : "never"}</div>
+    <div class="mute">${esc(u.email)}${u.phone ? " · " + esc(u.phone) : ""}</div><div class="mute">Counties: ${esc((u.counties || []).join(", ") || "none")} · Last login: ${u.last_login ? new Date(u.last_login).toLocaleString() : "never"}</div>
+    <div class="row" style="gap:6px;margin-top:6px;font-size:13px">${u.bar_number ? `<span class="tag k">Bar #${esc(u.bar_number)}</span>` : u.role !== "paralegal" ? `<span class="tag y">Bar # missing</span>` : ""}${u.licensed_on ? `<span class="tag k">Licensed ${esc(new Date(u.licensed_on + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }))}</span>` : ""}
+      ${u.bar_card_at ? `<a class="link" href="/api/users/${u.id}/bar-card" target="_blank" rel="noopener">View bar card</a>` : u.role !== "paralegal" ? `<span class="tag y">No bar card on file</span>` : ""}${u.must_change_pw && u.active ? `<span class="tag n">Hasn't signed in yet</span>` : ""}</div>
+    <details style="margin-top:6px" data-det="${u.id}"><summary class="mute">Edit details and bar card</summary>${personFields(u, "d" + u.id)}
+      <div class="row" style="margin-top:6px"><button type="button" class="btn sm ghost" data-a="card">${u.bar_card_at ? "Replace bar card" : "Upload bar card"}</button><input type="file" data-cardfile accept="image/png,image/jpeg,application/pdf" hidden>${u.bar_card_at ? `<button type="button" class="btn sm ghost" data-a="carddel">Remove bar card</button>` : ""}<span class="mute">Photo or PDF, 5 MB or less</span></div>
+      <div class="err"></div><button type="button" class="btn sm" data-a="savedet">Save details</button></details>
     <div style="margin-top:4px;font-size:14px">${esc(accessSummary(u, us))}</div>
     ${u.id !== me.id ? `<details style="margin-top:6px" data-acc="${u.id}"><summary class="mute">Change role and access</summary>${accessFields(u, us, "u" + u.id)}<div class="err"></div><button type="button" class="btn sm" data-a="acc">Save</button></details>` : ""}
     ${u.id !== me.id ? `<div class="row" style="margin-top:6px"><button class="btn sm ghost" data-a="reset">Reset password & 2FA</button><button class="btn sm ${u.active ? "danger" : "ghost"}" data-a="toggle">${u.active ? "Disable" : "Enable"}</button></div>` : ""}</div>`).join("")}</div>
    ${me.firm_kind === "solo" ? `<div class="card" data-fs="people"><h2>Solo practice</h2><p style="margin-top:0">It's just you, with every feature: the full dashboard, billing, trust and settings.</p><p class="mute">Bringing on a partner, attorney or staff? Change <b>Practice type</b> to <b>Law firm</b> under Firm profile, then add their sign-ins here.</p></div>` : ""}
-   <div class="card" data-fs="${me.firm_kind === "solo" ? "never" : "people"}"><h2>Add a seat</h2><p class="mute" style="margin-top:0">Each person gets their own sign-in. You set them up here; they get a temporary password, then set their own password and two-factor at first sign-in.</p><form id="af"><div class="grid"><div><label>Name</label><input name="name" required></div><div><label>Email</label><input name="email" type="email" required></div>
-   <div><label>Bar # (attorneys)</label><input name="bar" inputmode="numeric"></div></div><div id="newAcc">${accessFields({ id: 0, role: "attorney", access: "own", works_with: [], trust_access: false }, us, "ns")}</div>
-   <div class="err" id="aerr"></div><button class="btn">Add seat</button></form><div id="temp"></div></div><div id="firmExtras"></div>`;
+   <div class="card" data-fs="${me.firm_kind === "solo" ? "never" : "people"}"><h2>Add a person</h2><p class="mute" style="margin-top:0">Each person gets their own sign-in. Add their details and bar card here; you'll get their sign-in details to email or text them. They set their own password and two-factor at first sign-in.</p><form id="af"><div class="grid"><div><label for="nsN">Full name</label><input id="nsN" name="name" required></div><div><label for="nsE">Email (their sign-in)</label><input id="nsE" name="email" type="email" required></div>
+   <div><label for="nsP">Mobile phone (to text the sign-in)</label><input id="nsP" name="phone" type="tel"></div><div><label for="nsT">Title</label><input id="nsT" name="title" placeholder="Partner, Associate, Paralegal…"></div></div><div id="newAcc">${accessFields({ id: 0, role: "attorney", access: "own", works_with: [], trust_access: false }, us, "ns")}</div>
+   <fieldset id="nsBar" style="border:1px solid var(--line);border-radius:10px;padding:10px 14px 12px;margin:10px 0 0"><legend style="font-size:13px;font-weight:600;padding:0 6px">Bar card</legend><div class="grid">
+     <div><label for="nsB">Texas Bar # (8 digits)</label><input id="nsB" name="bar" inputmode="numeric" maxlength="8"></div><div><label for="nsL">Date licensed</label><input id="nsL" name="licensed_on" type="date"></div>
+     <div class="full"><label for="nsC">Bar card photo or PDF (optional)</label><input id="nsC" type="file" accept="image/png,image/jpeg,application/pdf"></div></div></fieldset>
+   <div class="err" id="aerr"></div><button class="btn">Add person and get sign-in</button></form><div id="temp"></div></div><div id="firmExtras"></div>`;
   const setFs = k => { fsSec = k; $$("#app [data-fs]").forEach(s => s.hidden = s.dataset.fs !== k); $$("[data-fs-go]").forEach(b => b.dataset.fsGo === k ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")); $("#fsSel").value = k; };
   $$("[data-fs-go]").forEach(b => b.onclick = () => setFs(b.dataset.fsGo)); $("#fsSel").onchange = e => setFs(e.target.value);
   setFs(fsSec); wireProfileCard(fp);
   Promise.resolve(window.renderFirmExtras && renderFirmExtras(us)).then(() => setFs(fsSec));
-  const showTemp = (who, pw) => $("#temp").innerHTML = `<div class="card" style="background:#fff4d6;margin-top:10px"><b>Temporary password for ${esc(who)}:</b><div class="secret" style="margin-top:6px">${esc(pw)}</div><p class="mute">Shown once. Give it to them privately — they'll set their own password and 2FA at first sign-in.</p></div>`;
+  const showTemp = (name, email, pw, phone) => { $("#temp").innerHTML = credCard(name, email, pw, phone); $("#temp").scrollIntoView({ behavior: "smooth", block: "center" }); };
   if ($("#mkF")) $("#mkF").onsubmit = async e => {
     e.preventDefault(); const f = e.target, btn = f.querySelector("button.btn"); $("#mkErr").textContent = ""; btn.disabled = true; btn.textContent = "Testing with Microsoft…";
     const body = Object.fromEntries([...new FormData(f)].map(([k, v]) => [k, String(v).trim()]));
@@ -724,10 +732,26 @@ async function firmView() {
   if ($("#fmDel")) $("#fmDel").onclick = async () => { const b = $("#fmDel"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to disconnect"; return; } await api("/api/firm/mail", { method: "DELETE" }); firmView(); };
   if ($("#fmG")) $("#fmG").onclick = async () => { try { await api("/api/firm/mail/google", { method: "POST" }); toast("Firm email connected"); firmView(); } catch (e) { $("#fmGerr").textContent = e.message; } };
   const newAcc = wireAccess($("#newAcc"));
-  $("#af").onsubmit = async e => { e.preventDefault(); const b = { ...Object.fromEntries(new FormData(e.target)), ...newAcc() }; try { const r = await api("/api/firm/users", { method: "POST", body: b }); await firmView(); showTemp(b.email, r.temp_password); } catch (err) { $("#aerr").textContent = err.message; } };
+  const syncBar = () => { $("#nsBar").hidden = $("#newAcc [data-f=role]").value === "paralegal"; }; $("#newAcc [data-f=role]").addEventListener("change", syncBar); syncBar();
+  $("#af").onsubmit = async e => { e.preventDefault(); const f = e.target, btn = f.querySelector("button.btn"); const b = { ...Object.fromEntries(new FormData(f)), ...newAcc() }; const file = $("#nsC").files[0];
+    if (file && file.size > 5 * 1024 * 1024) { $("#aerr").textContent = "The bar card file is over 5 MB."; return; }
+    btn.disabled = true;
+    try { const r = await api("/api/firm/users", { method: "POST", body: b });
+      if (file) { const up = await fetch(`/api/firm/users/${r.id}/bar-card`, { method: "PUT", headers: { "X-Requested-With": "tcd", "Content-Type": file.type || "application/octet-stream" }, body: file, credentials: "same-origin" }); if (!up.ok) toast((await up.json().catch(() => ({}))).error || "Bar card didn't upload — add it from their details."); }
+      await firmView(); showTemp(b.name, b.email.trim().toLowerCase(), r.temp_password, b.phone); }
+    catch (err) { $("#aerr").textContent = err.message; btn.disabled = false; } };
   $$("[data-u]").forEach(row => {
     const u = us.find(x => x.id === +row.dataset.u);
-    row.querySelector("[data-a=reset]")?.addEventListener("click", async () => { try { const r = await api(`/api/firm/users/${u.id}`, { method: "PATCH", body: { reset: true } }); await firmView(); showTemp(u.email, r.temp_password); } catch (e) { fail(e); } });
+    row.querySelector("[data-a=reset]")?.addEventListener("click", async () => { try { const r = await api(`/api/firm/users/${u.id}`, { method: "PATCH", body: { reset: true } }); await firmView(); showTemp(u.name, u.email, r.temp_password, u.phone); } catch (e) { fail(e); } });
+    const dd = row.querySelector("[data-det]");
+    if (dd) {
+      dd.querySelector("[data-a=savedet]").onclick = async () => { const g = k => dd.querySelector(`[data-p=${k}]`); try { await api(`/api/firm/users/${u.id}`, { method: "PATCH", body: { details: { name: g("name").value, title: g("title").value, phone: g("phone").value, bar_number: g("bar").value, licensed_on: g("lic").value } } }); toast("Details saved"); firmView(); } catch (x) { dd.querySelector(".err").textContent = x.message; } };
+      const fi = dd.querySelector("[data-cardfile]"); dd.querySelector("[data-a=card]").onclick = () => fi.click();
+      fi.onchange = async () => { const file = fi.files[0]; if (!file) return; if (file.size > 5 * 1024 * 1024) { dd.querySelector(".err").textContent = "That file is over 5 MB."; return; }
+        const up = await fetch(`/api/firm/users/${u.id}/bar-card`, { method: "PUT", headers: { "X-Requested-With": "tcd", "Content-Type": file.type || "application/octet-stream" }, body: file, credentials: "same-origin" });
+        if (!up.ok) { dd.querySelector(".err").textContent = (await up.json().catch(() => ({}))).error || "Upload failed"; return; } toast("Bar card saved"); firmView(); };
+      const cd = dd.querySelector("[data-a=carddel]"); if (cd) cd.onclick = async () => { if (!cd.dataset.sure) { cd.dataset.sure = 1; cd.textContent = "Tap again to remove"; return; } await api(`/api/firm/users/${u.id}/bar-card`, { method: "DELETE" }); toast("Bar card removed"); firmView(); };
+    }
     const det = row.querySelector("[data-acc]");
     if (det) { const get = wireAccess(det); det.querySelector("[data-a=acc]").onclick = async () => { try { await api(`/api/firm/users/${u.id}`, { method: "PATCH", body: get() }); toast("Role and access saved"); firmView(); } catch (x) { det.querySelector(".err").textContent = x.message; } }; }
     row.querySelector("[data-a=toggle]")?.addEventListener("click", async () => { try { await api(`/api/firm/users/${u.id}`, { method: "PATCH", body: { active: !u.active } }); firmView(); } catch (e) { fail(e); } });
@@ -749,6 +773,40 @@ function subLine(sub) {
 }
 
 // ---------------- account ----------------
+// ---------------- people: details, bar card, sign-in details to share, setup checklist ----------------
+function personFields(u, pre) {
+  return `<div class="grid" style="margin-top:8px">
+    <div><label for="${pre}n">Full name</label><input id="${pre}n" data-p="name" value="${esc(u.name || "")}"></div>
+    <div><label for="${pre}t">Title</label><input id="${pre}t" data-p="title" value="${esc(u.title || "")}"></div>
+    <div><label for="${pre}p">Mobile phone</label><input id="${pre}p" data-p="phone" type="tel" value="${esc(u.phone || "")}"></div>
+    <div><label for="${pre}b">Texas Bar #</label><input id="${pre}b" data-p="bar" inputmode="numeric" maxlength="8" value="${esc(u.bar_number || "")}"></div>
+    <div><label for="${pre}l">Date licensed</label><input id="${pre}l" data-p="lic" type="date" value="${esc(u.licensed_on || "")}"></div></div>`;
+}
+function credCard(name, email, pw, phone) {
+  const url = location.origin, first = String(name || "").trim().split(/\s+/)[0] || "there";
+  const msg = `Hi ${first}, here is your TX Case Desk sign-in for ${me.firm_name}.\n\nSign in: ${url}\nEmail: ${email}\nTemporary password: ${pw}\n\nAt your first sign-in you'll choose your own password and set up two-factor with an authenticator app (Google or Microsoft Authenticator).`;
+  return `<div class="card cred"><h3>Sign-in details for ${esc(name)}</h3><p class="mute" style="margin-top:0">Shown only once, so share them now. They'll choose their own password and set up two-factor at first sign-in.</p>
+    <label>Sign-in link</label>${copyBox(url)}<label>Email</label>${copyBox(email)}<label>Temporary password</label>${copyBox(pw)}
+    <div class="row" style="margin-top:12px"><a class="btn" href="mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent("Your TX Case Desk sign-in")}&body=${encodeURIComponent(msg)}">Email it to ${esc(first)}</a>
+      ${phone ? `<a class="btn ghost" href="sms:${encodeURIComponent(String(phone).replace(/[^\d+]/g, ""))}?&body=${encodeURIComponent(msg)}">Text it to ${esc(first)}</a>` : ""}
+      <button type="button" class="btn ghost" data-copy="${esc(msg)}">Copy the message</button></div>
+    <p class="mute" style="font-size:13px;margin:10px 0 0">Safest: send the link and email one way, and the temporary password another (for example, text).</p></div>`;
+}
+function setupCard(f, us, fm) {
+  const solo = me.firm_kind === "solo", act = us.filter(u => u.active), law = act.filter(u => u.role !== "paralegal");
+  const items = [
+    ["Firm profile: address and phone", !!(f.address && f.phone), "profile", f.address && f.phone ? (f.logo ? "Logo added" : "Add your logo too") : "Shows on drafts, letters and invoices"],
+    ...(solo ? [] : [["Add your partners, attorneys and staff", act.length > 1, "people", `${act.length} ${act.length === 1 ? "person" : "people"}`]]),
+    ["Bar numbers and bar cards on file", law.length > 0 && law.every(u => u.bar_number && u.bar_card_at), "people", `${law.filter(u => u.bar_card_at).length} of ${law.length} bar cards`],
+    ...(solo ? [] : [["Everyone has signed in", act.every(u => !u.must_change_pw), "people", act.filter(u => u.must_change_pw).map(u => u.name).join(", ") || "All signed in"]]),
+    ["Court email connected", !!(fm && fm.firm) || law.every(u => u.mailboxes > 0), "email", fm && fm.firm ? "Firm-wide connect is on" : `${law.filter(u => u.mailboxes > 0).length} of ${law.length} attorneys connected`]];
+  const done = items.filter(x => x[1]).length;
+  if (done === items.length) return `<div class="setupok"><span class="ok">${ic("check", 16, 2)}Setup complete</span><span class="mute">Everyone is set up.</span></div>`;
+  return `<div class="card setup"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Firm setup</h2><span class="mute">${done} of ${items.length} done</span></div>
+    <div class="meter" aria-hidden="true"><span style="width:${Math.round(done / items.length * 100)}%"></span></div>
+    <ol class="steps">${items.map(([t, ok, sec, sub]) => `<li class="${ok ? "done" : ""}"><span class="stx" aria-hidden="true">${ok ? ic("check", 14, 2.5) : ""}</span><span class="sbody"><b>${t}</b><small>${esc(sub)}</small></span>${ok ? `<span class="sr">Done</span>` : `<button type="button" class="btn sm ghost" data-fs-go="${sec}">Go</button>`}</li>`).join("")}</ol></div>`;
+}
+
 // ---------------- roles and access (admin sets them per person) ----------------
 const ROLE_LBL = { admin: "Firm admin", partner: "Partner", manager: "Manager", attorney: "Attorney", paralegal: "Paralegal" };
 const ACC_LBL = { own: "Own cases + cases they're added to", team: "Cases of the attorneys they work with", firm: "Whole firm" };
@@ -826,8 +884,11 @@ function accountView() {
       ${me.role !== "paralegal" ? `<div><label for="mpB">Texas Bar # (8 digits)</label><input id="mpB" name="bar_number" inputmode="numeric" maxlength="8" value="${esc(me.bar_number || "")}"></div>` : ""}
       <div><label for="mpT">Title</label><input id="mpT" name="title" value="${esc(me.title || "")}" placeholder="${me.role === "paralegal" ? "Paralegal" : "Attorney at Law"}"></div>
       <div><label for="mpP">Direct phone</label><input id="mpP" name="phone" type="tel" value="${esc(me.phone || "")}"></div>
+      ${me.role !== "paralegal" ? `<div><label for="mpL">Date licensed</label><input id="mpL" name="licensed_on" type="date" value="${esc(me.licensed_on || "")}"></div>` : ""}
       <div class="full"><label for="mpE">Email on documents</label><input id="mpE" name="doc_email" type="email" value="${esc(me.doc_email || "")}" placeholder="${esc(me.email)}"><span class="mute">Leave blank to use your sign-in email.</span></div></div>
       <div class="err"></div><button class="btn">Save my profile</button></form>
+    ${me.role !== "paralegal" ? `<div class="row" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line2)"><b style="font-size:14px">Bar card</b>${me.has_bar_card ? `<a class="link" href="/api/users/${me.id}/bar-card" target="_blank" rel="noopener">View</a>` : `<span class="tag y">Not on file</span>`}
+      <button type="button" class="btn sm ghost" id="mpCardBtn">${me.has_bar_card ? "Replace" : "Upload"} bar card</button><input type="file" id="mpCard" accept="image/png,image/jpeg,application/pdf" hidden><span class="mute">Photo or PDF, 5 MB or less</span></div>` : ""}
     ${me.role !== "paralegal" ? `<details style="margin-top:14px"><summary>Signature block preview</summary><div class="sigprev" id="sigPrev"></div></details>` : ""}</div>
    <div class="card"><h2>Sign-in and security</h2><div class="kv"><div><b>Sign-in email</b>${esc(me.email)}</div><div><b>Firm</b>${esc(me.firm_name)}</div><div><b>Role</b>${role}</div><div><b>Two-factor</b>${me.totp_enabled ? "On" : "Off"}</div></div>
    <p class="mute">Your firm admin creates and manages sign-ins.</p>
@@ -839,6 +900,10 @@ function accountView() {
     el.innerHTML = sigLines(u, firm).map(l => l ? `<div>${esc(l)}</div>` : "<br>").join(""); };
   api("/api/firm/profile").then(r => { firm = r.profile; prev(); }).catch(() => prev());
   $("#mpF").oninput = prev;
+  if ($("#mpCardBtn")) { $("#mpCardBtn").onclick = () => $("#mpCard").click();
+    $("#mpCard").onchange = async () => { const file = $("#mpCard").files[0]; if (!file) return; if (file.size > 5 * 1024 * 1024) return toast("That file is over 5 MB.");
+      const up = await fetch("/api/me/bar-card", { method: "PUT", headers: { "X-Requested-With": "tcd", "Content-Type": file.type || "application/octet-stream" }, body: file, credentials: "same-origin" });
+      if (!up.ok) return toast((await up.json().catch(() => ({}))).error || "Upload failed"); me.has_bar_card = true; toast("Bar card saved"); accountView(); }; }
   $("#mpF").onsubmit = async e => { e.preventDefault(); const f = e.target;
     try { const r = await api("/api/me/profile", { method: "PUT", body: Object.fromEntries(new FormData(f)) }); me = { ...me, ...r.user }; renderNav(); toast("Profile saved"); f.querySelector(".err").textContent = ""; }
     catch (x) { f.querySelector(".err").textContent = x.message; } };
