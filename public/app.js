@@ -94,7 +94,9 @@ async function inboxView(quiet) {
   inboxUnread = r.unread; renderNav();
   const conn = mb && mb.mailboxes.find(x => x.status === "ok" || x.status === "syncing");
   const connCard = !mb ? "" : conn
-    ? `<div class="card"><span class="tag g">Connected</span> <b>${esc(conn.email || mb.names[conn.provider])}</b> <span class="mute">· court emails are checked every hour</span></div>`
+    ? `<div class="card"><span class="tag g">Connected</span> <b>${esc(conn.email || mb.names[conn.provider])}</b> <span class="mute">· court emails are checked every hour</span>
+       ${conn.stats && conn.stats.scanned != null ? `<div class="mute" style="font-size:13px;margin-top:4px">Last check ${new Date(conn.stats.at).toLocaleString()}: looked at ${conn.stats.scanned} emails, found ${conn.stats.court} from courts${conn.stats.created ? `, added ${conn.stats.created} cases` : ""}.</div>` : ""}
+       ${conn.stats && conn.stats.note ? `<p class="err" style="margin:6px 0 0">${esc(conn.stats.note)}</p>` : ""}</div>`
     : `<div class="card"><h2 style="margin-top:0">📬 Connect your email</h2><p style="margin-top:0">Sign in once with the email you get court notices at. We read only court emails and build and update your cases from them.</p>
        ${mb.configured.microsoft ? `<a class="btn" href="/api/mail/connect/microsoft" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Outlook / Microsoft 365</a>` : `<button class="btn ghost" disabled style="display:block;width:100%;margin:8px 0;padding:14px">Sign in with Outlook — not switched on yet</button>`}
        ${mb.configured.google ? `<a class="btn" href="/api/mail/connect/google" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Gmail</a>` : ""}
@@ -160,7 +162,7 @@ async function courtView() {
      if (m) return `<div style="border-top:1px solid var(--line);padding:10px 0"><div class="row"><b>${esc(mb.names[p])}</b>
        <span class="tag ${m.status === "ok" ? "g" : m.status === "syncing" ? "y" : "r"}">${m.status === "ok" ? "Connected" : m.status === "syncing" ? "Checking…" : m.status === "reconnect" ? "Reconnect needed" : "Error"}</span></div>
        <div class="mute">${esc(m.email || "")}${m.last_sync ? " · last checked " + new Date(m.last_sync).toLocaleString() : ""}${m.stats ? ` · ${m.stats.added} new court emails, ${m.stats.created} cases added` : ""}</div>
-       ${m.last_error ? `<p class="err" style="margin:4px 0">${esc(m.last_error)}</p>` : ""}
+       ${m.last_error ? `<p class="err" style="margin:4px 0">${esc(m.last_error)}</p>` : m.stats && m.stats.note ? `<p class="err" style="margin:4px 0">${esc(m.stats.note)}</p>` : ""}
        <div class="row" style="margin-top:6px">${m.status === "reconnect" ? `<a class="btn sm" href="/api/mail/connect/${p}" style="text-decoration:none">Reconnect</a>` : `<button class="btn sm" data-msync="${m.id}">Check now</button>`}<button class="btn sm danger" data-mdel="${m.id}">Disconnect</button></div></div>`;
      return mb.configured[p] ? `<a class="btn" href="/api/mail/connect/${p}" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Connect ${p === "microsoft" ? "Outlook / Microsoft 365" : "Gmail"}</a>`
        : `<button class="btn ghost" disabled style="display:block;width:100%;margin:8px 0;padding:14px">Connect ${p === "microsoft" ? "Outlook / Microsoft 365" : "Gmail"} — coming soon</button>`; }).join("")}

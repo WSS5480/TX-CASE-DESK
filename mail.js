@@ -161,7 +161,21 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
     // Advance the cursor past everything scanned (court or not) so the next check starts where this one ended.
     const seen = r.more ? r.last : (r.last && (!newest || r.last > new Date(newest).toISOString()) ? r.last : newest);
     const nearTop = Object.entries(r.near).sort((a, b) => b[1] - a[1]).slice(0, 8);
-    const stats = { scanned: r.scanned, from: r.first, to: r.last, court: r.msgs.length, checked: r.msgs.length, added, matched, created, dup, near: Object.fromEntries(nearTop), at: new Date().toISOString() };
+    // Empty mailbox: the attorney likely signed in to a Microsoft account that isn't where their mail lives.
+    let note = null;
+    if (r.scanned === 0 && lookback >= 30) {
+      const det = await detect(mb.email);
+      let inboxTotal = null;
+      if (mb.provider === "microsoft") inboxTotal = await api("https://graph.microsoft.com/v1.0/me/mailFolders/inbox?$select=totalItemCount", token).then(j => j.totalItemCount).catch(e => "error: " + e.message);
+      console.log(`[mail] mailbox ${id} diag: no email in last 30 days; inbox total=${inboxTotal}; @${det.domain} mail hosted by ${det.host || "unknown"} (mx ${(det.mx || []).slice(0, 2).join(", ") || "none"})`);
+      const em = mb.email || "your email";
+      note = det.provider === mb.provider
+        ? `Connected, but this mailbox has no email from the last 30 days. Make sure you signed in with the ${mb.provider === "microsoft" ? "Microsoft 365" : "Google"} account for ${em}.`
+        : det.provider === "google"
+          ? `Your ${det.domain} email runs on Google Workspace, not Microsoft — the Microsoft sign-in opened an empty mailbox. Disconnect, then use Sign in with Gmail.`
+          : `Your ${det.domain || ""} email is hosted by ${det.host || "another provider"}, not Microsoft — the Microsoft sign-in opened an empty mailbox, so there's nothing to read. Disconnect, and use forwarding under Court Updates → Other ways for now.`;
+    }
+    const stats = { note, scanned: r.scanned, from: r.first, to: r.last, court: r.msgs.length, checked: r.msgs.length, added, matched, created, dup, near: Object.fromEntries(nearTop), at: new Date().toISOString() };
     await q("UPDATE mailboxes SET status='ok', last_sync=now(), last_seen=COALESCE($2,last_seen), last_error=NULL, stats=$3 WHERE id=$1", [id, seen || null, stats]);
     console.log(`[mail] ${mb.provider} mailbox ${id} (${mb.user_name}, @${domainOf(mb.email)}): scanned ${r.scanned} emails since ${since.toISOString().slice(0, 10)}${r.more ? " (more left, continues next check)" : ""}; ${r.msgs.length} court emails, ${added} new, ${dup} already had, ${created} cases created, ${matched} matched` +
       (nearTop.length ? `; other official-looking senders not read: ${nearTop.map(([d, n]) => d + "×" + n).join(", ")}` : ""));
