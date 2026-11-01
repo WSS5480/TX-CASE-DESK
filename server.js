@@ -392,10 +392,18 @@ app.delete("/api/court-logins/:id", requireAuth, wrap(async (req, res) => {
 }));
 // Hourly wake-up ping (free GitHub Actions schedule; scripts/hourly-ping.js works for a Render cron too). Needs SYNC_TOKEN.
 let lastHourly = 0;
+const cronOk = (given, tok) => { given = String(given || "").trim(); tok = String(tok || "").trim(); return !!tok && given.length === tok.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(tok)); };
+// Free outside timer (cron-job.org): GET /api/cron/hourly?key=CRON_KEY every 10 minutes keeps the free server awake;
+// the hourly work itself still runs at most once every 50 minutes.
+app.get("/api/cron/hourly", wrap(async (req, res) => {
+  if (!cronOk(req.query.key, process.env.CRON_KEY)) return res.status(403).json({ error: "Forbidden" });
+  if (Date.now() - lastHourly < 50 * 60e3) return res.json({ awake: true, skipped: "ran recently" });
+  lastHourly = Date.now(); console.log("[cron] outside timer started hourly check");
+  sync.hourly().catch(e => console.error("[cron] hourly", e.message));
+  res.json({ started: true });
+}));
 app.post("/api/cron/hourly", wrap(async (req, res) => {
-  const tok = (process.env.SYNC_TOKEN || "").trim(); // ignore stray spaces/newlines from copy-paste
-  const given = String(req.get("X-Cron-Token") || "").trim();
-  if (!tok || given.length !== tok.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(tok))) return res.status(403).json({ error: "Forbidden" });
+  if (!cronOk(req.get("X-Cron-Token"), process.env.SYNC_TOKEN)) return res.status(403).json({ error: "Forbidden" });
   if (Date.now() - lastHourly < 50 * 60e3) return res.json({ skipped: "ran recently" });
   lastHourly = Date.now();
   sync.hourly().catch(e => console.error("[cron] hourly", e.message));

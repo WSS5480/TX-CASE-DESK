@@ -2,7 +2,7 @@
 name: Hourly court-date check
 on:
   schedule:
-    - cron: "17 * * * *"   # every hour at :17 (UTC)
+    - cron: "*/10 * * * *"   # every 10 min (GitHub drops many scheduled runs; the app still runs the check at most hourly)
   workflow_dispatch: {}
 jobs:
   ping:
