@@ -823,6 +823,16 @@ app.get("/api/law/search", requireAuth, lawLimiter, wrap(async (req, res) => {
   }
   res.json(await cl.search({ query, court: req.query.court, after: req.query.after, before: req.query.before, page: req.query.page }));
 }));
+// Rank the ways forward and the authorities for an argument, without opening a case (same rule-based analysis as a case's Case law tab)
+app.post("/api/law/analyze", requireAuth, rateLimit({ windowMs: 60e3, max: 3, message: { error: "One ranking at a time — try again in a minute." } }), wrap(async (req, res) => {
+  const issues = String(req.body?.issues || "").trim().slice(0, 1000);
+  const county = COUNTIES.includes(req.body?.county) ? req.body.county : null;
+  let result;
+  try { result = await analysis.analyze({ issues, county, appeals: county ? APPEALS[county] : null }); }
+  catch (e) { return res.status(e.status || 502).json({ error: e.message }); }
+  await audit(req, "law_ranked", { county, issues: issues.slice(0, 120) });
+  res.json({ created_at: new Date().toISOString(), issues, result });
+}));
 app.get("/api/law/opinion/:cid", requireAuth, lawLimiter, wrap(async (req, res) => {
   const cid = +req.params.cid; if (!cid) return res.status(400).json({ error: "Bad id" });
   const op = (await lawdb.available() && await lawdb.opinion(cid)) || await cl.opinion(cid);

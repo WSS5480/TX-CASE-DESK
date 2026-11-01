@@ -18,7 +18,7 @@ let moreOpen = false;
 const caseF = { view: "mine", county: "", type: "", attorney: "" };
 let firmUsers = null;
 let inboxUnread = 0;
-const law = { q: "", court: "", after: "", county: "", results: null, open: null };
+const law = { q: "", court: "", after: "", county: "", results: null, open: null, issues: "", rkCounty: "", rank: null };
 
 // ---------------- auth screens ----------------
 function authView(mode = "login", msg = "") {
@@ -602,10 +602,16 @@ function renderAnalysis(r, at) {
      <div class="mute">All Texas courts: ${p.upheld} upheld, ${p.reversed} reversed (${p.n} cases)</div>
      ${p.examples?.length ? `<div style="margin-top:8px;font-size:14px">${p.examples.map(op).join("<br>")}</div>` : ""}</div>`).join("") || `<p class="mute">Not enough appellate cases on these issues to rank paths. Try broader issues.</p>`}
    ${thin.length ? `<p class="mute" style="margin-bottom:0">Too few cases to rank: ${thin.map(p => `${esc(p.label)} (${p.n})`).join(", ")}</p>` : ""}</div>
-  <div class="card"><h3>Top authorities</h3><p class="mute">Ranked by court (Texas Supreme Court first), how recent, and how often cited.</p>
-   ${r.authorities.map((o, i) => `<div style="margin:10px 0">${i + 1}. ${op(o)}<div class="mute">${esc(o.binding)} · cited ${o.cite_count}×</div>${o.snippet ? `<div style="font-size:13px">${esc(cleanSnip(o.snippet))}…</div>` : ""}</div>`).join("") || `<p class="mute">No opinions found.</p>`}</div>
+  <div class="card"><h3>Top authorities</h3><p class="mute">Ranked by court (Texas Supreme Court first), how recent, and how often cited. Tick the ones you want for your argument, then copy their citations.</p>
+   ${r.authorities.map((o, i) => `<div class="auth"><label class="ck auck"><input type="checkbox" data-au="${i}"${i < 3 ? " checked" : ""}><span class="sr">Pick ${esc(o.case_name)}</span></label><div style="min-width:0"><b>${i + 1}.</b> ${op(o)}<div class="mute">${esc(o.binding)} · cited ${o.cite_count}×</div>${o.snippet ? `<div style="font-size:13px">${esc(cleanSnip(o.snippet))}…</div>` : ""}</div></div>`).join("") || `<p class="mute">No opinions found.</p>`}
+   ${r.authorities.length ? `<div class="row" style="margin-top:10px"><button type="button" class="btn sm" id="auCopy">Copy picked citations</button><button type="button" class="btn sm ghost" id="auAll">Copy all</button></div>` : ""}</div>
   <div class="card mute" style="font-size:13px"><b>How this works:</b> ${esc(r.method)}<br>Search used: <code>${esc(r.query)}</code></div>`;
   $$("#ar [data-c]").forEach(a => a.onclick = () => { law.open = +a.dataset.c; tab = "law"; renderNav(); opinionView(law.open); window.scrollTo(0, 0); });
+  const citeOf = o => `${o.case_name}${o.citation ? ", " + o.citation : ""} (${[o.court, String(o.date_filed || "").slice(0, 4)].filter(Boolean).join(" ")})`;
+  const copyCites = async list => { if (!list.length) return toast("Tick at least one case"); const txt = list.map(citeOf).join("\n");
+    try { await navigator.clipboard.writeText(txt); toast(`Copied ${list.length} citation${list.length === 1 ? "" : "s"}`); } catch { toast(txt); } };
+  if ($("#auCopy")) $("#auCopy").onclick = () => copyCites($$("#ar [data-au]:checked").map(x => r.authorities[+x.dataset.au]));
+  if ($("#auAll")) $("#auAll").onclick = () => copyCites(r.authorities);
 }
 
 // ---------------- case law ----------------
@@ -617,8 +623,20 @@ function lawView(autoSearch) {
      ${META.localLaw ? Array.from({ length: 15 }, (_, i) => i + 1).map(n => `<option value="coa${n}" ${law.court === "coa" + n ? "selected" : ""}>${ordn(n)} Court of Appeals only</option>`).join("") : ""}</select></div>
    ${META.localLaw ? `<div><label>Appeal from county</label><select name="county"><option value="">Any county</option>${META.counties.map(c => `<option ${law.county === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></div>` : ""}
    <div><label>Decided after</label><input name="after" type="date" value="${esc(law.after)}"></div></div><br><button class="btn">Search</button></form>
-   <p class="mute" style="margin-bottom:0">Source: public Texas court opinions (CourtListener / Free Law Project)${META.localLaw ? ` — ${Number(META.lawCount).toLocaleString()} opinions in our database` : ""}. Flags are our own citator, not Lexis/Westlaw.</p></div><div id="res"></div>`;
-  $("#lf").onsubmit = e => { e.preventDefault(); Object.assign(law, Object.fromEntries(new FormData(e.target))); runSearch(); };
+   <p class="mute" style="margin-bottom:0">Source: public Texas court opinions (CourtListener / Free Law Project)${META.localLaw ? ` — ${Number(META.lawCount).toLocaleString()} opinions in our database` : ""}. Flags are our own citator, not Lexis/Westlaw.</p></div>
+   <div class="card"><h2>Best cases for an argument</h2><p class="mute" style="margin-top:0">Ranks the ways forward on your issues by how often Texas appeals courts upheld them, and the authorities to cite: Texas Supreme Court first, then the county's court of appeals, newest and most cited.</p>
+   <form id="rkF"><div class="grid"><div class="full"><label for="rkI">Issues (separate with commas)</label><input id="rkI" name="issues" value="${esc(law.issues)}" placeholder="slip and fall, constructive notice, grocery store"></div>
+   <div><label for="rkC">County of the case</label><select id="rkC" name="rkCounty"><option value="">Any county</option>${[...new Set([...(me.counties || []), ...META.counties])].map(c => `<option ${law.rkCounty === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></div></div>
+   <div class="row" style="margin-top:10px"><button class="btn" id="rkGo">Rank cases</button><span class="mute">Takes about a minute. Public Texas opinions only — no AI.</span></div></form></div>
+   <div id="ar"></div><div id="res"></div>`;
+  $("#lf").onsubmit = e => { e.preventDefault(); Object.assign(law, Object.fromEntries(new FormData(e.target))); if (!law.issues && law.q) { law.issues = law.q.replace(/"|\b(AND|OR)\b/g, ",").split(",").map(s => s.trim()).filter(Boolean).join(", "); $("#rkI").value = law.issues; } runSearch(); };
+  $("#rkF").onsubmit = async e => { e.preventDefault(); law.issues = $("#rkI").value.trim(); law.rkCounty = $("#rkC").value;
+    if (!law.issues) { toast("Enter the issues first"); $("#rkI").focus(); return; }
+    const btn = $("#rkGo"); btn.disabled = true; btn.textContent = "Ranking…"; $("#ar").innerHTML = `<div class="card mute">Searching Texas opinions and counting outcomes…</div>`;
+    try { const r = await api("/api/law/analyze", { method: "POST", body: { issues: law.issues, county: law.rkCounty } }); law.rank = r; renderAnalysis(r.result, r.created_at); $("#ar").scrollIntoView({ behavior: "smooth", block: "start" }); }
+    catch (x) { $("#ar").innerHTML = `<div class="card err">${esc(x.message)}</div>`; }
+    btn.disabled = false; btn.textContent = "Rank again"; };
+  if (law.rank) renderAnalysis(law.rank.result, law.rank.created_at);
   if (law.results) renderResults(); else if (autoSearch && law.q) runSearch();
 }
 async function runSearch() {
