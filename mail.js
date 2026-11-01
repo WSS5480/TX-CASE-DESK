@@ -33,7 +33,9 @@ const redirect = p => `${APP}/api/mail/callback/${p}`;
 const configured = () => Object.fromEntries(Object.entries(PROVIDERS).map(([k, v]) => [k, !!(v.id() && v.secret())]));
 const NAMES = { ...Object.fromEntries(Object.entries(PROVIDERS).map(([k, v]) => [k, v.name])), imap: "Email (password sign-in)" };
 
-// Microsoft keys: a firm's own Azure app (entered in Firm Seats) wins; otherwise TX Case Desk's (Render env).
+// Microsoft keys (decision log, Oct 31 2026 — Option A): TX Case Desk's own multi-tenant app, registered under a
+// business account, is the default — one sign-in per attorney. A firm whose IT insists can enter its own Azure keys in
+// Firm Settings; those win for that firm. Each mailbox remembers which keys it was connected with.
 async function msKeys(firmId, source) {
   if (source !== "app" && firmId) {
     const f = (await q("SELECT ms_client_id, ms_tenant, ms_secret_enc FROM firms WHERE id=$1", [firmId])).rows[0];
@@ -41,6 +43,7 @@ async function msKeys(firmId, source) {
     if (source === "firm") throw Object.assign(new Error("Your firm's Microsoft keys were removed — reconnect."), { reconnect: true });
   }
   const P = PROVIDERS.microsoft;
+  if (!P.id() || !P.secret()) throw Object.assign(new Error("Outlook sign-in isn't switched on yet."), { reconnect: true });
   return { id: P.id(), secret: P.secret(), tenant: "common", source: "app" };
 }
 async function configuredFor(firmId) {
@@ -358,7 +361,6 @@ async function finishAdminConsent(query) {
 }
 const appTokens = new Map();
 async function msAppToken(tenant, keys) {
-  keys = keys || await msKeys(null, "app");
   const ck = tenant + ":" + keys.id;
   const c = appTokens.get(ck); if (c && c.exp > Date.now()) return c.tok;
   const r = await fetch(`https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },

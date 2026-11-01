@@ -71,11 +71,14 @@ async function listFirms(appUrl) {
       (SELECT max(u.last_login) FROM users u WHERE u.firm_id=f.id) AS last_login,
       (SELECT count(*)::int FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE u.firm_id=f.id) AS mailboxes,
       (SELECT provider FROM firm_mail fm WHERE fm.firm_id=f.id) AS firm_mail
+      , (f.ms_client_id IS NOT NULL) AS ms_keys
     FROM firms f ORDER BY f.created_at DESC`);
   return rows.map(f => ({
     key: tenantKey(f.id), slug: String(f.id), name: f.name, created: f.created_at, users: f.users, cases: f.cases,
     email: f.admin_email, admin: f.admin_name, last_login: f.last_login, disabled: f.disabled,
     email_connected: f.firm_mail ? `firm-wide (${f.firm_mail})` : f.mailboxes ? `${f.mailboxes} mailbox(es)` : "no",
+    microsoft: f.ms_keys ? "firm's own keys" : "TX Case Desk app",
+    setup_help: f.setup_help_at && !f.setup_help_done ? { at: f.setup_help_at, note: f.setup_help_note } : null,
     plan: { active: f.plan === "pro", expires_on: f.plan_expires, source: f.plan_source, paid: f.plan === "pro" && !f.plan_expires },
     url: appUrl
   }));

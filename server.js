@@ -178,7 +178,7 @@ app.post("/api/platform/firms/:id", myapps.platformAuth, wrap(async (req, res) =
   catch (e) { res.status(e.status || 400).json({ error: e.message }); }
 }));
 app.get("/api/platform/info", myapps.platformAuth, wrap(async (req, res) => res.json({
-  azure_account: "stevesmith.5480@outlook.com", microsoft_connect: mail.configured().microsoft, google_connect: mail.configured().google,
+  microsoft: { tx_case_desk_app: mail.configured().microsoft, firms_may_use_own_keys: true }, google_connect: mail.configured().google,
   postmark: !!process.env.POSTMARK_INBOUND, courtlistener: !!process.env.COURTLISTENER_TOKEN, case_law_opinions: await lawdb.size().catch(() => 0)
 })));
 
@@ -466,9 +466,9 @@ app.post("/api/mail/imap", requireAuth, wrap(async (req, res) => {
 // A firm's own Microsoft (Azure) keys — entered by the firm admin, stored encrypted, never shown again
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 app.get("/api/firm/ms-keys", requireAuth, requireAdmin, wrap(async (req, res) => {
-  const f = (await q("SELECT ms_client_id, ms_tenant, ms_secret_hint, ms_keys_at, ms_keys_by FROM firms WHERE id=$1", [req.user.firm_id])).rows[0] || {};
+  const f = (await q("SELECT ms_client_id, ms_tenant, ms_secret_hint, ms_keys_at, ms_keys_by, setup_help_at, setup_help_done FROM firms WHERE id=$1", [req.user.firm_id])).rows[0] || {};
   const base = (process.env.APP_URL || "https://tx-case-desk.onrender.com").replace(/\/$/, "");
-  res.json({ own: !!f.ms_client_id, client_id: f.ms_client_id || null, tenant: f.ms_tenant || null, hint: f.ms_secret_hint || null, at: f.ms_keys_at, by: f.ms_keys_by,
+  res.json({ help: f.setup_help_at && !f.setup_help_done ? f.setup_help_at : null, own: !!f.ms_client_id, client_id: f.ms_client_id || null, tenant: f.ms_tenant || null, hint: f.ms_secret_hint || null, at: f.ms_keys_at, by: f.ms_keys_by,
     shared: mail.configured().microsoft, redirects: [`${base}/api/mail/callback/microsoft`, `${base}/api/mail/admin-callback/microsoft`] });
 }));
 app.post("/api/firm/ms-keys", requireAuth, requireAdmin, wrap(async (req, res) => {
@@ -480,6 +480,15 @@ app.post("/api/firm/ms-keys", requireAuth, requireAdmin, wrap(async (req, res) =
   await q("UPDATE firms SET ms_client_id=$2, ms_tenant=$3, ms_secret_enc=$4, ms_secret_hint=$5, ms_keys_at=now(), ms_keys_by=$6 WHERE id=$1",
     [req.user.firm_id, id, tenant, box.seal(secret), secret.slice(0, 3) + "…" + secret.slice(-3), req.user.name]);
   await audit(req, "firm_ms_keys_saved", { client_id: id, tenant });
+  await q("UPDATE firms SET setup_help_done=true WHERE id=$1 AND setup_help_at IS NOT NULL", [req.user.firm_id]);
+  res.json({ ok: true });
+}));
+// Firm asks for developer-assisted Microsoft setup (one-time fee); shows up on the firm's card in My Apps
+app.post("/api/firm/setup-help", requireAuth, requireAdmin, wrap(async (req, res) => {
+  const phone = String(req.body?.phone || "").trim().slice(0, 40), note = String(req.body?.note || "").trim().slice(0, 500);
+  if (!phone) return res.status(400).json({ error: "Add a phone number so we can reach you." });
+  await q("UPDATE firms SET setup_help_at=now(), setup_help_done=false, setup_help_note=$2 WHERE id=$1", [req.user.firm_id, `${req.user.name} · ${phone}${note ? " · " + note : ""}`]);
+  await audit(req, "setup_help_requested", { phone }); console.log(`[setup-help] firm ${req.user.firm_id} (${req.user.firm_name}) asked for Microsoft setup help`);
   res.json({ ok: true });
 }));
 app.delete("/api/firm/ms-keys", requireAuth, requireAdmin, wrap(async (req, res) => {
@@ -635,5 +644,5 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-migrate().then(() => app.listen(PORT, () => { console.log("TX Case Desk on :" + PORT); console.log(`Outlook connect: ${mail.configured().microsoft ? "ON" : "OFF"} (MS_CLIENT_ID ${process.env.MS_CLIENT_ID ? "set" : "missing"}, MS_CLIENT_SECRET ${process.env.MS_CLIENT_SECRET ? "set" : "missing"})`); sync.startScheduler(); setTimeout(() => mail.rescanOld().then(n => n && console.log(`[mail] rescanned ${n} mailbox(es) back 30 days`)).catch(e => console.error("[mail] rescan", e.message)), 15000);
+migrate().then(() => app.listen(PORT, () => { console.log("TX Case Desk on :" + PORT); console.log(`Outlook connect: TX Case Desk app ${mail.configured().microsoft ? "ON" : "OFF"} (MS_CLIENT_ID ${process.env.MS_CLIENT_ID ? "set" : "missing"}, MS_CLIENT_SECRET ${process.env.MS_CLIENT_SECRET ? "set" : "missing"}); firms may use their own keys`); sync.startScheduler(); setTimeout(() => mail.rescanOld().then(n => n && console.log(`[mail] rescanned ${n} mailbox(es) back 30 days`)).catch(e => console.error("[mail] rescan", e.message)), 15000);
   if (process.env.NODE_ENV === "production") setTimeout(() => sync.MODULES.odyssey.probe(CONNECTORS.Hidalgo.url).catch(() => {}), 5000); })).catch(e => { console.error("DB migrate failed", e); process.exit(1); });

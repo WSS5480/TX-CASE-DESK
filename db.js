@@ -234,6 +234,9 @@ ALTER TABLE firms ADD COLUMN IF NOT EXISTS stripe_hint TEXT;
 ALTER TABLE firms ADD COLUMN IF NOT EXISTS card_fee_pct NUMERIC(5,2);    -- shown up front on invoices
 ALTER TABLE firms ADD COLUMN IF NOT EXISTS card_fee_fixed NUMERIC(6,2);
 ALTER TABLE firms ADD COLUMN IF NOT EXISTS invoice_seq INT DEFAULT 1000;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS setup_help_at TIMESTAMPTZ;      -- firm asked for developer-assisted Microsoft setup (one-time fee)
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS setup_help_note TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS setup_help_done BOOLEAN DEFAULT false;
 CREATE TABLE IF NOT EXISTS events (
   id SERIAL PRIMARY KEY,
   firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,

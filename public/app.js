@@ -131,7 +131,7 @@ async function inboxView(quiet) {
        ${conn.stats && conn.stats.note ? `<p class="err" style="margin:6px 0 0">${esc(conn.stats.note)}</p>${conn.provider !== "imap" ? imapForm(mb, true) : ""}` : ""}</div>`
     : `<div class="card"><h2 style="margin-top:0">📬 Connect your email</h2><p style="margin-top:0">Sign in once with the email you get court notices at. We read only court emails and build and update your cases from them.</p>
        ${mb.other && !mb.other.provider && mb.other.label ? `<p style="margin:0 0 6px"><b>Your email is hosted by ${esc(mb.other.label)}</b> — use the password sign-in below (the Outlook button won't see that mail).</p>` : ""}
-       ${mb.configured.microsoft ? `<a class="btn ${mb.other && !mb.other.provider ? "ghost" : ""}" href="/api/mail/connect/microsoft" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Outlook / Microsoft 365</a>` : `<button class="btn ghost" disabled style="display:block;width:100%;margin:8px 0;padding:14px">Sign in with Outlook — not switched on yet</button>`}
+       ${mb.configured.microsoft ? `<a class="btn ${mb.other && !mb.other.provider ? "ghost" : ""}" href="/api/mail/connect/microsoft" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Outlook / Microsoft 365</a>` : `<p class="mute" style="margin:6px 0">Outlook / Microsoft 365 sign-in isn't switched on yet.</p>`}
        ${mb.configured.google ? `<a class="btn" href="/api/mail/connect/google" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Gmail</a>` : ""}
        ${imapForm(mb, mb.other && !mb.other.provider)}
        <p class="mute" style="margin-bottom:0;font-size:13px">Read-only. Personal email is ignored and never stored. Disconnect anytime under Court Updates.</p></div>`;
@@ -200,7 +200,7 @@ async function courtView() {
        ${m.last_error ? `<p class="err" style="margin:4px 0">${esc(m.last_error)}</p>` : m.stats && m.stats.note ? `<p class="err" style="margin:4px 0">${esc(m.stats.note)}</p>` : ""}
        <div class="row" style="margin-top:6px">${m.status === "reconnect" ? `<a class="btn sm" href="/api/mail/connect/${p}" style="text-decoration:none">Reconnect</a>` : `<button class="btn sm" data-msync="${m.id}">Check now</button>`}<button class="btn sm danger" data-mdel="${m.id}">Disconnect</button></div></div>`;
      return mb.configured[p] ? `<a class="btn" href="/api/mail/connect/${p}" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Connect ${p === "microsoft" ? "Outlook / Microsoft 365" : "Gmail"}</a>`
-       : `<button class="btn ghost" disabled style="display:block;width:100%;margin:8px 0;padding:14px">Connect ${p === "microsoft" ? "Outlook / Microsoft 365" : "Gmail"} — coming soon</button>`; }).join("")}
+       : p === "microsoft" ? `<p class="mute" style="margin:8px 0">Outlook / Microsoft 365 sign-in isn't switched on yet.</p>` : ""; }).join("")}
    ${(() => { const m = mb.mailboxes.find(x => x.provider === "imap"); if (!m) return imapForm(mb, !det.provider && !!det.domain);
      return `<div style="border-top:1px solid var(--line);padding:10px 0"><div class="row"><b>${esc(mb.names.imap)}</b>
        <span class="tag ${m.status === "ok" ? "g" : m.status === "syncing" ? "y" : "r"}">${m.status === "ok" ? "Connected" : m.status === "syncing" ? "Checking…" : m.status === "reconnect" ? "Password needed" : "Error"}</span></div>
@@ -521,14 +521,17 @@ async function firmView() {
      <div class="kv"><div><b>Application (client) ID</b>${esc(mk.client_id)}</div><div><b>Directory (tenant) ID</b>${esc(mk.tenant)}</div><div><b>Secret</b>${esc(mk.hint || "saved")} (hidden)</div><div><b>Saved</b>${mk.at ? new Date(mk.at).toLocaleString() : ""}${mk.by ? " by " + esc(mk.by) : ""}</div></div>
      <p class="mute" style="font-size:13px">Attorneys who connected before these keys were saved should tap <b>Reconnect</b> if their email shows an error. Secrets expire — put a reminder on your calendar for the date you picked in Azure.</p>
      <div class="row"><button class="btn sm ghost" id="mkEdit">Replace keys</button><button class="btn sm danger" id="mkDel">Remove (use TX Case Desk's)</button></div>`
-   : `<p style="margin-top:0">${mk.shared ? "Right now your attorneys sign in to Outlook through <b>TX Case Desk's</b> shared Microsoft connection." : "Outlook sign-in isn't switched on yet."} Optional: use your <b>own</b> Microsoft app so sign-in runs entirely under your firm's Microsoft 365, approved by your own admin.</p>`}
-   <details id="mkHow" ${mk.own ? "" : ""} style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">${mk.own ? "Replace keys" : "Set up your firm's own keys"} — step by step (about 10 minutes, free)</summary>
+   : `<p style="margin-top:0">${mk.shared ? "Your attorneys sign in to Outlook with one tap through the <b>TX Case Desk</b> Microsoft app — each attorney approves only their own mailbox and calendar, and can revoke it anytime." : "Outlook sign-in isn't switched on yet."} <b>Optional:</b> if your IT requires it, use your firm's <b>own</b> Microsoft app instead.</p>`}
+   ${mk.own ? "" : mk.help ? `<p><span class="tag y">Setup help requested</span> <span class="mute">${new Date(mk.help).toLocaleString()} — we'll call you to set it up.</span></p>`
+     : `<details style="margin:8px 0"><summary>Rather have us set it up? (one-time fee)</summary><p class="mute" style="margin:6px 0">A developer sets up your firm's Microsoft app with your IT person on a short call. One-time fee — we confirm the price with you before starting.</p>
+       <form id="shF"><div class="grid"><div><label>Best phone</label><input name="phone" type="tel" required></div><div><label>Best time / notes</label><input name="note" placeholder="Weekdays after 2 PM"></div></div><div class="err"></div><button class="btn sm">Request setup help</button></form></details>`}
+   <details id="mkHow" style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">${mk.own ? "Replace keys" : "Set up your firm's own keys"} — step by step (about 10 minutes, free)</summary>
    <ol style="padding-left:20px;line-height:1.6;font-size:15px">
      <li>Your Microsoft 365 admin signs in at <a class="link" href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener">entra.microsoft.com → App registrations</a> → <b>+ New registration</b>.</li>
      <li><b>Name:</b>${copyBox("TX Case Desk")}<b>Supported account types:</b> <i>Single tenant only</i> (your organization only).</li>
      <li><b>Redirect URI:</b> pick <b>Web</b> and paste:${copyBox(mk.redirects[0])}Click <b>Register</b>.</li>
      <li>Left menu → <b>Authentication</b> → <b>Add Redirect URI</b> → paste the second one → <b>Configure</b>:${copyBox(mk.redirects[1])}</li>
-     <li>Left menu → <b>API permissions</b> → <b>+ Add a permission</b> → <b>Microsoft Graph</b> → <b>Delegated permissions</b> → tick <b>Mail.Read</b>, <b>User.Read</b>, <b>offline_access</b>, <b>openid</b>, <b>email</b> → <b>Add permissions</b>.<br>
+     <li>Left menu → <b>API permissions</b> → <b>+ Add a permission</b> → <b>Microsoft Graph</b> → <b>Delegated permissions</b> → tick <b>Mail.Read</b>, <b>User.Read</b>, <b>offline_access</b>, <b>openid</b>, <b>email</b>, <b>Calendars.ReadWrite</b> (calendar sync) and <b>Mail.Send</b> (morning agenda email) → <b>Add permissions</b>.<br>
        For firm-wide connect also add → <b>Application permissions</b> → <b>Mail.Read</b>. Then click <b>✓ Grant admin consent</b> for your organization.</li>
      <li>Left menu → <b>Certificates &amp; secrets</b> → <b>+ New client secret</b> → 24 months → <b>Add</b>. Copy the <b>Value</b> right away (shown only once — not the Secret ID).</li>
      <li>Left menu → <b>Overview</b>: copy the <b>Application (client) ID</b> and the <b>Directory (tenant) ID</b>, and paste all three below.</li>
@@ -568,8 +571,9 @@ async function firmView() {
     try { await api("/api/firm/ms-keys", { method: "POST", body }); toast("Keys saved — Microsoft accepted them"); firmView(); }
     catch (x) { $("#mkErr").textContent = x.message; btn.disabled = false; btn.textContent = "Save & test with Microsoft"; }
   };
+  if ($("#shF")) $("#shF").onsubmit = async e => { e.preventDefault(); try { await api("/api/firm/setup-help", { method: "POST", body: Object.fromEntries(new FormData(e.target)) }); toast("Request sent — we'll call you"); firmView(); } catch (x) { e.target.querySelector(".err").textContent = x.message; } };
   if ($("#mkEdit")) $("#mkEdit").onclick = () => { $("#mkHow").open = true; $("#mkHow").scrollIntoView({ behavior: "smooth" }); };
-  if ($("#mkDel")) $("#mkDel").onclick = async () => { const b = $("#mkDel"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to remove"; return; } await api("/api/firm/ms-keys", { method: "DELETE" }); toast("Removed — using TX Case Desk's connection"); firmView(); };
+  if ($("#mkDel")) $("#mkDel").onclick = async () => { const b = $("#mkDel"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to remove"; return; } await api("/api/firm/ms-keys", { method: "DELETE" }); toast("Removed — using the TX Case Desk app"); firmView(); };
   if ($("#fmSync")) $("#fmSync").onclick = async () => { await api("/api/firm/mail/sync", { method: "POST" }); toast("Checking firm email…"); setTimeout(firmView, 2000); };
   if ($("#fmDel")) $("#fmDel").onclick = async () => { const b = $("#fmDel"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to disconnect"; return; } await api("/api/firm/mail", { method: "DELETE" }); firmView(); };
   if ($("#fmG")) $("#fmG").onclick = async () => { try { await api("/api/firm/mail/google", { method: "POST" }); toast("Firm email connected"); firmView(); } catch (e) { $("#fmGerr").textContent = e.message; } };
