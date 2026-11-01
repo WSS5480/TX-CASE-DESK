@@ -87,6 +87,28 @@ function show() { subView = false; clearTimeout(courtPoll); ({ inbox: inboxView,
 // ---------------- inbox (court emails) ----------------
 const TYPE_TAG = { "Hearing / setting": "y", "New filing": "g", "Order / judgment": "r", "Case notice": "n", "Account activation": "n", "Email": "n" };
 let subView = false;
+// copy boxes: value in its own box + Copy button (no stray spaces)
+function copyBox(val) { return `<div class="row" style="margin:4px 0;flex-wrap:nowrap"><div class="secret" style="flex:1">${esc(val)}</div><button type="button" class="btn sm" data-copy="${esc(val)}">Copy</button></div>`; }
+document.addEventListener("click", async e => { const b = e.target.closest("[data-copy]"); if (!b) return; try { await navigator.clipboard.writeText(b.dataset.copy.trim()); toast("Copied"); } catch { toast(b.dataset.copy); } });
+// "Connect with your email password" (IMAP) — Titan / GoDaddy / Zoho and other hosts
+function imapForm(mb, open) {
+  const lab = mb && mb.other && mb.other.label ? mb.other.label : "your email host";
+  const titan = /titan|godaddy/i.test(lab);
+  return `<details class="imapBox" ${open ? "open" : ""} style="margin:8px 0"><summary style="cursor:pointer;font-weight:600">🔑 Connect with your email password${open ? "" : " (GoDaddy, Titan, Zoho, others)"}</summary>
+    <p class="mute" style="margin:6px 0">For email that isn't Outlook or Gmail${mb && mb.other && mb.other.label ? ` — yours is hosted by <b>${esc(lab)}</b>` : ""}. Your password is encrypted and used only to read court emails.</p>
+    ${titan ? `<p style="margin:6px 0;font-size:14px"><b>Titan / GoDaddy first:</b> sign in to <a class="link" href="https://app.titan.email" target="_blank" rel="noopener">app.titan.email</a> → ⚙ Settings → turn <b>Third-party email access ON</b> and <b>Two-step login OFF</b> (Titan blocks other apps while two-step is on).</p>` : ""}
+    <form class="imapF"><label>Email address</label><input name="email" type="email" autocomplete="email" value="${esc(me.email || "")}" required>
+    <label>Email password</label><input name="password" type="password" autocomplete="current-password" required>
+    <details style="margin:6px 0"><summary class="mute" style="cursor:pointer;font-size:13px">Advanced: mail server</summary><label>Incoming (IMAP) server — leave blank to detect</label><input name="host" placeholder="imap.example.com"></details>
+    <div class="err imapErr"></div><button class="btn" style="width:100%;padding:12px">Connect email</button></form></details>`;
+}
+function wireImap(after) {
+  $$(".imapF").forEach(f => f.onsubmit = async e => {
+    e.preventDefault(); const btn = f.querySelector("button.btn"), err = f.querySelector(".imapErr"); err.textContent = ""; btn.disabled = true; btn.textContent = "Checking…";
+    try { const r = await api("/api/mail/imap", { method: "POST", body: Object.fromEntries(new FormData(f)) }); toast(`Connected ${r.email} — checking court emails now`); after(); }
+    catch (x) { err.textContent = x.message; btn.disabled = false; btn.textContent = "Connect email"; }
+  });
+}
 async function inboxView(quiet) {
   subView = false;
   if (!quiet) $("#app").innerHTML = `<div class="card mute">Loading inbox…</div>`;
@@ -96,10 +118,12 @@ async function inboxView(quiet) {
   const connCard = !mb ? "" : conn
     ? `<div class="card"><span class="tag g">Connected</span> <b>${esc(conn.email || mb.names[conn.provider])}</b> <span class="mute">· court emails are checked every hour</span>
        ${conn.stats && conn.stats.scanned != null ? `<div class="mute" style="font-size:13px;margin-top:4px">Last check ${new Date(conn.stats.at).toLocaleString()}: looked at ${conn.stats.scanned} emails, found ${conn.stats.court} from courts${conn.stats.created ? `, added ${conn.stats.created} cases` : ""}.</div>` : ""}
-       ${conn.stats && conn.stats.note ? `<p class="err" style="margin:6px 0 0">${esc(conn.stats.note)}</p>` : ""}</div>`
+       ${conn.stats && conn.stats.note ? `<p class="err" style="margin:6px 0 0">${esc(conn.stats.note)}</p>${conn.provider !== "imap" ? imapForm(mb, true) : ""}` : ""}</div>`
     : `<div class="card"><h2 style="margin-top:0">📬 Connect your email</h2><p style="margin-top:0">Sign in once with the email you get court notices at. We read only court emails and build and update your cases from them.</p>
-       ${mb.configured.microsoft ? `<a class="btn" href="/api/mail/connect/microsoft" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Outlook / Microsoft 365</a>` : `<button class="btn ghost" disabled style="display:block;width:100%;margin:8px 0;padding:14px">Sign in with Outlook — not switched on yet</button>`}
+       ${mb.other && !mb.other.provider && mb.other.label ? `<p style="margin:0 0 6px"><b>Your email is hosted by ${esc(mb.other.label)}</b> — use the password sign-in below (the Outlook button won't see that mail).</p>` : ""}
+       ${mb.configured.microsoft ? `<a class="btn ${mb.other && !mb.other.provider ? "ghost" : ""}" href="/api/mail/connect/microsoft" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Outlook / Microsoft 365</a>` : `<button class="btn ghost" disabled style="display:block;width:100%;margin:8px 0;padding:14px">Sign in with Outlook — not switched on yet</button>`}
        ${mb.configured.google ? `<a class="btn" href="/api/mail/connect/google" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Gmail</a>` : ""}
+       ${imapForm(mb, mb.other && !mb.other.provider)}
        <p class="mute" style="margin-bottom:0;font-size:13px">Read-only. Personal email is ignored and never stored. Disconnect anytime under Court Updates.</p></div>`;
   $("#app").innerHTML = `${connCard}<div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Inbox</h2>${r.unread ? `<button class="btn sm ghost" id="readAll">Mark all read</button>` : ""}</div>
    <p class="mute" style="margin-bottom:0">Every court email from your connected email. Tap one for the summary and the exact email.</p></div>
@@ -110,6 +134,7 @@ async function inboxView(quiet) {
      ${m.cases.length ? `<div style="margin-top:4px">${m.cases.map(c => `<span class="chip">${esc(c.cause_no)}${c.case ? " · " + esc(c.case.style || "") : " · not in your cases"}</span>`).join("")}</div>` : ""}
      ${m.dates.length ? `<div class="mute" style="margin-top:4px">📅 ${m.dates.map(esc).join(" · ")}</div>` : ""}
      <div style="font-size:14px;margin-top:4px">${esc(m.preview)}</div></div>`).join("") || `<div class="card mute">No emails yet. Set up your address under <a class="link" id="goCU">Court Updates</a>.</div>`}`;
+  wireImap(() => setTimeout(() => inboxView(), 2500));
   if ($("#readAll")) $("#readAll").onclick = async () => { await api("/api/inbox/read-all", { method: "POST" }); inboxView(); };
   if ($("#goCU")) $("#goCU").onclick = () => { tab = "court"; renderNav(); show(); };
   $$("[data-open]").forEach(c => c.onclick = () => emailView(+c.dataset.open));
@@ -156,7 +181,7 @@ async function courtView() {
    ${d.bar_ok ? "" : `<p class="err">Your account needs an 8-digit bar # before cases can be pulled.</p>`}</div>
    <div class="card"><h2>📬 Connect your email</h2>
    <p style="margin-top:0">You already get court emails — eFileTexas service notices, clerk notices, hearing settings. Connect your email once and TX Case Desk reads <b>only those court emails</b>, adds new cases, and updates your existing ones automatically.</p>
-   ${det.domain ? `<p class="mute" style="margin:0 0 6px">Your email <b>${esc(det.domain)}</b> is hosted by <b>${esc(det.host || "unknown")}</b>.${det.provider ? " Use the button below." : " Connect isn't available for that host yet — use the forwarding option further down, or ask us to add it."}</p>` : ""}
+   ${det.domain ? `<p class="mute" style="margin:0 0 6px">Your email <b>${esc(det.domain)}</b> is hosted by <b>${esc(det.host || "unknown")}</b>.${det.provider ? " Use the button below." : " Use <b>Connect with your email password</b> below."}</p>` : ""}
    ${order.map((p, i) => { const m = mb.mailboxes.find(x => x.provider === p);
      if (!m && det.provider && p !== det.provider) return i === 1 ? `<p class="mute" style="font-size:13px;margin:4px 0">Use a different email? <a class="link" href="/api/mail/connect/${p}">Connect ${p === "microsoft" ? "Outlook" : "Gmail"} instead</a>${mb.configured[p] ? "" : " (coming soon)"}</p>` : "";
      if (m) return `<div style="border-top:1px solid var(--line);padding:10px 0"><div class="row"><b>${esc(mb.names[p])}</b>
@@ -166,6 +191,13 @@ async function courtView() {
        <div class="row" style="margin-top:6px">${m.status === "reconnect" ? `<a class="btn sm" href="/api/mail/connect/${p}" style="text-decoration:none">Reconnect</a>` : `<button class="btn sm" data-msync="${m.id}">Check now</button>`}<button class="btn sm danger" data-mdel="${m.id}">Disconnect</button></div></div>`;
      return mb.configured[p] ? `<a class="btn" href="/api/mail/connect/${p}" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Connect ${p === "microsoft" ? "Outlook / Microsoft 365" : "Gmail"}</a>`
        : `<button class="btn ghost" disabled style="display:block;width:100%;margin:8px 0;padding:14px">Connect ${p === "microsoft" ? "Outlook / Microsoft 365" : "Gmail"} — coming soon</button>`; }).join("")}
+   ${(() => { const m = mb.mailboxes.find(x => x.provider === "imap"); if (!m) return imapForm(mb, !det.provider && !!det.domain);
+     return `<div style="border-top:1px solid var(--line);padding:10px 0"><div class="row"><b>${esc(mb.names.imap)}</b>
+       <span class="tag ${m.status === "ok" ? "g" : m.status === "syncing" ? "y" : "r"}">${m.status === "ok" ? "Connected" : m.status === "syncing" ? "Checking…" : m.status === "reconnect" ? "Password needed" : "Error"}</span></div>
+       <div class="mute">${esc(m.email || "")}${m.last_sync ? " · last checked " + new Date(m.last_sync).toLocaleString() : ""}${m.stats && m.stats.scanned != null ? ` · looked at ${m.stats.scanned} emails, ${m.stats.court} from courts, ${m.stats.created} cases added` : ""}</div>
+       ${m.last_error ? `<p class="err" style="margin:4px 0">${esc(m.last_error)}</p>` : ""}
+       <div class="row" style="margin-top:6px">${m.status === "reconnect" ? "" : `<button class="btn sm" data-msync="${m.id}">Check now</button>`}<button class="btn sm danger" data-mdel="${m.id}">Disconnect</button></div>
+       ${m.status === "reconnect" ? imapForm(mb, true) : ""}</div>`; })()}
    <p class="mute" style="margin-bottom:0;font-size:13px">Read-only. Only emails from courts, clerks, eFileTexas and re:SearchTX are read; everything else is ignored and never stored. Checked every hour. Disconnect anytime.</p></div>
    <details class="card"><summary>Other ways (re:SearchTX alerts / forwarding)</summary>
    <div class="card" style="margin-top:10px"><h2>📨 Court updates (re:SearchTX)</h2>
@@ -221,6 +253,7 @@ async function courtView() {
   });
   $$("[data-msync]").forEach(b => b.onclick = async () => { await api(`/api/mail/${b.dataset.msync}/sync`, { method: "POST" }); toast("Checking your email…"); setTimeout(courtView, 1500); });
   $$("[data-mdel]").forEach(b => b.onclick = async () => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to disconnect"; return; } await api(`/api/mail/${b.dataset.mdel}`, { method: "DELETE" }); courtView(); });
+  wireImap(() => setTimeout(courtView, 2500));
   if (mb.mailboxes.some(m => m.status === "syncing")) courtPoll = setTimeout(() => { if (tab === "court") courtView(); }, 4000);
   if ($("#goInbox")) $("#goInbox").onclick = () => { tab = "inbox"; renderNav(); show(); };
   const cpa = $("#cpAddr"); if (cpa) cpa.onclick = async () => { try { await navigator.clipboard.writeText(ea.address); toast("Address copied"); } catch (e) { toast(ea.address); } };
@@ -471,6 +504,29 @@ async function firmView() {
   $("#app").innerHTML = `<div class="card mute">Loading…</div>`;
   let us; try { us = (await api("/api/firm/users")).users; } catch (e) { return fail(e); }
   let fm = null; try { fm = await api("/api/firm/mail"); } catch (e) {}
+  let mk = null; try { mk = await api("/api/firm/ms-keys"); } catch (e) {}
+  const mkCard = !mk ? "" : `<div class="card"><h2>🔐 Your firm's Microsoft connection</h2>
+   ${mk.own ? `<p><span class="tag g">Using your firm's own keys</span></p>
+     <div class="kv"><div><b>Application (client) ID</b>${esc(mk.client_id)}</div><div><b>Directory (tenant) ID</b>${esc(mk.tenant)}</div><div><b>Secret</b>${esc(mk.hint || "saved")} (hidden)</div><div><b>Saved</b>${mk.at ? new Date(mk.at).toLocaleString() : ""}${mk.by ? " by " + esc(mk.by) : ""}</div></div>
+     <p class="mute" style="font-size:13px">Attorneys who connected before these keys were saved should tap <b>Reconnect</b> if their email shows an error. Secrets expire — put a reminder on your calendar for the date you picked in Azure.</p>
+     <div class="row"><button class="btn sm ghost" id="mkEdit">Replace keys</button><button class="btn sm danger" id="mkDel">Remove (use TX Case Desk's)</button></div>`
+   : `<p style="margin-top:0">${mk.shared ? "Right now your attorneys sign in to Outlook through <b>TX Case Desk's</b> shared Microsoft connection." : "Outlook sign-in isn't switched on yet."} Optional: use your <b>own</b> Microsoft app so sign-in runs entirely under your firm's Microsoft 365, approved by your own admin.</p>`}
+   <details id="mkHow" ${mk.own ? "" : ""} style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">${mk.own ? "Replace keys" : "Set up your firm's own keys"} — step by step (about 10 minutes, free)</summary>
+   <ol style="padding-left:20px;line-height:1.6;font-size:15px">
+     <li>Your Microsoft 365 admin signs in at <a class="link" href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener">entra.microsoft.com → App registrations</a> → <b>+ New registration</b>.</li>
+     <li><b>Name:</b>${copyBox("TX Case Desk")}<b>Supported account types:</b> <i>Single tenant only</i> (your organization only).</li>
+     <li><b>Redirect URI:</b> pick <b>Web</b> and paste:${copyBox(mk.redirects[0])}Click <b>Register</b>.</li>
+     <li>Left menu → <b>Authentication</b> → <b>Add Redirect URI</b> → paste the second one → <b>Configure</b>:${copyBox(mk.redirects[1])}</li>
+     <li>Left menu → <b>API permissions</b> → <b>+ Add a permission</b> → <b>Microsoft Graph</b> → <b>Delegated permissions</b> → tick <b>Mail.Read</b>, <b>User.Read</b>, <b>offline_access</b>, <b>openid</b>, <b>email</b> → <b>Add permissions</b>.<br>
+       For firm-wide connect also add → <b>Application permissions</b> → <b>Mail.Read</b>. Then click <b>✓ Grant admin consent</b> for your organization.</li>
+     <li>Left menu → <b>Certificates &amp; secrets</b> → <b>+ New client secret</b> → 24 months → <b>Add</b>. Copy the <b>Value</b> right away (shown only once — not the Secret ID).</li>
+     <li>Left menu → <b>Overview</b>: copy the <b>Application (client) ID</b> and the <b>Directory (tenant) ID</b>, and paste all three below.</li>
+   </ol>
+   <form id="mkF"><label>Application (client) ID</label><input name="client_id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off" required>
+     <label>Directory (tenant) ID</label><input name="tenant" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off" required>
+     <label>Client secret — Value</label><input name="secret" type="password" autocomplete="off" required>
+     <div class="err" id="mkErr"></div><button class="btn" style="width:100%;padding:12px">Save &amp; test with Microsoft</button>
+     <p class="mute" style="font-size:13px;margin:6px 0 0">We test the keys with Microsoft before saving. The secret is encrypted and never shown again.</p></form></details></div>`;
   const fmCard = !fm ? "" : `<div class="card"><h2>📬 Firm email — connect everyone at once</h2>
    ${fm.firm ? `<div class="row"><span class="tag ${fm.firm.status === "ok" ? "g" : "r"}">${fm.firm.status === "ok" ? "Connected" : fm.firm.status === "reconnect" ? "Approve again" : "Error"}</span><b>${esc(fm.firm.provider === "microsoft" ? "Microsoft 365" : "Google Workspace")}</b> · @${esc(fm.firm.domain)}</div>
      <div class="mute" style="margin-top:4px">${fm.firm.last_sync ? "Last checked " + new Date(fm.firm.last_sync).toLocaleString() : "First check running…"}${fm.firm.stats ? ` · ${fm.firm.stats.people} attorneys · ${fm.firm.stats.added} new court emails · ${fm.firm.stats.created} cases added` : ""}</div>
@@ -485,8 +541,8 @@ async function firmView() {
        ${fm.google_sa_client_id ? `<ol style="padding-left:18px;font-size:14px"><li>Open <a class="link" href="https://admin.google.com/ac/owl/domainwidedelegation" target="_blank" rel="noopener">Google Admin → Security → API controls → Domain-wide delegation</a> → <b>Add new</b>.</li>
        <li>Client ID:<div class="secret">${esc(fm.google_sa_client_id)}</div></li><li>OAuth scope:<div class="secret">https://www.googleapis.com/auth/gmail.readonly</div></li><li>Tap <b>Authorize</b>, then come back and tap the button below.</li></ol>
        <button class="btn" id="fmG" style="width:100%;padding:14px">I've authorized it — turn on for the whole firm</button><div class="err" id="fmGerr"></div>` : `<button class="btn ghost" disabled style="width:100%;padding:14px">Google Workspace firm connect — coming soon</button>`}`
-   : `<p class="mute">Your firm's email (@${esc(fm.detect.domain)}) is hosted by ${esc(fm.detect.host)}. Firm-wide connect works with Microsoft 365 and Google Workspace. Attorneys can use the forwarding option under Court Updates.</p>`}</div>`;
-  $("#app").innerHTML = fmCard + `<div class="card"><h2>${esc(me.firm_name)} – seats</h2>${us.map(u => `<div style="border-top:1px solid var(--line);padding:10px 0" data-u="${u.id}">
+   : `<p class="mute">Your firm's email (@${esc(fm.detect.domain)}) is hosted by ${esc(fm.detect.host)}. Firm-wide connect works with Microsoft 365 and Google Workspace. Each attorney can connect their own email in a minute with <b>Connect with your email password</b> (Inbox or Court Updates).</p>`}</div>`;
+  $("#app").innerHTML = fmCard + mkCard + `<div class="card"><h2>${esc(me.firm_name)} – seats</h2>${us.map(u => `<div style="border-top:1px solid var(--line);padding:10px 0" data-u="${u.id}">
     <b>${esc(u.name)}</b> <span class="tag ${u.active ? "g" : "r"}">${u.active ? u.role : "disabled"}</span> ${u.totp_enabled ? "" : `<span class="tag y">2FA not set</span>`}
     <div class="mute">${esc(u.email)}${u.bar_number ? " · Bar #" + esc(u.bar_number) : ""}</div><div class="mute">Counties: ${esc((u.counties || []).join(", ") || "none")} · Last login: ${u.last_login ? new Date(u.last_login).toLocaleString() : "never"}</div>
     ${u.id !== me.id ? `<div class="row" style="margin-top:6px"><button class="btn sm ghost" data-a="reset">Reset password & 2FA</button><button class="btn sm ${u.active ? "danger" : "ghost"}" data-a="toggle">${u.active ? "Disable" : "Enable"}</button></div>` : ""}</div>`).join("")}</div>
@@ -494,6 +550,14 @@ async function firmView() {
    <div><label>Bar # (attorneys)</label><input name="bar" inputmode="numeric"></div><div><label>Role</label><select name="role"><option value="attorney">Attorney</option><option value="paralegal">Paralegal</option><option value="admin">Firm admin</option></select></div></div>
    <div class="err" id="aerr"></div><button class="btn">Add seat</button></form><div id="temp"></div></div>`;
   const showTemp = (who, pw) => $("#temp").innerHTML = `<div class="card" style="background:#fff4d6;margin-top:10px"><b>Temporary password for ${esc(who)}:</b><div class="secret" style="margin-top:6px">${esc(pw)}</div><p class="mute">Shown once. Give it to them privately — they'll set their own password and 2FA at first sign-in.</p></div>`;
+  if ($("#mkF")) $("#mkF").onsubmit = async e => {
+    e.preventDefault(); const f = e.target, btn = f.querySelector("button.btn"); $("#mkErr").textContent = ""; btn.disabled = true; btn.textContent = "Testing with Microsoft…";
+    const body = Object.fromEntries([...new FormData(f)].map(([k, v]) => [k, String(v).trim()]));
+    try { await api("/api/firm/ms-keys", { method: "POST", body }); toast("Keys saved — Microsoft accepted them"); firmView(); }
+    catch (x) { $("#mkErr").textContent = x.message; btn.disabled = false; btn.textContent = "Save & test with Microsoft"; }
+  };
+  if ($("#mkEdit")) $("#mkEdit").onclick = () => { $("#mkHow").open = true; $("#mkHow").scrollIntoView({ behavior: "smooth" }); };
+  if ($("#mkDel")) $("#mkDel").onclick = async () => { const b = $("#mkDel"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to remove"; return; } await api("/api/firm/ms-keys", { method: "DELETE" }); toast("Removed — using TX Case Desk's connection"); firmView(); };
   if ($("#fmSync")) $("#fmSync").onclick = async () => { await api("/api/firm/mail/sync", { method: "POST" }); toast("Checking firm email…"); setTimeout(firmView, 2000); };
   if ($("#fmDel")) $("#fmDel").onclick = async () => { const b = $("#fmDel"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to disconnect"; return; } await api("/api/firm/mail", { method: "DELETE" }); firmView(); };
   if ($("#fmG")) $("#fmG").onclick = async () => { try { await api("/api/firm/mail/google", { method: "POST" }); toast("Firm email connected"); firmView(); } catch (e) { $("#fmGerr").textContent = e.message; } };

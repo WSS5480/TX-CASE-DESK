@@ -181,6 +181,15 @@ CREATE TABLE IF NOT EXISTS firm_mail (
   stats JSONB,
   created_at TIMESTAMPTZ DEFAULT now()
 );
+ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS key_source TEXT DEFAULT 'app';   -- app = TX Case Desk's Microsoft keys, firm = the firm's own
+ALTER TABLE firm_mail ADD COLUMN IF NOT EXISTS key_source TEXT DEFAULT 'app';
+-- a firm's own Microsoft (Azure) app, entered by the firm admin in Firm Seats
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS ms_client_id TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS ms_tenant TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS ms_secret_enc TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS ms_secret_hint TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS ms_keys_at TIMESTAMPTZ;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS ms_keys_by TEXT;
 CREATE TABLE IF NOT EXISTS mail_cursor (
   user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   last_seen TIMESTAMPTZ

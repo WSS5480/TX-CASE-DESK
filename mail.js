@@ -31,24 +31,45 @@ const domainOf = a => String(a || "").split("@")[1]?.toLowerCase() || "";
 const GMAIL_QUERY = "from:(efiletexas.gov OR tylertech.com OR tylertech.cloud OR tylerhost.net OR txcourts.gov OR tx.us OR clerk)";
 const redirect = p => `${APP}/api/mail/callback/${p}`;
 const configured = () => Object.fromEntries(Object.entries(PROVIDERS).map(([k, v]) => [k, !!(v.id() && v.secret())]));
+const NAMES = { ...Object.fromEntries(Object.entries(PROVIDERS).map(([k, v]) => [k, v.name])), imap: "Email (password sign-in)" };
+
+// Microsoft keys: a firm's own Azure app (entered in Firm Seats) wins; otherwise TX Case Desk's (Render env).
+async function msKeys(firmId, source) {
+  if (source !== "app" && firmId) {
+    const f = (await q("SELECT ms_client_id, ms_tenant, ms_secret_enc FROM firms WHERE id=$1", [firmId])).rows[0];
+    if (f && f.ms_client_id && f.ms_secret_enc) return { id: f.ms_client_id, secret: box.open(f.ms_secret_enc), tenant: f.ms_tenant || "common", source: "firm" };
+    if (source === "firm") throw Object.assign(new Error("Your firm's Microsoft keys were removed — reconnect."), { reconnect: true });
+  }
+  const P = PROVIDERS.microsoft;
+  return { id: P.id(), secret: P.secret(), tenant: "common", source: "app" };
+}
+async function configuredFor(firmId) {
+  const c = configured();
+  if (firmId) { const f = (await q("SELECT ms_client_id, ms_secret_enc FROM firms WHERE id=$1", [firmId])).rows[0]; if (f && f.ms_client_id && f.ms_secret_enc) c.microsoft = true; }
+  c.imap = true;
+  return c;
+}
+const msAuth = (tenant, kind) => `https://login.microsoftonline.com/${tenant || "common"}/oauth2/v2.0/${kind}`;
 
 // OAuth state lives server-side (our session cookie is SameSite=Strict, so it won't come back on the provider redirect)
 const states = new Map();
-function startUrl(provider, userId) {
+async function startUrl(provider, user) {
   const P = PROVIDERS[provider];
+  const keys = provider === "microsoft" ? await msKeys(user.firm_id) : { id: P.id(), source: "app" };
   const state = crypto.randomBytes(16).toString("hex");
-  states.set(state, { userId, provider, exp: Date.now() + 10 * 60e3 });
+  states.set(state, { userId: user.id, firmId: user.firm_id, provider, keySource: keys.source, exp: Date.now() + 10 * 60e3 });
   for (const [k, v] of states) if (v.exp < Date.now()) states.delete(k);
-  const p = new URLSearchParams({ client_id: P.id(), response_type: "code", redirect_uri: redirect(provider), scope: P.scope, state });
+  const p = new URLSearchParams({ client_id: keys.id, response_type: "code", redirect_uri: redirect(provider), scope: P.scope, state });
   if (provider === "google") { p.set("access_type", "offline"); p.set("prompt", "consent"); p.set("include_granted_scopes", "true"); }
   if (provider === "microsoft") p.set("prompt", "select_account");
-  return `${P.auth}?${p}`;
+  return `${provider === "microsoft" ? msAuth(keys.tenant, "authorize") : P.auth}?${p}`;
 }
 
-async function tokenCall(provider, params) {
+async function tokenCall(provider, params, keys) {
   const P = PROVIDERS[provider];
-  const r = await fetch(P.token, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: P.id(), client_secret: P.secret(), ...params }), signal: AbortSignal.timeout(20000) });
+  keys = keys || { id: P.id(), secret: P.secret(), tenant: "common" };
+  const r = await fetch(provider === "microsoft" ? msAuth(keys.tenant, "token") : P.token, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: keys.id, client_secret: keys.secret, ...params }), signal: AbortSignal.timeout(20000) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error_description || j.error || `token error ${r.status}`);
   return j;
@@ -60,13 +81,14 @@ function emailFromIdToken(idt) {
 async function finish(provider, code, state) {
   const st = states.get(state); states.delete(state);
   if (!st || st.exp < Date.now() || st.provider !== provider) throw new Error("This sign-in link expired. Tap Connect again.");
-  const t = await tokenCall(provider, { grant_type: "authorization_code", code, redirect_uri: redirect(provider) });
+  const keys = provider === "microsoft" ? await msKeys(st.firmId, st.keySource) : null;
+  const t = await tokenCall(provider, { grant_type: "authorization_code", code, redirect_uri: redirect(provider) }, keys);
   if (!t.refresh_token) throw new Error("The provider didn't grant ongoing access. Tap Connect again and approve all permissions.");
   const email = emailFromIdToken(t.id_token);
-  const { rows } = await q(`INSERT INTO mailboxes(user_id, provider, email, enc_refresh, enc_access, access_expires, status, last_error)
-    VALUES($1,$2,$3,$4,$5,now() + ($6 || ' seconds')::interval,'ok',NULL)
-    ON CONFLICT(user_id, provider) DO UPDATE SET email=$3, enc_refresh=$4, enc_access=$5, access_expires=EXCLUDED.access_expires, status='ok', last_error=NULL
-    RETURNING id`, [st.userId, provider, email, box.seal(t.refresh_token), box.seal(t.access_token), String((t.expires_in || 3600) - 120)]);
+  const { rows } = await q(`INSERT INTO mailboxes(user_id, provider, email, enc_refresh, enc_access, access_expires, status, last_error, key_source)
+    VALUES($1,$2,$3,$4,$5,now() + ($6 || ' seconds')::interval,'ok',NULL,$7)
+    ON CONFLICT(user_id, provider) DO UPDATE SET email=$3, enc_refresh=$4, enc_access=$5, access_expires=EXCLUDED.access_expires, status='ok', last_error=NULL, key_source=$7, last_seen=NULL, stats=NULL
+    RETURNING id`, [st.userId, provider, email, box.seal(t.refresh_token), box.seal(t.access_token), String((t.expires_in || 3600) - 120), keys ? keys.source : "app"]);
   await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [st.userId, { provider, email }]);
   syncMailbox(rows[0].id, { days: 30 }).catch(() => {}); // first pull: last 30 days
   return { userId: st.userId, email };
@@ -74,7 +96,8 @@ async function finish(provider, code, state) {
 
 async function accessToken(mb) {
   if (mb.enc_access && mb.access_expires && new Date(mb.access_expires) > new Date()) return box.open(mb.enc_access);
-  const t = await tokenCall(mb.provider, { grant_type: "refresh_token", refresh_token: box.open(mb.enc_refresh), ...(mb.provider === "microsoft" ? { scope: PROVIDERS.microsoft.scope } : {}) });
+  const keys = mb.provider === "microsoft" ? await msKeys(mb.firm_id, mb.key_source || "app") : null;
+  const t = await tokenCall(mb.provider, { grant_type: "refresh_token", refresh_token: box.open(mb.enc_refresh), ...(mb.provider === "microsoft" ? { scope: PROVIDERS.microsoft.scope } : {}) }, keys);
   await q("UPDATE mailboxes SET enc_access=$2, access_expires=now() + ($3 || ' seconds')::interval, enc_refresh=COALESCE($4, enc_refresh) WHERE id=$1",
     [mb.id, box.seal(t.access_token), String((t.expires_in || 3600) - 120), t.refresh_token ? box.seal(t.refresh_token) : null]);
   return t.access_token;
@@ -140,6 +163,99 @@ async function fetchGoogle(token, since) {
   return { msgs: out, scanned: out.length, first: out[0]?.received || null, last: out[out.length - 1]?.received || null, near: {}, more: false };
 }
 
+// ======================= Password sign-in (IMAP) — Titan, GoDaddy, Zoho and other hosts =======================
+// The attorney enters their email + password once. It's encrypted like court logins and used read-only.
+const IMAP_HOSTS = [
+  [/titan\.email/, ["imap.titan.email", "imap.secureserver.net"], "Titan (GoDaddy Professional Email)"],
+  [/secureserver\.net/, ["imap.secureserver.net"], "GoDaddy email"],
+  [/zoho/, ["imap.zoho.com"], "Zoho Mail"],
+  [/yahoodns|yahoo/, ["imap.mail.yahoo.com"], "Yahoo Mail"],
+  [/icloud|me\.com/, ["imap.mail.me.com"], "iCloud Mail"],
+  [/hostinger/, ["imap.hostinger.com"], "Hostinger email"],
+  [/ionos|1and1/, ["imap.ionos.com"], "IONOS email"]
+];
+async function imapGuess(email) {
+  const det = await detect(email);
+  const mx = (det.mx || []).join(" ");
+  const hit = IMAP_HOSTS.find(([re]) => re.test(mx));
+  if (hit) return { hosts: hit[1], label: hit[2], det };
+  if (det.provider === "microsoft") return { hosts: ["outlook.office365.com"], label: "Microsoft 365", det };
+  if (det.provider === "google") return { hosts: ["imap.gmail.com"], label: "Google", det };
+  return { hosts: det.domain ? ["imap." + det.domain, "mail." + det.domain] : [], label: det.host || "your email host", det };
+}
+function imapClient(c) {
+  const { ImapFlow } = require("imapflow");
+  return new ImapFlow({ host: c.host, port: c.port || 993, secure: true, auth: { user: c.user, pass: c.pass }, logger: false,
+    socketTimeout: 60000, connectionTimeout: 15000, greetingTimeout: 15000 });
+}
+function imapError(e, label) {
+  const m = String(e.responseText || e.message || e);
+  if (e.authenticationFailed || /auth|credential|password|LOGIN failed|invalid/i.test(m))
+    return Object.assign(new Error(`${label} didn't accept that email and password. ` + (/titan|godaddy/i.test(label)
+      ? "In Titan/GoDaddy webmail: make sure Third-party email access is ON and Two-step (2FA) login is OFF — Titan blocks other apps while 2FA is on — then try again."
+      : "If two-step login is on for this email, create an app password and use that instead.")), { reconnect: true, auth: true });
+  return new Error(`Couldn't reach ${label} (${m.slice(0, 120)}).`);
+}
+async function connectImap(user, { email, password, host }) {
+  email = String(email || "").trim().toLowerCase(); password = String(password || "");
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || !password) throw new Error("Enter your email address and its password.");
+  const g = await imapGuess(email);
+  const hosts = host ? [String(host).trim().toLowerCase()] : g.hosts;
+  if (!hosts.length) throw new Error("We couldn't tell who hosts that email. Enter the incoming (IMAP) server from your email provider.");
+  let lastErr;
+  for (const h of hosts) {
+    const [hn, hp] = h.split(":");
+    const c = { host: hn, port: +hp || 993, user: email, pass: password };
+    const cl = imapClient(c);
+    try { await cl.connect(); await cl.logout().catch(() => {});
+      const { rows } = await q(`INSERT INTO mailboxes(user_id, provider, email, enc_refresh, status, last_error, key_source) VALUES($1,'imap',$2,$3,'ok',NULL,'imap')
+        ON CONFLICT(user_id, provider) DO UPDATE SET email=$2, enc_refresh=$3, status='ok', last_error=NULL, last_seen=NULL, stats=NULL RETURNING id`, [user.id, email, box.seal(JSON.stringify(c))]);
+      await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [user.id, { provider: "imap", email, host: h }]);
+      console.log(`[mail] imap connected for user ${user.id} @${domainOf(email)} via ${h}`);
+      syncMailbox(rows[0].id, { days: 30 }).catch(() => {});
+      return { id: rows[0].id, email, host: h, label: g.label };
+    } catch (e) { try { cl.close(); } catch {} const err = imapError(e, g.label); if (!lastErr || err.auth) lastErr = err; }
+  }
+  throw lastErr || new Error("Couldn't connect.");
+}
+const SKIP_FOLDER = /\\(Trash|Junk|Sent|Drafts)|^(trash|spam|junk|sent|drafts|deleted|outbox)/i;
+async function fetchImap(c, since) {
+  const { simpleParser } = require("mailparser");
+  const cl = imapClient(c);
+  try { await cl.connect(); } catch (e) { throw imapError(e, c.host); }
+  const hits = [], near = {}; let scanned = 0, first = null, last = null, more = false;
+  try {
+    const boxes = (await cl.list()).filter(b => !b.flags?.has("\\Noselect") && !SKIP_FOLDER.test(b.specialUse || "") && !SKIP_FOLDER.test(b.name)).slice(0, 25);
+    for (const b of boxes) {
+      const lock = await cl.getMailboxLock(b.path);
+      try {
+        let uids = (await cl.search({ since }, { uid: true })) || [];
+        // some servers mishandle SINCE — fall back to the newest 5,000 and filter by date ourselves
+        if (!uids.length && cl.mailbox && cl.mailbox.exists) uids = ((await cl.search({ all: true }, { uid: true })) || []).slice(-5000);
+        if (!uids.length) continue;
+        for await (const m of cl.fetch(uids.slice(-20000).join(","), { uid: true, envelope: true, internalDate: true }, { uid: true })) {
+          const when = new Date(m.internalDate || m.envelope?.date || Date.now()).toISOString();
+          if (new Date(when) < since) continue;
+          scanned++; if (!first || when < first) first = when; if (!last || when > last) last = when;
+          const from = m.envelope?.from?.[0]?.address || "";
+          if (COURT_SENDER.test(from + " " + (m.envelope?.subject || ""))) hits.push({ box: b.path, uid: m.uid, from, subject: m.envelope?.subject || "", received: when, mid: m.envelope?.messageId || null });
+          else { const d = domainOf(from); if (NEAR_MISS.test(d)) near[d] = (near[d] || 0) + 1; }
+        }
+      } finally { lock.release(); }
+    }
+    const out = [];
+    for (const h of hits.sort((a, b) => a.received.localeCompare(b.received))) {
+      const lock = await cl.getMailboxLock(h.box);
+      try {
+        const msg = await cl.fetchOne(String(h.uid), { source: true }, { uid: true });
+        const parsed = msg && msg.source ? await simpleParser(msg.source) : {};
+        out.push({ ext_id: "imap:" + (h.mid || h.box + ":" + h.uid), from: h.from, subject: h.subject, html: parsed.html || null, text: parsed.text || null, received: h.received });
+      } finally { lock.release(); }
+    }
+    return { msgs: out, scanned, first, last, near, more };
+  } finally { await cl.logout().catch(() => cl.close?.()); }
+}
+
 const running = new Set();
 async function syncMailbox(id, { days = 2, fresh = false } = {}) {
   if (running.has(id)) return { skipped: "running" };
@@ -150,8 +266,9 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
     // No court email found yet = keep looking back 30 days, not just 2.
     const lookback = fresh || !mb.last_seen ? Math.max(days, 30) : days;
     const since = !fresh && mb.last_seen ? new Date(new Date(mb.last_seen).getTime() - 60e3) : new Date(Date.now() - lookback * 864e5);
-    const token = await accessToken(mb);
-    const r = mb.provider === "microsoft" ? await fetchMicrosoft(token, since) : await fetchGoogle(token, since);
+    const token = mb.provider === "imap" ? null : await accessToken(mb);
+    const r = mb.provider === "imap" ? await fetchImap(JSON.parse(box.open(mb.enc_refresh)), since)
+      : mb.provider === "microsoft" ? await fetchMicrosoft(token, since) : await fetchGoogle(token, since);
     const user = { id: mb.user_id, firm_id: mb.firm_id, counties: mb.counties };
     let added = 0, created = 0, matched = 0, dup = 0, newest = fresh ? null : mb.last_seen;
     for (const m of r.msgs) {
@@ -163,7 +280,7 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
     const nearTop = Object.entries(r.near).sort((a, b) => b[1] - a[1]).slice(0, 8);
     // Empty mailbox: the attorney likely signed in to a Microsoft account that isn't where their mail lives.
     let note = null;
-    if (r.scanned === 0 && lookback >= 30) {
+    if (r.scanned === 0 && lookback >= 30 && mb.provider !== "imap") {
       const det = await detect(mb.email);
       let inboxTotal = null;
       if (mb.provider === "microsoft") inboxTotal = await api("https://graph.microsoft.com/v1.0/me/mailFolders/inbox?$select=totalItemCount", token).then(j => j.totalItemCount).catch(e => "error: " + e.message);
@@ -173,7 +290,7 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
         ? `Connected, but this mailbox has no email from the last 30 days. Make sure you signed in with the ${mb.provider === "microsoft" ? "Microsoft 365" : "Google"} account for ${em}.`
         : det.provider === "google"
           ? `Your ${det.domain} email runs on Google Workspace, not Microsoft — the Microsoft sign-in opened an empty mailbox. Disconnect, then use Sign in with Gmail.`
-          : `Your ${det.domain || ""} email is hosted by ${det.host || "another provider"}, not Microsoft — the Microsoft sign-in opened an empty mailbox, so there's nothing to read. Disconnect, and use forwarding under Court Updates → Other ways for now.`;
+          : `Your ${det.domain || ""} email is hosted by ${(await imapGuess(mb.email)).label}, not Microsoft — the Microsoft sign-in opened an empty mailbox, so there's nothing to read. Disconnect this, then use "Connect with your email password" below.`;
     }
     const stats = { note, scanned: r.scanned, from: r.first, to: r.last, court: r.msgs.length, checked: r.msgs.length, added, matched, created, dup, near: Object.fromEntries(nearTop), at: new Date().toISOString() };
     await q("UPDATE mailboxes SET status='ok', last_sync=now(), last_seen=COALESCE($2,last_seen), last_error=NULL, stats=$3 WHERE id=$1", [id, seen || null, stats]);
@@ -198,7 +315,7 @@ async function syncAll() {
   return rows.length;
 }
 
-module.exports = { PROVIDERS, configured, startUrl, finish, syncMailbox, syncAll, rescanOld, running };
+module.exports = { PROVIDERS, NAMES, configured, configuredFor, msKeys, testFirmKeys, startUrl, finish, syncMailbox, syncAll, rescanOld, running, connectImap, imapGuess };
 
 // ======================= Auto-detect who hosts an email domain =======================
 const dns = require("dns").promises;
@@ -221,32 +338,47 @@ async function detect(email) {
 // The firm's Microsoft 365 admin approves once; we then read court emails for the firm's attorneys
 // (only users registered in TX Case Desk with an address on the firm's domain).
 const adminStates = new Map();
-function adminConsentUrl(firmId, domain) {
+async function adminConsentUrl(firmId, domain) {
+  const keys = await msKeys(firmId);
   const state = crypto.randomBytes(16).toString("hex");
-  adminStates.set(state, { firmId, domain, exp: Date.now() + 15 * 60e3 });
-  const p = new URLSearchParams({ client_id: PROVIDERS.microsoft.id(), redirect_uri: `${APP}/api/mail/admin-callback/microsoft`, scope: "https://graph.microsoft.com/.default", state });
-  return `https://login.microsoftonline.com/organizations/v2.0/adminconsent?${p}`;
+  adminStates.set(state, { firmId, domain, keySource: keys.source, exp: Date.now() + 15 * 60e3 });
+  const p = new URLSearchParams({ client_id: keys.id, redirect_uri: `${APP}/api/mail/admin-callback/microsoft`, scope: "https://graph.microsoft.com/.default", state });
+  return `https://login.microsoftonline.com/${keys.source === "firm" ? keys.tenant : "organizations"}/v2.0/adminconsent?${p}`;
 }
 async function finishAdminConsent(query) {
   const st = adminStates.get(query.state); adminStates.delete(query.state);
   if (!st || st.exp < Date.now()) throw new Error("This approval link expired. Start again from Firm Seats.");
   if (query.error) throw new Error(query.error_description || "The admin did not approve access.");
   if (!query.tenant) throw new Error("Microsoft didn't return the firm's tenant.");
-  await q(`INSERT INTO firm_mail(firm_id, provider, tenant, domain, status, last_error) VALUES($1,'microsoft',$2,$3,'ok',NULL)
-    ON CONFLICT(firm_id) DO UPDATE SET provider='microsoft', tenant=$2, domain=$3, status='ok', last_error=NULL`, [st.firmId, query.tenant, st.domain]);
+  await q(`INSERT INTO firm_mail(firm_id, provider, tenant, domain, status, last_error, key_source) VALUES($1,'microsoft',$2,$3,'ok',NULL,$4)
+    ON CONFLICT(firm_id) DO UPDATE SET provider='microsoft', tenant=$2, domain=$3, status='ok', last_error=NULL, key_source=$4`, [st.firmId, query.tenant, st.domain, st.keySource || "app"]);
   await q("INSERT INTO audit_log(firm_id, action, detail) VALUES($1,'firm_mail_connected',$2)", [st.firmId, { provider: "microsoft", tenant: query.tenant, domain: st.domain }]);
   syncFirm(st.firmId, { days: 30 }).catch(() => {});
   return st;
 }
 const appTokens = new Map();
-async function msAppToken(tenant) {
-  const c = appTokens.get(tenant); if (c && c.exp > Date.now()) return c.tok;
+async function msAppToken(tenant, keys) {
+  keys = keys || await msKeys(null, "app");
+  const ck = tenant + ":" + keys.id;
+  const c = appTokens.get(ck); if (c && c.exp > Date.now()) return c.tok;
   const r = await fetch(`https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: PROVIDERS.microsoft.id(), client_secret: PROVIDERS.microsoft.secret(), grant_type: "client_credentials", scope: "https://graph.microsoft.com/.default" }), signal: AbortSignal.timeout(20000) });
+    body: new URLSearchParams({ client_id: keys.id, client_secret: keys.secret, grant_type: "client_credentials", scope: "https://graph.microsoft.com/.default" }), signal: AbortSignal.timeout(20000) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(j.error_description || "Microsoft 365 firm access failed — the admin may need to approve again."), { reconnect: true });
-  appTokens.set(tenant, { tok: j.access_token, exp: Date.now() + (j.expires_in - 120) * 1000 });
+  appTokens.set(ck, { tok: j.access_token, exp: Date.now() + (j.expires_in - 120) * 1000 });
   return j.access_token;
+}
+// Check a firm's Azure keys before saving: a client-credentials token request proves ID + secret + tenant match.
+async function testFirmKeys({ id, secret, tenant }) {
+  const r = await fetch(`https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/v2.0/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: id, client_secret: secret, grant_type: "client_credentials", scope: "https://graph.microsoft.com/.default" }), signal: AbortSignal.timeout(20000) });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok && j.access_token) return true;
+  const d = String(j.error_description || j.error || r.status);
+  if (/AADSTS7000215|AADSTS7000222/.test(d)) throw new Error("Microsoft says the secret is wrong or expired. Copy the secret's Value (not the Secret ID) again.");
+  if (/AADSTS700016/.test(d)) throw new Error("Microsoft can't find that Application (client) ID in that directory. Check both IDs on the app's Overview page.");
+  if (/AADSTS900023|AADSTS90002/.test(d)) throw new Error("That Directory (tenant) ID isn't valid. Copy it from the app's Overview page.");
+  throw new Error("Microsoft rejected the keys: " + d.split("\r\n")[0].slice(0, 200));
 }
 
 // ======================= Firm-wide: Google Workspace domain-wide delegation =======================
@@ -280,7 +412,7 @@ async function syncFirm(firmId, { days = 2 } = {}) {
     const users = (await q(`SELECT u.id, u.firm_id, u.counties, u.email, c.last_seen FROM users u LEFT JOIN mail_cursor c ON c.user_id=u.id
       WHERE u.firm_id=$1 AND u.active AND lower(split_part(u.email,'@',2))=lower($2)`, [firmId, f.domain])).rows;
     let checked = 0, added = 0, created = 0, people = 0; const errors = [];
-    const appTok = f.provider === "microsoft" ? await msAppToken(f.tenant) : null;
+    const appTok = f.provider === "microsoft" ? await msAppToken(f.tenant, await msKeys(firmId, f.key_source || "app")) : null;
     for (const u of users) {
       try {
         const since = u.last_seen ? new Date(new Date(u.last_seen).getTime() - 60e3) : new Date(Date.now() - days * 864e5);
