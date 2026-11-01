@@ -61,10 +61,11 @@ function publicUser(u) {
   return { id: u.id, email: u.email, name: u.name, bar_number: u.bar_number, role: u.role, firm_id: u.firm_id, firm_name: u.firm_name,
     counties: u.counties || [], totp_enabled: u.totp_enabled, must_change_pw: u.must_change_pw,
     phone: u.phone || "", title: u.title || "", doc_email: u.doc_email || "", firm_logo: u.logo_token ? `/brand/${u.logo_token}` : null,
-    access: u.access || "own", works_with: u.works_with || [], sees_firm: access.seesFirm(u), trust_access: access.trustOk(u) };
+    access: u.access || "own", works_with: u.works_with || [], sees_firm: access.seesFirm(u), trust_access: access.trustOk(u),
+    firm_dash: access.firmDash(u), firm_kind: u.firm_kind || "firm", prefs: u.prefs || {} };
 }
 async function loadUser(id) {
-  const { rows } = await q("SELECT u.*, f.name AS firm_name, f.logo_token, f.plan, f.plan_expires, f.plan_source, f.plan_checked, f.disabled AS firm_disabled FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
+  const { rows } = await q("SELECT u.*, f.name AS firm_name, f.logo_token, f.kind AS firm_kind, f.plan, f.plan_expires, f.plan_source, f.plan_checked, f.disabled AS firm_disabled FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
   return rows[0];
 }
 const requireAuth = wrap(async (req, res, next) => {
@@ -97,7 +98,9 @@ app.get("/healthz", (req, res) => res.send("ok"));
 
 // ---------- signup / login / 2FA ----------
 app.post("/api/signup", loginLimiter, wrap(async (req, res) => {
-  const { firm, name, email, bar, password, code } = req.body || {};
+  const { name, email, bar, password, code } = req.body || {};
+  const kind = req.body?.kind === "solo" ? "solo" : "firm";
+  const firm = String(req.body?.firm || "").trim() || (kind === "solo" && name ? `Law Office of ${String(name).trim()}` : "");
   const em = String(email || "").trim().toLowerCase();
   if (!firm || !name || !isEmail(em) || !isBar(bar)) return res.status(400).json({ error: "Firm, name, valid email and 8-digit Texas bar # are required." });
   if (!strongPw(password)) return res.status(400).json({ error: "Password must be 10+ characters with letters and numbers." });
@@ -106,7 +109,7 @@ app.post("/api/signup", loginLimiter, wrap(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const f = await client.query("INSERT INTO firms(name) VALUES($1) RETURNING id", [String(firm).trim()]);
+    const f = await client.query("INSERT INTO firms(name, kind) VALUES($1, $2) RETURNING id", [String(firm).trim(), kind]);
     const u = await client.query("INSERT INTO users(firm_id,email,name,bar_number,role,pw_hash) VALUES($1,$2,$3,$4,'admin',$5) RETURNING id",
       [f.rows[0].id, em, String(name).trim(), bar, await bcrypt.hash(password, 12)]);
     await client.query("COMMIT");
@@ -233,8 +236,8 @@ app.get("/brand/:token", wrap(async (req, res) => {
   res.set({ "Content-Type": r.logo_mime, "Cache-Control": "public, max-age=31536000, immutable", "Content-Security-Policy": "default-src 'none'" }).send(r.logo);
 }));
 const firmProfile = async id => {
-  const f = (await q("SELECT name, address, phone, fax, website, firm_email, logo_token, logo_w, logo_h FROM firms WHERE id=$1", [id])).rows[0];
-  return { name: f.name, address: f.address || "", phone: f.phone || "", fax: f.fax || "", website: f.website || "", email: f.firm_email || "", logo: f.logo_token ? `/brand/${f.logo_token}` : null, logo_w: f.logo_w, logo_h: f.logo_h };
+  const f = (await q("SELECT name, kind, address, phone, fax, website, firm_email, logo_token, logo_w, logo_h FROM firms WHERE id=$1", [id])).rows[0];
+  return { name: f.name, kind: f.kind || "firm", address: f.address || "", phone: f.phone || "", fax: f.fax || "", website: f.website || "", email: f.firm_email || "", logo: f.logo_token ? `/brand/${f.logo_token}` : null, logo_w: f.logo_w, logo_h: f.logo_h };
 };
 app.get("/api/firm/profile", requireAuth, wrap(async (req, res) => res.json({ profile: await firmProfile(req.user.firm_id) })));
 app.put("/api/firm/profile", requireAuth, requireAdmin, wrap(async (req, res) => {
@@ -258,6 +261,18 @@ app.delete("/api/firm/logo", requireAuth, requireAdmin, wrap(async (req, res) =>
   await q("UPDATE firms SET logo=NULL, logo_mime=NULL, logo_w=NULL, logo_h=NULL, logo_token=NULL WHERE id=$1", [req.user.firm_id]);
   await audit(req, "firm_logo_removed", {}); res.json({ ok: true });
 }));
+const TODAY_CARDS = ["court", "deadlines", "mail", "next", "timer", "tasks", "glance", "caseload"];
+app.put("/api/me/prefs", requireAuth, wrap(async (req, res) => {
+  const hidden = (Array.isArray(req.body?.today_hidden) ? req.body.today_hidden : []).filter(k => TODAY_CARDS.includes(k));
+  const prefs = { ...(req.user.prefs || {}), today_hidden: [...new Set(hidden)] };
+  await q("UPDATE users SET prefs=$2 WHERE id=$1", [req.user.id, prefs]); res.json({ prefs });
+}));
+app.put("/api/firm/kind", requireAuth, requireAdmin, wrap(async (req, res) => {
+  const kind = req.body?.kind === "solo" ? "solo" : "firm";
+  if (kind === "solo" && (await q("SELECT count(*)::int n FROM users WHERE firm_id=$1 AND active", [req.user.firm_id])).rows[0].n > 1)
+    return res.status(400).json({ error: "Solo practice is for one person. Disable the other sign-ins first." });
+  await q("UPDATE firms SET kind=$2 WHERE id=$1", [req.user.firm_id, kind]); await audit(req, "firm_kind", { kind }); res.json({ kind });
+}));
 app.put("/api/me/profile", requireAuth, wrap(async (req, res) => {
   const b = req.body || {}, name = pclean(b.name, 80), bar = pclean(b.bar_number, 8).replace(/\D/g, ""), docEmail = pclean(b.doc_email, 120);
   if (!name) return res.status(400).json({ error: "Your name is required." });
@@ -272,22 +287,23 @@ app.get("/api/firm/users", requireAuth, requireAdmin, wrap(async (req, res) => {
   const { rows } = await q("SELECT id,email,name,bar_number,role,counties,totp_enabled,active,last_login,access,works_with,trust_access,title,phone FROM users WHERE firm_id=$1 ORDER BY name", [req.user.firm_id]);
   res.json({ users: rows });
 }));
-const ROLES = ["admin", "manager", "attorney", "paralegal"], ACCESS = ["own", "team", "firm"];
+const ROLES = ["admin", "partner", "manager", "attorney", "paralegal"], ACCESS = ["own", "team", "firm"];
 async function cleanWorksWith(firmId, ids) {
   const want = [...new Set((Array.isArray(ids) ? ids : []).map(Number).filter(Boolean))].slice(0, 50);
   if (!want.length) return [];
-  return (await q("SELECT id FROM users WHERE firm_id=$1 AND id = ANY($2::int[]) AND role IN ('admin','manager','attorney')", [firmId, want])).rows.map(r => r.id);
+  return (await q("SELECT id FROM users WHERE firm_id=$1 AND id = ANY($2::int[]) AND role IN ('admin','partner','manager','attorney')", [firmId, want])).rows.map(r => r.id);
 }
 app.post("/api/firm/users", requireAuth, requireAdmin, wrap(async (req, res) => {
   const { name, email, bar, role } = req.body || {};
   const em = String(email || "").trim().toLowerCase();
   if (!name || !isEmail(em) || !ROLES.includes(role)) return res.status(400).json({ error: "Name, email and role required." });
-  if ((role === "attorney" || role === "manager" && bar) && !isBar(bar)) return res.status(400).json({ error: "Attorneys need an 8-digit Texas bar #." });
+  if ((role === "attorney" || role === "partner" || role === "manager" && bar) && !isBar(bar)) return res.status(400).json({ error: "Attorneys and partners need an 8-digit Texas bar #." });
+  if ((await q("SELECT kind FROM firms WHERE id=$1", [req.user.firm_id])).rows[0].kind === "solo") return res.status(400).json({ error: "This is set up as a solo practice. Switch to Law firm under Firm profile to add people." });
   if (role === "admin" && bar && !isBar(bar)) return res.status(400).json({ error: "Bar # must be 8 digits." });
   if ((await q("SELECT 1 FROM users WHERE email=$1", [em])).rowCount) return res.status(409).json({ error: "Email already registered." });
-  const acc = role === "admin" || role === "manager" ? "firm" : ACCESS.includes(req.body.access) ? req.body.access : role === "paralegal" ? "team" : "own";
+  const acc = access.FIRM_ROLES.includes(role) ? "firm" : ACCESS.includes(req.body.access) ? req.body.access : role === "paralegal" ? "team" : "own";
   const ww = await cleanWorksWith(req.user.firm_id, req.body.works_with);
-  const trust = role === "admin" || role === "manager" ? req.body.trust_access !== false : !!req.body.trust_access && role !== "paralegal";
+  const trust = role === "admin" ? true : !!req.body.trust_access && role !== "paralegal";
   const pw = tempPw();
   const { rows } = await q("INSERT INTO users(firm_id,email,name,bar_number,role,pw_hash,must_change_pw,access,works_with,trust_access) VALUES($1,$2,$3,$4,$5,$6,true,$7,$8,$9) RETURNING id",
     [req.user.firm_id, em, String(name).trim(), bar ? String(bar).trim() : null, role, await bcrypt.hash(pw, 12), acc, ww, trust]);
@@ -306,7 +322,7 @@ app.patch("/api/firm/users/:id", requireAuth, requireAdmin, wrap(async (req, res
     if (cur === "admin" && b.role !== "admin" && !(await q("SELECT 1 FROM users WHERE firm_id=$1 AND role='admin' AND active AND id<>$2", [req.user.firm_id, id])).rowCount)
       return res.status(400).json({ error: "The firm needs at least one admin. Make someone else an admin first." });
     await q("UPDATE users SET role=$1 WHERE id=$2", [b.role, id]);
-    if (b.role === "admin" || b.role === "manager") await q("UPDATE users SET access='firm' WHERE id=$1", [id]);
+    if (access.FIRM_ROLES.includes(b.role)) await q("UPDATE users SET access='firm' WHERE id=$1", [id]);
     if (b.role === "paralegal") await q("UPDATE users SET trust_access=false WHERE id=$1", [id]);
   }
   if (ACCESS.includes(b.access)) await q("UPDATE users SET access=$1 WHERE id=$2 AND role IN ('attorney','paralegal')", [b.access, id]);

@@ -10,6 +10,7 @@
   const KIND_TAG = { hearing: ["n", "Hearing"], deadline: ["a", "Deadline"], meeting: ["k", "Meeting"], event: ["k", "Event"] };
   const go = t => { tab = t; renderNav(); show(); };
   const isLawyer = () => me.role !== "paralegal";
+  const firmToggle = () => me.sees_firm && me.firm_kind !== "solo";
   let people = null, caseCache = null, caseAt = 0;
   async function loadPeople() { if (!people) people = (await api("/api/firm/people")).people; return people; }
   async function loadCases() { if (!caseCache || Date.now() - caseAt > 60e3) { caseCache = (await api("/api/cases?view=firm")).cases; caseAt = Date.now(); } return caseCache; }
@@ -19,7 +20,7 @@
 
   // ---------- shared filter bar ----------
   async function filterBar(id, onChange, title) {
-    const ps = me.sees_firm ? await loadPeople().catch(() => []) : [];
+    const ps = firmToggle() ? await loadPeople().catch(() => []) : [];
     setTimeout(() => {
       const el = $("#" + id); if (!el) return;
       if (el.querySelector("[name=who]")) el.querySelector("[name=who]").value = pf.who; el.querySelector("[name=county]").value = pf.county;
@@ -27,8 +28,8 @@
       el.querySelectorAll("select").forEach(s => s.onchange = () => { pf[s.name] = s.value; if (s.name === "attorney" && s.value) pf.who = "firm"; onChange(); });
     });
     return `<div class="ph" id="${id}" aria-label="${esc(title || "Filters")}"><div class="row">
-      ${me.sees_firm ? `<select name="who" aria-label="Show"><option value="mine">Mine</option><option value="firm">Whole firm</option></select>` : ""}
-      ${me.sees_firm ? `<select name="attorney" aria-label="Attorney"><option value="">All attorneys</option>${peopleOptions(ps.filter(p => p.role !== "paralegal"))}</select>` : ""}
+      ${firmToggle() ? `<select name="who" aria-label="Show"><option value="mine">Mine</option><option value="firm">Whole firm</option></select>` : ""}
+      ${firmToggle() ? `<select name="attorney" aria-label="Attorney"><option value="">All attorneys</option>${peopleOptions(ps.filter(p => p.role !== "paralegal"))}</select>` : ""}
       <select name="county" aria-label="County"><option value="">All my counties</option>${me.counties.map(c => `<option>${esc(c)}</option>`).join("")}</select></div></div>`;
   }
   const qs = extra => new URLSearchParams({ who: pf.who, attorney: pf.attorney, county: pf.county, ...(extra || {}) });
@@ -69,9 +70,11 @@
   const ago = s => { const m = Math.round((Date.now() - new Date(s)) / 60000); return m < 60 ? `${Math.max(1, m)} min ago` : m < 1440 ? new Date(s).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : new Date(s).toLocaleDateString("en-US", { month: "short", day: "numeric" }); };
 
   // ===================== TODAY =====================
+  const TODAY_CARDS = [["court", "In court today"], ["deadlines", "Deadlines"], ["mail", "New from court email"], ["next", "Next 14 days"], ["timer", "Timer"], ["tasks", "My tasks"], ["glance", "At a glance (numbers)"], ["caseload", "Open cases by county"]];
   VIEWS.today = async function todayView() {
     $("#app").innerHTML = `<div class="card mute">Loading today…</div>`;
-    const ps = me.sees_firm ? await loadPeople().catch(() => []) : [];
+    const ps = firmToggle() ? await loadPeople().catch(() => []) : [];
+    const hid = new Set((me.prefs && me.prefs.today_hidden) || []);
     let d, cs, ib; try { [d, cs, ib] = await Promise.all([api("/api/dashboard?" + qs()), isLawyer() ? loadCases() : Promise.resolve([]), api("/api/inbox").catch(() => ({ emails: [], unread: 0 }))]); } catch (e) { return fail(e); }
     const t = d.today, hr = new Date().getHours(), first = String(me.name || "").split(/\s+/)[0];
     const longDate = new Date(t + "T12:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
@@ -102,30 +105,40 @@
     const bars = rows => { const mx = Math.max(1, ...rows.map(r => r.n)); return rows.map(r => `<div style="margin:8px 0"><div class="row" style="justify-content:space-between;font-size:14px"><span>${esc(r.k)}</span><b>${r.n}</b></div><div style="height:6px;background:var(--chip);border-radius:4px;margin-top:4px"><div style="height:6px;width:${Math.round(r.n / mx * 100)}%;background:var(--navy);border-radius:4px"></div></div></div>`).join("") || `<div class="mute">No open cases.</div>`; };
     $("#app").innerHTML = `
       <div class="ph"><div><div class="eyebrow">${esc(longDate)}</div><h1 class="pt">${hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening"}${first ? ", " + esc(first) : ""}</h1></div>
-        <div class="row" id="pfToday">${me.sees_firm ? `<div class="seg" role="group" aria-label="Show"><button type="button" data-who="mine" aria-pressed="${mine}">Mine</button><button type="button" data-who="firm" aria-pressed="${!mine}">Whole firm</button></div>` : ""}
-        ${me.sees_firm ? `<select name="attorney" aria-label="Attorney"><option value="">All attorneys</option>${peopleOptions(ps.filter(p => p.role !== "paralegal"), pf.attorney)}</select>` : ""}
-        ${me.counties.length > 1 ? `<select name="county" aria-label="County"><option value="">All my counties</option>${me.counties.map(c => `<option ${pf.county === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>` : ""}</div></div>
+        <div class="row" id="pfToday">${firmToggle() ? `<div class="seg" role="group" aria-label="Show"><button type="button" data-who="mine" aria-pressed="${mine}">Mine</button><button type="button" data-who="firm" aria-pressed="${!mine}">Whole firm</button></div>` : ""}
+        ${firmToggle() ? `<select name="attorney" aria-label="Attorney"><option value="">All attorneys</option>${peopleOptions(ps.filter(p => p.role !== "paralegal"), pf.attorney)}</select>` : ""}
+        ${me.counties.length > 1 ? `<select name="county" aria-label="County"><option value="">All my counties</option>${me.counties.map(c => `<option ${pf.county === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>` : ""}
+        <button type="button" class="btn ghost" id="tdCust">Customize</button></div></div>
       <div class="cols"><div class="cmain">
-        <section class="box" aria-labelledby="tdCourt"><div class="bh"><h2 id="tdCourt">In court today</h2><a data-go="calendar">Open calendar</a></div>
+        <section class="box" data-card="court" aria-labelledby="tdCourt"><div class="bh"><h2 id="tdCourt">In court today</h2><a data-go="calendar">Open calendar</a></div>
           <ul style="list-style:none;margin:0;padding:0">${courtToday.map(courtRow).join("") || `<li class="empty">Nothing in court today.${nextCourt ? ` Next: <b>${esc(nextCourt.title)}</b> on ${esc(niceDate(nextCourt.date))}${nextCourt.time ? " at " + esc(nextCourt.time) : ""}${nextCourt.case ? " · " + caseLink(nextCourt.case) : ""}` : ""}</li>`}</ul>
           <div class="mute" style="padding:10px 18px;border-top:1px solid var(--line2)">Court dates on watched cases are checked every hour.</div></section>
-        <section class="box" aria-labelledby="tdDl"><div class="bh"><h2 id="tdDl">Deadlines</h2><a data-qa="deadline">Calculate a deadline</a></div>
+        <section class="box" data-card="deadlines" aria-labelledby="tdDl"><div class="bh"><h2 id="tdDl">Deadlines</h2><a data-qa="deadline">Calculate a deadline</a></div>
           <ul style="list-style:none;margin:0;padding:0">${dls.map(dlRow).join("") || `<li class="empty">No deadlines in the next two weeks.</li>`}</ul></section>
-        <section class="box" aria-labelledby="tdMail"><div class="bh"><h2 id="tdMail">New from court email</h2><a data-go="inbox">Open court mail</a></div>
+        <section class="box" data-card="mail" aria-labelledby="tdMail"><div class="bh"><h2 id="tdMail">New from court email</h2><a data-go="inbox">Open court mail</a></div>
           <ul style="list-style:none;margin:0;padding:0">${mail.map(mailRow).join("") || `<li class="empty">No new court email.</li>`}</ul></section>
-        <section class="box" aria-labelledby="tdNext"><div class="bh"><h2 id="tdNext">Next 14 days</h2><a data-go="calendar">Open calendar</a></div>
+        <section class="box" data-card="next" aria-labelledby="tdNext"><div class="bh"><h2 id="tdNext">Next 14 days</h2><a data-go="calendar">Open calendar</a></div>
           ${Object.entries(byDay).map(([day, items]) => `<div class="dayh">${day === t ? "Today" : esc(niceDate(day))}</div><div class="dayb">${items.map(i => itemRow(i)).join("")}</div>`).join("") || `<div class="empty">Nothing else on the calendar for the next two weeks.</div>`}</section>
       </div><div class="cside">
-        ${isLawyer() ? timerCard(cs) : ""}
-        <section class="box" aria-labelledby="tdTasks"><div class="bh"><h2 id="tdTasks">${mine ? "My tasks" : "Tasks due this week"}</h2><a data-go="tasks">All tasks</a></div>
+        ${isLawyer() && !hid.has("timer") ? timerCard(cs) : ""}
+        <section class="box" data-card="tasks" aria-labelledby="tdTasks"><div class="bh"><h2 id="tdTasks">${mine ? "My tasks" : "Tasks due this week"}</h2><a data-go="tasks">All tasks</a></div>
           ${d.tasksDue.slice(0, 8).map(x => { const late = x.due_date && d10(x.due_date) < t; return `<label class="tk"><input type="checkbox" data-task="${x.id}"><span>${esc(x.title)}<small${late ? ' style="color:var(--bad);font-weight:600"' : ""}>${x.cause_no ? esc(String(x.style || x.cause_no).slice(0, 44)) + " · " : ""}${late ? "Overdue · " : ""}${x.due_date ? esc(niceDate(x.due_date)) : ""}</small></span></label>`; }).join("") || `<div class="empty">No tasks due this week.</div>`}
           ${d.tasksDue.length > 8 ? `<div class="empty"><a data-go="tasks">${d.tasksDue.length - 8} more due this week</a></div>` : ""}
           <div style="padding:12px 18px;border-top:1px solid var(--line2)"><button type="button" class="btn sm ghost" data-qa="task">${ic("plus", 16, 2)}Add task</button></div></section>
-        <section class="box" aria-labelledby="tdGl"><div class="bh"><h2 id="tdGl">At a glance</h2>${isLawyer() && d.hoursToday ? `<span class="mute">${d.hoursToday} h logged today</span>` : ""}</div>
+        <section class="box" data-card="glance" aria-labelledby="tdGl"><div class="bh"><h2 id="tdGl">At a glance</h2>${isLawyer() && d.hoursToday ? `<span class="mute">${d.hoursToday} h logged today</span>` : ""}</div>
           <div class="glance">${gl.map(([k, v, g]) => `<button type="button" data-go="${g}"><span>${k}</span><b>${esc(String(v))}</b></button>`).join("")}</div></section>
-        <section class="box" aria-labelledby="tdLoad"><div class="bh"><h2 id="tdLoad">Open cases by county</h2></div><div style="padding:0 18px 12px">${bars(d.byCounty)}
+        <section class="box" data-card="caseload" aria-labelledby="tdLoad"><div class="bh"><h2 id="tdLoad">Open cases by county</h2></div><div style="padding:0 18px 12px">${bars(d.byCounty)}
           <details style="margin-top:6px"><summary class="mute">By court</summary>${bars(d.byCourt)}</details></div></section>
       </div></div>`;
+    $$("#app [data-card]").forEach(el => { if (hid.has(el.dataset.card)) el.remove(); });
+    if (!$("#app .cmain").children.length && !$("#app .cside").children.length) $("#app .cmain").innerHTML = `<div class="card mute">Everything is hidden. Tap Customize to choose what you see here.</div>`;
+    $("#tdCust").onclick = () => openSheet("Choose what you see on Today", `<p class="mute" style="margin:0">Saved to your sign-in, so it's the same on your phone and computer.</p>
+      <div style="display:flex;flex-direction:column">${TODAY_CARDS.filter(([k]) => k !== "timer" || isLawyer()).map(([k, v]) => `<label class="ck" style="margin:0;padding:6px 0;border-top:1px solid var(--line2)"><input type="checkbox" data-tc="${k}"${hid.has(k) ? "" : " checked"}>${v}</label>`).join("")}</div>
+      <div class="row"><button type="button" class="btn" id="tcSave" style="flex:1">Save</button><button type="button" class="btn ghost" id="tcAll">Show all</button></div>`, sh => {
+      sh.querySelector("#tcAll").onclick = () => sh.querySelectorAll("[data-tc]").forEach(c => c.checked = true);
+      sh.querySelector("#tcSave").onclick = async () => { const today_hidden = [...sh.querySelectorAll("[data-tc]")].filter(c => !c.checked).map(c => c.dataset.tc);
+        try { const x = await api("/api/me/prefs", { method: "PUT", body: { today_hidden } }); me.prefs = x.prefs; closeSheet(); toast("Today updated"); todayView(); } catch (e) { fail(e); } };
+    });
     $$("#app [data-go]").forEach(b => b.onclick = e => { e.preventDefault(); go(b.dataset.go); });
     $$("#app [data-qa]").forEach(b => b.onclick = e => { e.preventDefault(); quickAdd(b.dataset.qa); });
     $$("#app [data-case]").forEach(a => a.onclick = () => caseHub(+a.dataset.case));
@@ -142,6 +155,81 @@
       <div class="b"><span class="h">${esc(i.title)}</span><div class="m"><span class="tag ${cls}">${word}</span>${i.src === "court" ? `<span>from court record</span>` : ""}${i.done ? `<span class="tag g">Done</span>` : ""}${i.cite ? `<span class="tag k">${esc(i.cite)}</span>` : ""}
         ${i.case && !o.noCase ? caseLink(i.case) : ""}${i.who && pf.who === "firm" ? `<span>${esc(i.who)}</span>` : ""}</div></div>${confirmBit(i)}</div>`;
   }
+
+  // ===================== DASHBOARD (firm view for admins, partners, managers and solo; "My cases" for everyone) =====================
+  const dash = { scope: null, attorney: "" };
+  const short$ = n => { n = Number(n || 0); return n >= 1e6 ? "$" + (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M" : n >= 1e4 ? "$" + (n / 1e3).toFixed(1).replace(/\.0$/, "") + "K" : usd(n).replace(/\.00$/, ""); };
+  const niceMax = v => { if (v <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); const f = v / p; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p; };
+  function delta(cur, prev, money) {
+    if (!prev) return cur ? `<span class="mute">none last month</span>` : "";
+    const d = cur - prev, pct = Math.round(d / prev * 100);
+    if (!pct) return `<span class="mute">same as last month</span>`;
+    return `<span class="dl ${d > 0 ? "up" : "down"}">${d > 0 ? "▲" : "▼"} ${Math.abs(pct)}%</span> <span class="mute">vs last month</span>`;
+  }
+  function columns(rows, o) {
+    const vals = rows.map(o.value), top = niceMax(Math.max(...vals)), last = rows.length - 1;
+    return `<figure class="cchart"><figcaption class="sr">${esc(o.title)}</figcaption>
+      <div class="cwrap"><div class="cy" aria-hidden="true"><span>${o.tick(top)}</span><span>${o.tick(top / 2)}</span><span>0</span></div>
+      <div class="cplot">${rows.map((r, i) => `<div class="ccol" tabindex="0" aria-label="${esc(o.label(r))}: ${esc(o.fmt(vals[i]))}">
+        ${i === last && vals[i] ? `<span class="ccap" style="bottom:calc(${vals[i] / top * 100}% + 4px)">${esc(o.fmt(vals[i]))}</span>` : ""}
+        <span class="cbar" style="height:${vals[i] / top * 100}%"></span><span class="ctip" role="tooltip">${esc(o.label(r))}<b>${esc(o.fmt(vals[i]))}</b></span></div>`).join("")}</div></div>
+      <div class="cx" aria-hidden="true">${rows.map(r => `<span>${esc(o.axis(r))}</span>`).join("")}</div>
+      <details class="ctable"><summary>Show as table</summary><table><thead><tr><th scope="col">${esc(o.col1)}</th><th scope="col">${esc(o.col2)}</th></tr></thead><tbody>${rows.map((r, i) => `<tr><td>${esc(o.label(r))}</td><td>${esc(o.fmt(vals[i]))}</td></tr>`).join("")}</tbody></table></details></figure>`;
+  }
+  const hbars = rows => { const mx = Math.max(1, ...rows.map(r => r.n)); return rows.map(r => `<div class="hb"><div class="row" style="justify-content:space-between;font-size:14px"><span>${esc(r.k)}</span><b>${r.n}</b></div><div class="hbt"><span style="width:${Math.max(2, Math.round(r.n / mx * 100))}%"></span></div></div>`).join("") || `<div class="mute">No open cases.</div>`; };
+  VIEWS.dashboard = async function dashboardView() {
+    if (!dash.scope) dash.scope = me.firm_dash ? "firm" : "mine";
+    $("#app").innerHTML = `<div class="card mute">Loading dashboard…</div>`;
+    const solo = me.firm_kind === "solo";
+    const ps = me.firm_dash && !solo ? await loadPeople().catch(() => []) : [];
+    let r; try { r = await api("/api/reports?" + new URLSearchParams({ scope: dash.scope, attorney: dash.attorney })); } catch (e) { return fail(e); }
+    const T = r.tiles, firm = r.scope === "firm", money = isLawyer();
+    const attName = r.attorney ? (ps.find(x => x.id === r.attorney) || {}).name || "Attorney" : "";
+    const title = solo ? "My practice" : firm ? (attName ? attName : "Firm dashboard") : "My dashboard";
+    const month = new Date(r.today + "T12:00:00").toLocaleDateString("en-US", { month: "long", year: "numeric" });
+    const tile = (label, value, sub, go, warn) => `<button type="button" class="tile${warn ? " warn" : ""}" ${go ? `data-go="${go}"` : "disabled"}><span class="tl">${label}</span><span class="tv">${value}</span>${sub ? `<span class="ts">${sub}</span>` : ""}</button>`;
+    const tiles = [
+      tile("Open cases", T.open, `${T.newThisMonth} new this month`, "cases"),
+      tile("Court dates, next 7 days", T.court7, "", "calendar"),
+      tile("Overdue deadlines", T.overdueDeadlines, T.overdueDeadlines ? "need attention" : "all clear", "calendar", T.overdueDeadlines > 0),
+      tile("Overdue tasks", T.overdueTasks, T.overdueTasks ? "need attention" : "all clear", "tasks", T.overdueTasks > 0),
+      tile("Hours this month", T.hours, delta(T.hours, T.hoursPrev), money ? "billing" : "")];
+    if (money) tiles.push(tile("Unbilled", short$(T.unbilled), "time not yet invoiced", "billing"), tile("Outstanding", short$(T.outstanding), `${T.outstandingCount} open invoice${T.outstandingCount === 1 ? "" : "s"}`, "billing"),
+      tile("Collected this month", short$(T.collected), delta(T.collected, T.collectedPrev, true), "billing"));
+    if (money && T.trust != null) tiles.push(tile("Trust held", short$(T.trust), "all clients", "trust"));
+    const wkLbl = w => new Date(w + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    const moLbl = m => new Date(m + "T12:00:00").toLocaleDateString("en-US", { month: "short" });
+    $("#app").innerHTML = `
+      <div class="ph"><div><div class="eyebrow">${esc(month)}${firm && !attName && !solo ? " · every attorney" : ""}</div><h1 class="pt">${esc(title)}</h1></div>
+        ${me.firm_dash && !solo ? `<div class="row" id="dashF"><div class="seg" role="group" aria-label="Show"><button type="button" data-scope="firm" aria-pressed="${firm}">Firm</button><button type="button" data-scope="mine" aria-pressed="${!firm}">My cases</button></div>
+          ${firm ? `<select id="dashAtt" aria-label="Attorney"><option value="">Every attorney</option>${peopleOptions(ps.filter(x => x.role !== "paralegal"), r.attorney)}</select>` : ""}</div>` : ""}</div>
+      <div class="tiles">${tiles.join("")}</div>
+      <div class="cols"><div class="cmain">
+        <section class="box"><div class="bh"><h2>Hours logged by week</h2><span class="mute">${firm && !attName ? "everyone" : attName ? esc(attName) : "mine"}</span></div><div style="padding:4px 18px 16px">
+          ${columns(r.hoursByWeek, { title: "Hours logged by week", value: x => x.h, label: x => "Week of " + wkLbl(x.wk), axis: x => wkLbl(x.wk), fmt: v => `${v} h`, tick: v => String(Math.round(v * 10) / 10), col1: "Week", col2: "Hours" })}</div></section>
+        ${money ? `<section class="box"><div class="bh"><h2>Collected by month</h2></div><div style="padding:4px 18px 16px">
+          ${columns(r.collectedByMonth, { title: "Collected by month", value: x => x.v, label: x => new Date(x.mo + "T12:00:00").toLocaleDateString("en-US", { month: "long", year: "numeric" }), axis: x => moLbl(x.mo), fmt: v => usd(v), tick: v => short$(v), col1: "Month", col2: "Collected" })}</div></section>` : ""}
+        ${r.byAttorney ? `<section class="box"><div class="bh"><h2>By attorney</h2><span class="mute">this month</span></div><div class="atts">${r.byAttorney.map(a => `<div class="att">
+          <div class="row" style="justify-content:space-between"><b>${esc(a.name)}</b><span class="tag k">${esc(a.role)}</span></div>
+          <dl><div><dt>Open cases</dt><dd>${a.open}</dd></div><div><dt>Hours</dt><dd>${a.hours}</dd></div>${money ? `<div><dt>Unbilled</dt><dd>${short$(a.unbilled)}</dd></div><div><dt>Outstanding</dt><dd>${short$(a.outstanding)}</dd></div><div><dt>Collected</dt><dd>${short$(a.collected)}</dd></div>` : ""}
+          <div><dt>Overdue</dt><dd${a.overdueDl + a.overdueTasks ? ' class="bad"' : ""}>${a.overdueDl} date${a.overdueDl === 1 ? "" : "s"} · ${a.overdueTasks} task${a.overdueTasks === 1 ? "" : "s"}</dd></div></dl>
+          <button type="button" class="btn sm ghost" data-att="${a.id}">Open ${esc(a.name.split(" ")[0])}'s dashboard</button></div>`).join("")}</div></section>` : ""}
+      </div><div class="cside">
+        <section class="box"><div class="bh"><h2>Needs attention</h2></div>
+          ${r.attention.deadlines.map(i => `<div class="li"><div class="body"><span class="lbl bad">Overdue · ${esc(niceDate(i.date))}</span><span class="tt">${esc(i.title)}</span><div class="meta">${i.cite ? `<span class="tag k">${esc(i.cite)}</span>` : ""}${i.case ? caseLink(i.case) : ""}</div></div></div>`).join("")}
+          ${r.attention.tasks.map(x => `<div class="li"><div class="body"><span class="lbl bad">Task overdue · ${esc(niceDate(x.due_date))}</span><span class="tt">${esc(x.title)}</span><div class="meta">${x.style || x.cause_no ? `<span>${esc(String(x.style || x.cause_no).slice(0, 50))}</span>` : ""}${firm && x.who ? `<span>${esc(x.who)}</span>` : ""}</div></div></div>`).join("")}
+          ${!r.attention.deadlines.length && !r.attention.tasks.length ? `<div class="empty">Nothing overdue.</div>` : ""}</section>
+        <section class="box"><div class="bh"><h2>Court, next 7 days</h2><a data-go="calendar">Calendar</a></div>
+          ${r.next7.map(i => `<div class="li"><div class="body"><span class="lbl">${esc(niceDate(i.date))}${i.time ? " · " + esc(i.time) : ""}</span><span class="tt">${esc(i.title)}</span>${i.case ? `<div class="meta">${caseLink(i.case)}</div>` : ""}</div></div>`).join("") || `<div class="empty">No court dates this week.</div>`}</section>
+        <section class="box"><div class="bh"><h2>Open cases by type</h2></div><div style="padding:0 18px 12px">${hbars(r.byType)}</div></section>
+        <section class="box"><div class="bh"><h2>Open cases by county</h2></div><div style="padding:0 18px 12px">${hbars(r.byCounty)}</div></section>
+      </div></div>`;
+    $$("#app [data-go]").forEach(b => b.onclick = e => { e.preventDefault(); go(b.dataset.go); });
+    $$("#app [data-case]").forEach(a => a.onclick = () => caseHub(+a.dataset.case));
+    $$("#dashF [data-scope]").forEach(b => b.onclick = () => { dash.scope = b.dataset.scope; dash.attorney = ""; dashboardView(); });
+    if ($("#dashAtt")) $("#dashAtt").onchange = e => { dash.attorney = e.target.value; dashboardView(); };
+    $$("#app [data-att]").forEach(b => b.onclick = () => { dash.attorney = b.dataset.att; dashboardView(); window.scrollTo(0, 0); });
+  };
 
   // ===================== CALENDAR (+ Texas deadline calculator + feed) =====================
   const cal = { range: "upcoming" };

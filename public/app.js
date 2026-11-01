@@ -26,7 +26,10 @@ function authView(mode = "login", msg = "") {
   const signup = mode === "signup";
   $("#app").innerHTML = `<div class="narrow card"><h2>${signup ? "Create firm account" : "Attorney sign in"}</h2>
    <form id="f">
-   ${signup ? `<label>Firm name</label><input name="firm" required><br><br>
+   ${signup ? `<fieldset style="border:0;padding:0;margin:0 0 12px"><legend style="font-size:12px;color:var(--mute);font-weight:500;margin-bottom:6px;padding:0">How do you practice?</legend>
+     <div class="row" style="gap:8px"><label class="ck chipr"><input type="radio" name="kind" value="solo" checked>Solo attorney</label><label class="ck chipr"><input type="radio" name="kind" value="firm">Law firm</label></div>
+     <p class="mute" style="margin:4px 0 0">Solo gets everything for one attorney. A firm adds partners, attorneys and staff with their own sign-ins.</p></fieldset>
+   <label id="firmLbl">Practice name (optional)</label><input name="firm" id="firmIn" placeholder="Law Office of …"><br><br>
    <label>Your full name</label><input name="name" required><br><br>
    <label>Texas Bar # (8 digits)</label><input name="bar" inputmode="numeric" pattern="\\d{8}" required><br><br>
    <label>Free-time code (optional)</label><input name="code" value="${esc(new URLSearchParams(location.search).get("code") || "")}" placeholder="TXC-30D-…"><br><br>` : ""}
@@ -37,6 +40,7 @@ function authView(mode = "login", msg = "") {
    ${signup ? `<p class="mute" style="text-align:center">Every new firm starts with a free 14-day trial.</p>` : ""}
    <p class="mute" style="text-align:center"><a class="link" id="sw">${signup ? "Have an account? Sign in" : "New firm? Create an account"}</a></p></div>`;
   $("#sw").onclick = () => authView(signup ? "login" : "signup");
+  $$("[name=kind]").forEach(r => r.onchange = () => { const solo = $("[name=kind]:checked").value === "solo"; $("#firmLbl").textContent = solo ? "Practice name (optional)" : "Firm name"; $("#firmIn").required = !solo; $("#firmIn").placeholder = solo ? "Law Office of …" : ""; });
   $("#f").onsubmit = async e => {
     e.preventDefault();
     const b = Object.fromEntries(new FormData(e.target));
@@ -71,6 +75,7 @@ function changePwView(forced) {
 // ---------------- shell ----------------
 const ICON = {
   today: '<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4M9 14.5l2 2 4-4"/>',
+  dashboard: '<path d="M4 20h16M6.5 16.5V11M11.5 16.5V5.5M16.5 16.5v-8"/>',
   cases: '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M3 12.5h18"/>',
   calendar: '<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/>',
   inbox: '<path d="M3 13l2.5-7.5A1.5 1.5 0 0 1 6.9 4.5h10.2a1.5 1.5 0 0 1 1.4 1L21 13v5.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/><path d="M3 13h5l1.5 2.5h5L16 13h5"/>',
@@ -98,7 +103,7 @@ const ICON = {
 const ic = (k, s = 18, w = 1.75) => `<svg aria-hidden="true" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round">${ICON[k] || ""}</svg>`;
 const initials = n => String(n || "").split(/\s+/).filter(Boolean).slice(0, 2).map(x => x[0].toUpperCase()).join("") || "?";
 function navGroups() {
-  const g = [["Practice", [["today", "Today"], ["cases", "Cases"], ["calendar", "Calendar"], ["inbox", "Court mail"], ["clients", "Clients"], ["tasks", "Tasks"]]]];
+  const g = [["Practice", [["today", "Today"], ["dashboard", "Dashboard"], ["cases", "Cases"], ["calendar", "Calendar"], ["inbox", "Court mail"], ["clients", "Clients"], ["tasks", "Tasks"]]]];
   const money = []; if (me.role !== "paralegal") money.push(["billing", "Billing"]); if (me.trust_access) money.push(["trust", "Trust"]);
   if (money.length) g.push(["Money", money]);
   g.push(["Research", [["law", "Case law"], ["saved", "Saved"]]]);
@@ -127,7 +132,7 @@ function renderNav() {
   if (!me) return;
   const badge = k => k === "inbox" && inboxUnread ? `<span class="badge">${inboxUnread}</span>` : "";
   const item = ([k, v]) => `<a href="#${k}" data-t="${k}" class="ni${tab === k ? " on" : ""}"${tab === k ? ' aria-current="page"' : ""}>${ic(k)}<span>${v}</span>${badge(k)}</a>`;
-  const role = me.role === "admin" ? "Firm admin" : me.role === "manager" ? "Manager" : me.role === "paralegal" ? "Paralegal" : "Attorney";
+  const role = me.firm_kind === "solo" ? "Solo attorney" : ROLE_LBL[me.role] || "Attorney";
   $("#side").innerHTML = (me.firm_logo ? `<div class="brand withlogo"><span class="blogo"><img src="${esc(me.firm_logo)}" alt=""></span><span class="bt"><b>${esc(me.firm_name || "")}</b><small>TX Case Desk</small></span></div>`
     : `<div class="brand"><span class="mark" aria-hidden="true">TX</span><span><b>TX Case Desk</b><small>${esc(me.firm_name || "")}</small></span></div>`) + `
     <nav aria-label="Main" style="display:flex;flex-direction:column;gap:18px">${navGroups().map(([h, items]) => `<div class="ng"><div class="nh">${h}</div>${items.map(item).join("")}</div>`).join("")}</nav>
@@ -427,7 +432,7 @@ async function casesView() {
   <div class="card"><div class="mute">Your counties</div><div style="font-weight:600">${esc(me.counties.join(", ") || "None selected")}</div>
    <div class="mute" style="margin-top:4px">Auto-pull: connect under <a class="link" id="goCourt">Court Logins</a> (live: ${esc(Object.entries(META.connectors).filter(([, v]) => v.status !== "blocked").map(([k]) => k).join(", ") || "none right now — use re:SearchTX alerts")}). Other counties: add cases below or import a CSV.</div></div>
   <div class="card"><div class="grid">
-   <div><label>Show</label><select id="v"><option value="mine">${me.sees_firm ? "My cases" : "My cases (and cases I'm on)"}</option>${me.sees_firm ? `<option value="firm">Whole firm (my counties)</option>` : ""}<option value="tracked">Tracked cases</option><option value="watched">Watching court dates</option><option value="alerts">Alerts (dates, filings, case law)</option></select></div>
+   <div><label>Show</label><select id="v"><option value="mine">${me.sees_firm ? "My cases" : "My cases (and cases I'm on)"}</option>${me.sees_firm && me.firm_kind !== "solo" ? `<option value="firm">Whole firm (my counties)</option>` : ""}<option value="tracked">Tracked cases</option><option value="watched">Watching court dates</option><option value="alerts">Alerts (dates, filings, case law)</option></select></div>
    ${me.role === "admin" ? `<div><label>Attorney</label><select id="af2"><option value="">All attorneys</option>${(firmUsers || []).filter(u => u.role !== "paralegal").map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("")}</select></div>` : ""}
    <div><label>County</label><select id="cf"><option value="">All my counties</option>${me.counties.map(c => `<option>${esc(c)}</option>`).join("")}</select></div>
    <div><label>Case type</label><select id="tf"><option value="">All types</option>${TYPES.map(t => `<option>${t}</option>`).join("")}</select></div></div></div>
@@ -697,7 +702,8 @@ async function firmView() {
     <div style="margin-top:4px;font-size:14px">${esc(accessSummary(u, us))}</div>
     ${u.id !== me.id ? `<details style="margin-top:6px" data-acc="${u.id}"><summary class="mute">Change role and access</summary>${accessFields(u, us, "u" + u.id)}<div class="err"></div><button type="button" class="btn sm" data-a="acc">Save</button></details>` : ""}
     ${u.id !== me.id ? `<div class="row" style="margin-top:6px"><button class="btn sm ghost" data-a="reset">Reset password & 2FA</button><button class="btn sm ${u.active ? "danger" : "ghost"}" data-a="toggle">${u.active ? "Disable" : "Enable"}</button></div>` : ""}</div>`).join("")}</div>
-   <div class="card" data-fs="people"><h2>Add a seat</h2><p class="mute" style="margin-top:0">Each person gets their own sign-in. You set them up here; they get a temporary password, then set their own password and two-factor at first sign-in.</p><form id="af"><div class="grid"><div><label>Name</label><input name="name" required></div><div><label>Email</label><input name="email" type="email" required></div>
+   ${me.firm_kind === "solo" ? `<div class="card" data-fs="people"><h2>Solo practice</h2><p style="margin-top:0">It's just you, with every feature: the full dashboard, billing, trust and settings.</p><p class="mute">Bringing on a partner, attorney or staff? Change <b>Practice type</b> to <b>Law firm</b> under Firm profile, then add their sign-ins here.</p></div>` : ""}
+   <div class="card" data-fs="${me.firm_kind === "solo" ? "never" : "people"}"><h2>Add a seat</h2><p class="mute" style="margin-top:0">Each person gets their own sign-in. You set them up here; they get a temporary password, then set their own password and two-factor at first sign-in.</p><form id="af"><div class="grid"><div><label>Name</label><input name="name" required></div><div><label>Email</label><input name="email" type="email" required></div>
    <div><label>Bar # (attorneys)</label><input name="bar" inputmode="numeric"></div></div><div id="newAcc">${accessFields({ id: 0, role: "attorney", access: "own", works_with: [], trust_access: false }, us, "ns")}</div>
    <div class="err" id="aerr"></div><button class="btn">Add seat</button></form><div id="temp"></div></div><div id="firmExtras"></div>`;
   const setFs = k => { fsSec = k; $$("#app [data-fs]").forEach(s => s.hidden = s.dataset.fs !== k); $$("[data-fs-go]").forEach(b => b.dataset.fsGo === k ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")); $("#fsSel").value = k; };
@@ -744,16 +750,16 @@ function subLine(sub) {
 
 // ---------------- account ----------------
 // ---------------- roles and access (admin sets them per person) ----------------
-const ROLE_LBL = { admin: "Firm admin", manager: "Manager", attorney: "Attorney", paralegal: "Paralegal" };
+const ROLE_LBL = { admin: "Firm admin", partner: "Partner", manager: "Manager", attorney: "Attorney", paralegal: "Paralegal" };
 const ACC_LBL = { own: "Own cases + cases they're added to", team: "Cases of the attorneys they work with", firm: "Whole firm" };
 function accessSummary(u, us) {
-  const all = u.role === "admin" || u.role === "manager" || u.access === "firm";
+  const all = ["admin", "partner", "manager"].includes(u.role) || u.access === "firm";
   const ww = (u.works_with || []).map(id => (us.find(x => x.id === id) || {}).name).filter(Boolean);
   const sees = all ? "sees the whole firm" : u.access === "team" ? (ww.length ? `sees cases of ${ww.join(", ")}` : "sees no cases yet — pick who they work with") : "sees own cases and cases they're added to";
-  return `${ROLE_LBL[u.role] || u.role} · ${sees}${u.role === "admin" || (u.trust_access && u.role !== "paralegal") ? " · trust ledger" : ""}`;
+  return `${ROLE_LBL[u.role] || u.role} · ${sees}${["admin", "partner", "manager"].includes(u.role) ? " · firm dashboard" : ""}${u.role === "admin" || (u.trust_access && u.role !== "paralegal") ? " · trust ledger" : ""}`;
 }
 function accessFields(u, us, pre) {
-  const atts = us.filter(x => x.active && x.id !== u.id && ["admin", "manager", "attorney"].includes(x.role));
+  const atts = us.filter(x => x.active && x.id !== u.id && ["admin", "partner", "manager", "attorney"].includes(x.role));
   return `<div class="grid" style="margin-top:8px">
     <div><label for="${pre}r">Role</label><select id="${pre}r" data-f="role">${Object.entries(ROLE_LBL).map(([k, v]) => `<option value="${k}"${u.role === k ? " selected" : ""}>${v}</option>`).join("")}</select></div>
     <div class="full" data-show="access"><label for="${pre}a">Sees</label><select id="${pre}a" data-f="access">${Object.entries(ACC_LBL).map(([k, v]) => `<option value="${k}"${(u.access || "own") === k ? " selected" : ""}>${v}</option>`).join("")}</select></div>
@@ -782,6 +788,7 @@ function profileCard(f) {
         <input type="file" id="logoUp" accept="image/png,image/jpeg" hidden><span class="mute">PNG or JPG, up to 1 MB. A wide logo on a white or clear background looks best.</span><div class="err" id="logoErr"></div></div></div>
     <form id="fpF" style="margin-top:14px"><div class="grid">
       <div class="full"><label for="fpName">Firm name</label><input id="fpName" name="name" required value="${esc(f.name || "")}"></div>
+      <div><label for="fpKind">Practice type</label><select id="fpKind"><option value="solo"${f.kind === "solo" ? " selected" : ""}>Solo attorney</option><option value="firm"${f.kind !== "solo" ? " selected" : ""}>Law firm</option></select></div>
       <div class="full"><label for="fpAddr">Office address</label><textarea id="fpAddr" name="address" rows="3" style="min-height:84px" placeholder="123 Main St, Suite 200&#10;McAllen, TX 78501">${esc(f.address || "")}</textarea></div>
       <div><label for="fpPh">Main phone</label><input id="fpPh" name="phone" type="tel" value="${esc(f.phone || "")}"></div>
       <div><label for="fpFax">Fax</label><input id="fpFax" name="fax" type="tel" value="${esc(f.fax || "")}"></div>
@@ -790,6 +797,7 @@ function profileCard(f) {
       <div class="err"></div><button class="btn">Save firm profile</button></form></div>`;
 }
 function wireProfileCard() {
+  $("#fpKind").onchange = async e => { try { await api("/api/firm/kind", { method: "PUT", body: { kind: e.target.value } }); me.firm_kind = e.target.value; me.firm_dash = me.firm_dash || e.target.value === "solo"; renderNav(); toast(e.target.value === "solo" ? "Set up as a solo practice" : "Set up as a law firm"); firmView(); } catch (x) { e.target.value = me.firm_kind; fail(x); } };
   $("#fpF").onsubmit = async e => { e.preventDefault(); const f = e.target;
     try { const r = await api("/api/firm/profile", { method: "PUT", body: Object.fromEntries(new FormData(f)) }); me.firm_name = r.profile.name; renderNav(); toast("Firm profile saved"); }
     catch (x) { f.querySelector(".err").textContent = x.message; } };
@@ -811,7 +819,7 @@ function sigLines(u, f) {
     "By: /s/ " + (u.name || ""), u.name, u.title, "State Bar No. " + (u.bar_number || "________"), u.phone && u.phone !== f.phone && "Direct: " + u.phone, u.doc_email || me.email].filter(x => x !== undefined && x !== null && x !== false);
 }
 function accountView() {
-  const role = me.role === "admin" ? "Firm admin" : me.role === "manager" ? "Manager" : me.role === "paralegal" ? "Paralegal" : "Attorney";
+  const role = me.firm_kind === "solo" ? "Solo attorney" : ROLE_LBL[me.role] || "Attorney";
   $("#app").innerHTML = `<div class="card"><h2>My profile</h2><p class="mute" style="margin-top:0">Used in your signature block on Word drafts and letters.</p>
     <form id="mpF"><div class="grid">
       <div><label for="mpN">Full name</label><input id="mpN" name="name" required value="${esc(me.name)}"></div>

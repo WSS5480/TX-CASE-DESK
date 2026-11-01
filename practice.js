@@ -387,6 +387,73 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
       outstanding: money(outstanding.rows[0].v), outstandingCount: outstanding.rows[0].n, collected: money(collected.rows[0].v), trust: access.trustOk(req.user) ? money(trust.rows[0].v) : null, sees_firm: !lim });
   }));
 
+  // ===================== Dashboards =====================
+  // Firm view: admins, partners, managers (and a solo attorney) — every attorney's numbers, or one attorney's.
+  // My view: the cases this person works (lead, added to, or their attorneys' cases) and their own time.
+  R.get("/reports", requireAuth, wrap(async (req, res) => {
+    const firm = req.user.firm_id, t = today(), u = req.user;
+    const firmScope = req.query.scope === "firm" && access.firmDash(u);
+    const att = firmScope && +req.query.attorney ? +req.query.attorney : null;
+    const cp = [firm]; let cw = "c.firm_id=$1";
+    if (firmScope) { if (att) { cp.push(att); cw += ` AND c.user_id=$${cp.length}`; } }
+    else cw += " AND " + (access.seesFirm(u) ? access.ownCond(u, "c", cp) : access.caseCond(u, "c", cp));
+    const OPEN = "coalesce(c.status,'') !~* 'closed|dismissed|disposed'";
+    const caseIds = `SELECT c.id FROM cases c WHERE ${cw}`;
+    const tp = firmScope ? (att ? [firm, att] : [firm]) : [firm, u.id];
+    const tw = firmScope && !att ? "te.firm_id=$1" : "te.firm_id=$1 AND te.user_id=$2";
+    const invW = firmScope && !att ? "i.firm_id=$1" : `i.firm_id=$1 AND i.case_id IN (${caseIds})`;
+    const tkP = firmScope ? (att ? [firm, t, att] : [firm, t]) : [firm, t, u.id];
+    const tkW = `t.firm_id=$1 AND NOT t.done AND t.due_date < $2${tkP.length > 2 ? " AND t.assignee=$3" : ""}`;
+    const monthStart = t.slice(0, 8) + "01", prevStart = (() => { const d = new Date(monthStart + "T12:00:00Z"); d.setUTCMonth(d.getUTCMonth() - 1); return d.toISOString().slice(0, 10); })();
+    const wk = s => { const d = new Date(s + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); };
+    const weeks = Array.from({ length: 8 }, (_, i) => addDays(wk(t), -7 * (7 - i)));
+    const months = Array.from({ length: 6 }, (_, i) => { const d = new Date(monthStart + "T12:00:00Z"); d.setUTCMonth(d.getUTCMonth() - (5 - i)); return d.toISOString().slice(0, 10); });
+    const [open, newM, hrsM, hrsP, unbilled, outstanding, collM, collP, trust, overdueTasks, byType, byCounty, wkRows, moRows, taskList] = await Promise.all([
+      q(`SELECT count(*)::int n FROM cases c WHERE ${cw} AND ${OPEN}`, cp),
+      q(`SELECT count(*)::int n FROM cases c WHERE ${cw} AND c.created_at >= $${cp.length + 1}::date`, [...cp, monthStart]),
+      q(`SELECT coalesce(sum(minutes),0)::int m FROM time_entries te WHERE ${tw} AND te.on_date >= $${tp.length + 1}`, [...tp, monthStart]),
+      q(`SELECT coalesce(sum(minutes),0)::int m FROM time_entries te WHERE ${tw} AND te.on_date >= $${tp.length + 1} AND te.on_date < $${tp.length + 2}`, [...tp, prevStart, monthStart]),
+      q(`SELECT coalesce(sum(coalesce(te.amount, te.minutes/60.0*te.rate)),0) v FROM time_entries te WHERE ${tw} AND te.billable AND te.invoice_id IS NULL`, tp),
+      q(`SELECT coalesce(sum(total-paid),0) v, count(*)::int n FROM invoices i WHERE ${invW} AND i.status IN ('sent','draft') AND total>paid`, cp),
+      q(`SELECT coalesce(sum(p.amount),0) v FROM payments p JOIN invoices i ON i.id=p.invoice_id WHERE ${invW} AND p.on_date >= $${cp.length + 1}`, [...cp, monthStart]),
+      q(`SELECT coalesce(sum(p.amount),0) v FROM payments p JOIN invoices i ON i.id=p.invoice_id WHERE ${invW} AND p.on_date >= $${cp.length + 1} AND p.on_date < $${cp.length + 2}`, [...cp, prevStart, monthStart]),
+      access.trustOk(u) && (firmScope && !att || u.firm_kind === "solo") ? q("SELECT coalesce(sum(amount),0) v FROM trust_tx WHERE firm_id=$1", [firm]) : Promise.resolve(null),
+      q(`SELECT count(*)::int n FROM tasks t WHERE ${tkW}`, tkP),
+      q(`SELECT coalesce(nullif(c.case_type,''),'Type not set') k, count(*)::int n FROM cases c WHERE ${cw} AND ${OPEN} GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 8`, cp),
+      q(`SELECT c.county k, count(*)::int n FROM cases c WHERE ${cw} AND ${OPEN} GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 8`, cp),
+      q(`SELECT to_char(date_trunc('week', te.on_date), 'YYYY-MM-DD') wk, sum(minutes)::int m FROM time_entries te WHERE ${tw} AND te.on_date >= $${tp.length + 1} GROUP BY 1`, [...tp, weeks[0]]),
+      q(`SELECT to_char(date_trunc('month', p.on_date), 'YYYY-MM-DD') mo, sum(p.amount) v FROM payments p JOIN invoices i ON i.id=p.invoice_id WHERE ${invW} AND p.on_date >= $${cp.length + 1} GROUP BY 1`, [...cp, months[0]]),
+      q(`SELECT t.id, t.title, t.due_date, c.cause_no, c.style, u.name AS who FROM tasks t LEFT JOIN cases c ON c.id=t.case_id LEFT JOIN users u ON u.id=t.assignee WHERE ${tkW} ORDER BY t.due_date LIMIT 6`, tkP)
+    ]);
+    const calOpts = firmScope ? { userId: att } : access.seesFirm(u) ? { userId: u.id } : { viewer: u };
+    const overdueDl = (await calendarItems(firm, { from: addDays(t, -60), to: addDays(t, -1), ...calOpts })).filter(i => !i.done && i.kind === "deadline" && i.src === "event");
+    const next7 = (await calendarItems(firm, { from: t, to: addDays(t, 7), ...calOpts })).filter(i => !i.done && i.kind === "hearing");
+    const wm = Object.fromEntries(wkRows.rows.map(r => [r.wk, r.m])), mm = Object.fromEntries(moRows.rows.map(r => [r.mo, Number(r.v)]));
+    let byAttorney = null;
+    if (firmScope && !att) {
+      const [ppl, oc, hr, ub, os, cl, od, ot] = await Promise.all([
+        q("SELECT id, name, role FROM users WHERE firm_id=$1 AND active AND role <> 'paralegal' ORDER BY name", [firm]),
+        q(`SELECT c.user_id k, count(*)::int n FROM cases c WHERE c.firm_id=$1 AND ${OPEN} GROUP BY 1`, [firm]),
+        q("SELECT user_id k, sum(minutes)::int n FROM time_entries WHERE firm_id=$1 AND on_date >= $2 GROUP BY 1", [firm, monthStart]),
+        q("SELECT user_id k, sum(coalesce(amount, minutes/60.0*rate)) n FROM time_entries WHERE firm_id=$1 AND billable AND invoice_id IS NULL GROUP BY 1", [firm]),
+        q("SELECT c.user_id k, sum(i.total-i.paid) n FROM invoices i JOIN cases c ON c.id=i.case_id WHERE i.firm_id=$1 AND i.status IN ('sent','draft') AND i.total>i.paid GROUP BY 1", [firm]),
+        q("SELECT c.user_id k, sum(p.amount) n FROM payments p JOIN invoices i ON i.id=p.invoice_id JOIN cases c ON c.id=i.case_id WHERE p.firm_id=$1 AND p.on_date >= $2 GROUP BY 1", [firm, monthStart]),
+        q("SELECT coalesce(e.user_id, c.user_id) k, count(*)::int n FROM events e LEFT JOIN cases c ON c.id=e.case_id WHERE e.firm_id=$1 AND e.kind='deadline' AND NOT e.done AND e.on_date < $2 AND e.on_date >= $3 GROUP BY 1", [firm, t, addDays(t, -60)]),
+        q("SELECT assignee k, count(*)::int n FROM tasks WHERE firm_id=$1 AND NOT done AND due_date < $2 GROUP BY 1", [firm, t])
+      ]);
+      const m = r => Object.fromEntries(r.rows.map(x => [x.k, Number(x.n)]));
+      const [O, H, U, S, C, D, T] = [oc, hr, ub, os, cl, od, ot].map(m);
+      byAttorney = ppl.rows.map(x => ({ id: x.id, name: x.name, role: x.role, open: O[x.id] || 0, hours: Math.round((H[x.id] || 0) / 6) / 10, unbilled: money(U[x.id]), outstanding: money(S[x.id]), collected: money(C[x.id]), overdueDl: D[x.id] || 0, overdueTasks: T[x.id] || 0 }));
+    }
+    res.json({ scope: firmScope ? "firm" : "mine", attorney: att, today: t,
+      tiles: { open: open.rows[0].n, newThisMonth: newM.rows[0].n, hours: Math.round(hrsM.rows[0].m / 6) / 10, hoursPrev: Math.round(hrsP.rows[0].m / 6) / 10,
+        unbilled: money(unbilled.rows[0].v), outstanding: money(outstanding.rows[0].v), outstandingCount: outstanding.rows[0].n, collected: money(collM.rows[0].v), collectedPrev: money(collP.rows[0].v),
+        trust: trust ? money(trust.rows[0].v) : null, overdueDeadlines: overdueDl.length, overdueTasks: overdueTasks.rows[0].n, court7: next7.length },
+      hoursByWeek: weeks.map(w => ({ wk: w, h: Math.round((wm[w] || 0) / 6) / 10 })), collectedByMonth: months.map(mo => ({ mo, v: money(mm[mo]) })),
+      byType: byType.rows, byCounty: byCounty.rows, byAttorney,
+      attention: { deadlines: overdueDl.slice(0, 6), tasks: taskList.rows }, next7: next7.slice(0, 6) });
+  }));
+
   // ===================== Time & billing =====================
   async function rateFor(firmId, caseId, userId) {
     const c = caseId ? (await q("SELECT rate FROM cases WHERE id=$1 AND firm_id=$2", [caseId, firmId])).rows[0] : null;

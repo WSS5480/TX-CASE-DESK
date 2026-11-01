@@ -250,13 +250,15 @@ ALTER TABLE firms ADD COLUMN IF NOT EXISTS logo_token TEXT UNIQUE;      -- rando
 ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;                  -- attorney profile: shown in signature blocks
 ALTER TABLE users ADD COLUMN IF NOT EXISTS title TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS doc_email TEXT;
-ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;          -- roles: admin, manager, attorney, paralegal
-ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','manager','attorney','paralegal'));
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;          -- roles: admin, partner, manager, attorney, paralegal
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','partner','manager','attorney','paralegal'));
 ALTER TABLE users ADD COLUMN IF NOT EXISTS access TEXT;                 -- own | team | firm (admins and managers always see the firm)
 ALTER TABLE users ADD COLUMN IF NOT EXISTS works_with INT[] DEFAULT '{}';  -- attorneys whose cases a "team" person sees
 ALTER TABLE users ADD COLUMN IF NOT EXISTS trust_access BOOLEAN DEFAULT false;
 UPDATE users SET access = CASE WHEN role = 'attorney' THEN 'own' ELSE 'firm' END WHERE access IS NULL;
-UPDATE users SET trust_access = true WHERE role IN ('admin','manager') AND NOT trust_access;
+UPDATE users SET trust_access = true WHERE role = 'admin' AND NOT trust_access;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS prefs JSONB DEFAULT '{}';   -- per person: which cards show on Today
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'firm';     -- solo | firm
 CREATE TABLE IF NOT EXISTS case_team (                                   -- people added to a case beyond its lead attorney
   case_id INT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
   user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
