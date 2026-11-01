@@ -6,6 +6,7 @@ const crypto = require("crypto");
 const { q } = require("./db");
 const box = require("./crypto-box");
 const deadlines = require("./deadlines");
+const access = require("./access");
 
 const APP = () => (process.env.APP_URL || "https://tx-case-desk.onrender.com").replace(/\/$/, "");
 const tok = () => crypto.randomBytes(18).toString("base64url");
@@ -76,24 +77,31 @@ async function onCaseCreated(c, byUserId) {
 
 function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   const R = express.Router();
-  const caseOf = async (req, id) => (await q("SELECT * FROM cases WHERE id=$1 AND firm_id=$2", [+id, req.user.firm_id])).rows[0];
-  const contactOf = async (req, id) => (await q("SELECT * FROM contacts WHERE id=$1 AND firm_id=$2", [+id, req.user.firm_id])).rows[0];
+  // cases and contacts this person may see (access.js): admins/managers the whole firm, others their own + added cases
+  const caseOf = async (req, id) => { const pr = [+id, req.user.firm_id]; const cond = access.caseCond(req.user, "c", pr); return (await q(`SELECT c.* FROM cases c WHERE c.id=$1 AND c.firm_id=$2 AND ${cond}`, pr)).rows[0]; };
+  const contactCond = (u, alias, pr) => access.seesFirm(u) ? "TRUE" : `(NOT EXISTS (SELECT 1 FROM case_contacts x WHERE x.contact_id=${alias}.id) OR EXISTS (SELECT 1 FROM case_contacts x JOIN cases c ON c.id=x.case_id WHERE x.contact_id=${alias}.id AND ${access.caseCond(u, "c", pr)}))`;
+  const contactOf = async (req, id) => { const pr = [+id, req.user.firm_id]; const cond = contactCond(req.user, "ct", pr); return (await q(`SELECT ct.* FROM contacts ct WHERE ct.id=$1 AND ct.firm_id=$2 AND ${cond}`, pr)).rows[0]; };
+  const visibleCaseIds = (u, pr) => `(SELECT c.id FROM cases c WHERE c.firm_id=$1 AND ${access.caseCond(u, "c", pr)})`;
+  const trustOnly = (req, res, next) => access.trustOk(req.user) ? next() : res.status(403).json({ error: "Ask your firm admin for trust access." });
   const notPara = (req, res, next) => req.user.role === "paralegal" ? res.status(403).json({ error: "Attorneys and admins only" }) : next();
   const closedDays = async firmId => (await q("SELECT closed_days FROM firms WHERE id=$1", [firmId])).rows[0]?.closed_days || [];
 
   R.get("/firm/people", requireAuth, wrap(async (req, res) => res.json({ people: (await q("SELECT id, name, role, rate FROM users WHERE firm_id=$1 AND active ORDER BY name", [req.user.firm_id])).rows })));
 
   // ===================== Calendar =====================
-  async function calendarItems(firmId, { from, to, userId, caseId, county }) {
+  async function calendarItems(firmId, { from, to, userId, caseId, county, viewer }) {
+    const lim = viewer && !access.seesFirm(viewer);
     const p = [firmId, from, to]; let w = "e.firm_id=$1 AND e.on_date BETWEEN $2 AND $3";
-    if (userId) { p.push(userId); w += ` AND (e.user_id=$${p.length} OR c.user_id=$${p.length})`; }
+    if (lim) { p.push(viewer.id); const me = p.length; w += ` AND (e.user_id=$${me} OR (e.case_id IS NOT NULL AND ${access.caseCond(viewer, "c", p)}))`; }
+    else if (userId) { p.push(userId); w += ` AND (e.user_id=$${p.length} OR c.user_id=$${p.length})`; }
     if (caseId) { p.push(caseId); w += ` AND e.case_id=$${p.length}`; }
     if (county) { p.push(county); w += ` AND c.county=$${p.length}`; }
     const ev = (await q(`SELECT e.*, c.cause_no, c.style, c.county, c.court, u.name AS who FROM events e LEFT JOIN cases c ON c.id=e.case_id LEFT JOIN users u ON u.id=COALESCE(e.user_id, c.user_id) WHERE ${w} ORDER BY e.on_date, e.at_time NULLS FIRST`, p)).rows
       .map(e => ({ id: e.id, src: "event", kind: e.kind, title: e.title, date: ds(e.on_date), time: e.at_time, done: e.done, cite: e.cite, rule: e.rule, confirmed: !!e.confirmed_at, notes: e.notes, location: e.location, who: e.who,
         case: e.case_id ? { id: e.case_id, cause_no: e.cause_no, style: e.style, county: e.county } : null }));
     const cp = [firmId]; let cw = "c.firm_id=$1 AND c.next_setting IS NOT NULL AND c.next_setting <> ''";
-    if (userId) { cp.push(userId); cw += ` AND c.user_id=$${cp.length}`; }
+    if (lim) cw += " AND " + access.caseCond(viewer, "c", cp);
+    else if (userId) { cp.push(userId); cw += ` AND c.user_id=$${cp.length}`; }
     if (caseId) { cp.push(caseId); cw += ` AND c.id=$${cp.length}`; }
     if (county) { cp.push(county); cw += ` AND c.county=$${cp.length}`; }
     const settings = (await q(`SELECT c.id, c.cause_no, c.style, c.county, c.court, c.next_setting, u.name AS who FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE ${cw}`, cp)).rows
@@ -105,7 +113,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   R.get("/calendar", requireAuth, wrap(async (req, res) => {
     const from = isDate(req.query.from) ? req.query.from : addDays(today(), -7), to = isDate(req.query.to) ? req.query.to : addDays(today(), 60);
     const userId = req.query.who === "firm" ? (+req.query.attorney || null) : req.user.id;
-    res.json({ items: await calendarItems(req.user.firm_id, { from, to, userId, caseId: +req.query.case_id || null, county: req.query.county || null }), from, to });
+    res.json({ items: await calendarItems(req.user.firm_id, { from, to, userId, caseId: +req.query.case_id || null, county: req.query.county || null, viewer: req.user }), from, to });
   }));
   const cleanEvent = b => ({ kind: ["hearing", "deadline", "meeting", "event"].includes(b.kind) ? b.kind : "event", title: clean(b.title, 200), on_date: isDate(b.on_date) ? b.on_date : null,
     at_time: clean(b.at_time, 20) || null, location: clean(b.location, 200) || null, notes: clean(b.notes, 2000) || null });
@@ -117,7 +125,10 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
       [req.user.firm_id, +req.body.case_id || null, +req.body.user_id || req.user.id, e.kind, e.title, e.on_date, e.at_time, e.location, e.notes, req.user.id]);
     res.json({ event: rows[0] });
   }));
+  const eventOk = async (req, id) => { const pr = [+id, req.user.firm_id, req.user.id]; const cond = access.caseCond(req.user, "c", pr);
+    return (await q(`SELECT e.id FROM events e LEFT JOIN cases c ON c.id=e.case_id WHERE e.id=$1 AND e.firm_id=$2 AND (e.user_id=$3 OR e.created_by=$3 OR (e.case_id IS NOT NULL AND ${cond}))`, pr)).rowCount > 0; };
   R.patch("/events/:id", requireAuth, wrap(async (req, res) => {
+    if (!(await eventOk(req, req.params.id))) return res.status(404).json({ error: "Not found" });
     const b = req.body || {}, sets = [], p = [+req.params.id, req.user.firm_id];
     const e = cleanEvent({ kind: b.kind || "event", ...b });
     for (const k of ["title", "on_date", "at_time", "location", "notes"]) if (b[k] !== undefined && (k !== "on_date" || e.on_date) && (k !== "title" || e.title)) { p.push(e[k]); sets.push(`${k}=$${p.length}`); }
@@ -128,7 +139,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     if (b.confirm && rowCount) await audit(req, "deadline_confirmed", { event: +req.params.id });
     res.json({ ok: rowCount > 0 });
   }));
-  R.delete("/events/:id", requireAuth, wrap(async (req, res) => { await q("DELETE FROM events WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true }); }));
+  R.delete("/events/:id", requireAuth, wrap(async (req, res) => { if (!(await eventOk(req, req.params.id))) return res.status(404).json({ error: "Not found" }); await q("DELETE FROM events WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true }); }));
 
   // ---- Texas deadline calculator
   R.get("/deadlines/rules", requireAuth, (req, res) => res.json({ rules: deadlines.list() }));
@@ -183,22 +194,26 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   const KINDS = ["client", "opposing", "witness", "other"];
   const cleanContact = b => ({ kind: KINDS.includes(b.kind) ? b.kind : "client", name: clean(b.name, 200), company: clean(b.company, 200) || null, email: clean(b.email, 200) || null,
     phone: clean(b.phone, 40) || null, address: clean(b.address, 400) || null, notes: clean(b.notes, 4000) || null });
-  async function conflicts(firmId, name, excludeId) {
+  async function conflicts(firmId, name, excludeId, viewer) {
     const words = String(name || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(w => w.length > 2 && !["llc", "inc", "the", "and", "corp", "company"].includes(w));
     if (!words.length) return [];
     const like = words.map(w => `%${w}%`);
-    const people = (await q(`SELECT ct.id, ct.name, ct.company, ct.kind, array_remove(array_agg(DISTINCT c.cause_no || ' · ' || coalesce(c.style,'') || ' (' || cc.role || ')'), NULL) AS cases
-      FROM contacts ct LEFT JOIN case_contacts cc ON cc.contact_id=ct.id LEFT JOIN cases c ON c.id=cc.case_id
+    const people = (await q(`SELECT ct.id, ct.name, ct.company, ct.kind, coalesce(json_agg(DISTINCT jsonb_build_object('id', c.id, 'label', c.cause_no || ' · ' || coalesce(c.style,'') || ' (' || cc.role || ')', 'role', cc.role, 'atty', u.name)) FILTER (WHERE c.id IS NOT NULL), '[]') AS cases
+      FROM contacts ct LEFT JOIN case_contacts cc ON cc.contact_id=ct.id LEFT JOIN cases c ON c.id=cc.case_id LEFT JOIN users u ON u.id=c.user_id
       WHERE ct.firm_id=$1 AND ($3::int IS NULL OR ct.id<>$3) AND (lower(ct.name) LIKE ANY($2) OR lower(coalesce(ct.company,'')) LIKE ANY($2)) GROUP BY ct.id LIMIT 25`, [firmId, like, excludeId || null])).rows;
-    const cases = (await q(`SELECT id, cause_no, style, county FROM cases WHERE firm_id=$1 AND lower(coalesce(style,'')) LIKE ANY($2) LIMIT 25`, [firmId, like])).rows;
-    return [...people.map(p => ({ type: "contact", id: p.id, name: p.name, company: p.company, kind: p.kind, cases: p.cases })),
-      ...cases.map(c => ({ type: "case", id: c.id, name: c.style, cause_no: c.cause_no, county: c.county }))];
+    const cases = (await q(`SELECT c.id, c.cause_no, c.style, c.county, u.name AS atty FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE c.firm_id=$1 AND lower(coalesce(c.style,'')) LIKE ANY($2) LIMIT 25`, [firmId, like])).rows;
+    let seen = null;
+    if (viewer && !access.seesFirm(viewer)) { const pr = [firmId]; seen = new Set((await q(`SELECT c.id FROM cases c WHERE c.firm_id=$1 AND ${access.caseCond(viewer, "c", pr)}`, pr)).rows.map(r => r.id)); }
+    const ok = id => !seen || seen.has(id), other = a => `A case of ${a || "another attorney"} — ask them`;
+    return [...people.map(p => ({ type: "contact", id: p.id, name: p.name, company: p.company, kind: p.kind, cases: p.cases.map(c => ok(c.id) ? c.label : `${other(c.atty)} (${c.role})`) })),
+      ...cases.map(c => ok(c.id) ? { type: "case", id: c.id, name: c.style, cause_no: c.cause_no, county: c.county } : { type: "case", id: null, name: c.style, cause_no: other(c.atty), county: c.county })];
   }
-  R.get("/conflicts", requireAuth, wrap(async (req, res) => res.json({ matches: await conflicts(req.user.firm_id, req.query.name) })));
+  R.get("/conflicts", requireAuth, wrap(async (req, res) => res.json({ matches: await conflicts(req.user.firm_id, req.query.name, null, req.user) })));
   R.get("/contacts", requireAuth, wrap(async (req, res) => {
     const p = [req.user.firm_id]; let w = "ct.firm_id=$1";
-    if (req.query.q) { p.push(`%${String(req.query.q).toLowerCase()}%`); w += ` AND (lower(ct.name) LIKE $2 OR lower(coalesce(ct.company,'')) LIKE $2 OR lower(coalesce(ct.email,'')) LIKE $2 OR coalesce(ct.phone,'') LIKE $2)`; }
+    if (req.query.q) { p.push(`%${String(req.query.q).toLowerCase()}%`); w += ` AND (lower(ct.name) LIKE $${p.length} OR lower(coalesce(ct.company,'')) LIKE $${p.length} OR lower(coalesce(ct.email,'')) LIKE $${p.length} OR coalesce(ct.phone,'') LIKE $${p.length})`; }
     if (KINDS.includes(req.query.kind)) { p.push(req.query.kind); w += ` AND ct.kind=$${p.length}`; }
+    w += " AND " + contactCond(req.user, "ct", p);
     const { rows } = await q(`SELECT ct.id, ct.kind, ct.name, ct.company, ct.email, ct.phone, count(cc.case_id)::int AS cases,
       coalesce((SELECT sum(amount) FROM trust_tx t WHERE t.contact_id=ct.id),0) AS trust
       FROM contacts ct LEFT JOIN case_contacts cc ON cc.contact_id=ct.id WHERE ${w} GROUP BY ct.id ORDER BY lower(ct.name) LIMIT 500`, p);
@@ -208,11 +223,12 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const c = cleanContact(req.body || {}); if (!c.name) return res.status(400).json({ error: "Name is required." });
     const { rows } = await q(`INSERT INTO contacts(firm_id, kind, name, company, email, phone, address, notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`, [req.user.firm_id, c.kind, c.name, c.company, c.email, c.phone, c.address, c.notes]);
     if (req.body.case_id && await caseOf(req, req.body.case_id)) await q("INSERT INTO case_contacts(case_id, contact_id, role) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", [+req.body.case_id, rows[0].id, clean(req.body.role, 40) || c.kind]);
-    res.json({ contact: rows[0], conflicts: await conflicts(req.user.firm_id, c.name + " " + (c.company || ""), rows[0].id) });
+    res.json({ contact: rows[0], conflicts: await conflicts(req.user.firm_id, c.name + " " + (c.company || ""), rows[0].id, req.user) });
   }));
   R.get("/contacts/:id", requireAuth, wrap(async (req, res) => {
     const c = await contactOf(req, req.params.id); if (!c) return res.status(404).json({ error: "Not found" });
-    const cases = (await q("SELECT c.id, c.cause_no, c.style, c.county, c.status, c.next_setting, cc.role FROM case_contacts cc JOIN cases c ON c.id=cc.case_id WHERE cc.contact_id=$1 ORDER BY c.id DESC", [c.id])).rows;
+    const cpr = [c.id]; const ccond = access.caseCond(req.user, "c", cpr);
+    const cases = (await q(`SELECT c.id, c.cause_no, c.style, c.county, c.status, c.next_setting, cc.role FROM case_contacts cc JOIN cases c ON c.id=cc.case_id WHERE cc.contact_id=$1 AND ${ccond} ORDER BY c.id DESC`, cpr)).rows;
     const invoices = (await q("SELECT id, number, issued, due, status, total, paid FROM invoices WHERE contact_id=$1 AND firm_id=$2 ORDER BY id DESC", [c.id, req.user.firm_id])).rows;
     const trust = (await q("SELECT coalesce(sum(amount),0) AS bal FROM trust_tx WHERE contact_id=$1", [c.id])).rows[0].bal;
     res.json({ contact: { ...c, portal_url: c.portal_token ? `${APP()}/portal/${c.portal_token}` : null }, cases, invoices, trust });
@@ -232,7 +248,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const c = await caseOf(req, req.params.id); if (!c) return res.status(404).json({ error: "Case not found" });
     const ct = await contactOf(req, req.body.contact_id); if (!ct) return res.status(404).json({ error: "Contact not found" });
     await q("INSERT INTO case_contacts(case_id, contact_id, role) VALUES($1,$2,$3) ON CONFLICT(case_id, contact_id) DO UPDATE SET role=$3", [c.id, ct.id, clean(req.body.role, 40) || ct.kind]);
-    res.json({ ok: true, conflicts: await conflicts(req.user.firm_id, ct.name + " " + (ct.company || ""), ct.id) });
+    res.json({ ok: true, conflicts: await conflicts(req.user.firm_id, ct.name + " " + (ct.company || ""), ct.id, req.user) });
   }));
   R.delete("/cases/:id/contacts/:cid", requireAuth, wrap(async (req, res) => {
     const c = await caseOf(req, req.params.id); if (!c) return res.status(404).json({ error: "Case not found" });
@@ -243,16 +259,31 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   R.get("/cases/:id/hub", requireAuth, wrap(async (req, res) => {
     const c = (await q("SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE c.id=$1 AND c.firm_id=$2", [+req.params.id, req.user.firm_id])).rows[0];
     if (!c) return res.status(404).json({ error: "Case not found" });
-    const [contacts, tasks, docs, time, invoices, emails] = await Promise.all([
+    const [contacts, tasks, docs, time, invoices, team, emails] = await Promise.all([
       q("SELECT ct.*, cc.role, coalesce((SELECT sum(amount) FROM trust_tx t WHERE t.contact_id=ct.id),0) AS trust FROM case_contacts cc JOIN contacts ct ON ct.id=cc.contact_id WHERE cc.case_id=$1 ORDER BY cc.role, ct.name", [c.id]),
       q("SELECT t.*, u.name AS assignee_name FROM tasks t LEFT JOIN users u ON u.id=t.assignee WHERE t.case_id=$1 ORDER BY t.done, t.due_date NULLS LAST, t.id", [c.id]),
       q("SELECT id, name, mime, size, shared, created_at FROM documents WHERE case_id=$1 ORDER BY id DESC", [c.id]),
       q("SELECT te.*, u.name AS who FROM time_entries te LEFT JOIN users u ON u.id=te.user_id WHERE te.case_id=$1 ORDER BY te.on_date DESC, te.id DESC LIMIT 200", [c.id]),
       q("SELECT id, number, issued, due, status, total, paid FROM invoices WHERE case_id=$1 ORDER BY id DESC", [c.id]),
+      q("SELECT u.id, u.name, u.role FROM case_team t JOIN users u ON u.id=t.user_id WHERE t.case_id=$1 ORDER BY u.name", [c.id]),
       q("SELECT id, subject, from_addr, received_at FROM inbound_emails WHERE $1 = ANY(causes) AND user_id IN (SELECT id FROM users WHERE firm_id=$2) ORDER BY received_at DESC LIMIT 50", [String(c.cause_no).toUpperCase(), req.user.firm_id]).catch(() => ({ rows: [] }))
     ]);
     const events = await calendarItems(req.user.firm_id, { from: addDays(today(), -365), to: addDays(today(), 1500), caseId: c.id });
-    res.json({ case: c, contacts: contacts.rows, tasks: tasks.rows, documents: docs.rows, time: time.rows, invoices: invoices.rows, emails: emails.rows, events });
+    res.json({ case: c, contacts: contacts.rows, tasks: tasks.rows, documents: docs.rows, time: time.rows, invoices: invoices.rows, emails: emails.rows, events,
+      team: team.rows, can_team: access.seesFirm(req.user) || c.user_id === req.user.id });
+  }));
+  // case team: people added to a case beyond its lead attorney (they can then see it)
+  R.post("/cases/:id/team", requireAuth, wrap(async (req, res) => {
+    const c = await caseOf(req, req.params.id); if (!c) return res.status(404).json({ error: "Case not found" });
+    if (!access.seesFirm(req.user) && c.user_id !== req.user.id) return res.status(403).json({ error: "Only the lead attorney, a manager or an admin can change the team." });
+    const u = (await q("SELECT id, name FROM users WHERE id=$1 AND firm_id=$2 AND active", [+req.body.user_id, req.user.firm_id])).rows[0]; if (!u) return res.status(404).json({ error: "Person not found" });
+    await q("INSERT INTO case_team(case_id, user_id, added_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", [c.id, u.id, req.user.id]);
+    await audit(req, "case_team_added", { case: c.id, user: u.id }); res.json({ ok: true });
+  }));
+  R.delete("/cases/:id/team/:uid", requireAuth, wrap(async (req, res) => {
+    const c = await caseOf(req, req.params.id); if (!c) return res.status(404).json({ error: "Case not found" });
+    if (!access.seesFirm(req.user) && c.user_id !== req.user.id) return res.status(403).json({ error: "Only the lead attorney, a manager or an admin can change the team." });
+    await q("DELETE FROM case_team WHERE case_id=$1 AND user_id=$2", [c.id, +req.params.uid]); await audit(req, "case_team_removed", { case: c.id, user: +req.params.uid }); res.json({ ok: true });
   }));
 
   // ===================== Documents =====================
@@ -264,12 +295,13 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
       [req.user.firm_id, c.id, name, clean(req.get("Content-Type"), 100) || "application/octet-stream", req.body.length, req.body, req.user.id]);
     await audit(req, "document_uploaded", { case: c.id, name }); res.json({ document: rows[0] });
   }));
+  const docOk = async (req, id) => { const pr = [+id, req.user.firm_id]; const cond = access.caseCond(req.user, "c", pr); return (await q(`SELECT d.* FROM documents d JOIN cases c ON c.id=d.case_id WHERE d.id=$1 AND d.firm_id=$2 AND ${cond}`, pr)).rows[0]; };
   R.get("/documents/:id", requireAuth, wrap(async (req, res) => {
-    const d = (await q("SELECT * FROM documents WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id])).rows[0]; if (!d) return res.status(404).send("Not found");
+    const d = await docOk(req, req.params.id); if (!d) return res.status(404).send("Not found");
     res.set({ "Content-Type": d.mime || "application/octet-stream", "Content-Disposition": `attachment; filename="${d.name.replace(/"/g, "")}"` }).send(d.data);
   }));
-  R.patch("/documents/:id", requireAuth, wrap(async (req, res) => { await q("UPDATE documents SET shared=$3 WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id, !!req.body.shared]); res.json({ ok: true }); }));
-  R.delete("/documents/:id", requireAuth, wrap(async (req, res) => { await q("DELETE FROM documents WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); await audit(req, "document_deleted", { id: +req.params.id }); res.json({ ok: true }); }));
+  R.patch("/documents/:id", requireAuth, wrap(async (req, res) => { if (!(await docOk(req, req.params.id))) return res.status(404).json({ error: "Not found" }); await q("UPDATE documents SET shared=$3 WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id, !!req.body.shared]); res.json({ ok: true }); }));
+  R.delete("/documents/:id", requireAuth, wrap(async (req, res) => { if (!(await docOk(req, req.params.id))) return res.status(404).json({ error: "Not found" }); await q("DELETE FROM documents WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); await audit(req, "document_deleted", { id: +req.params.id }); res.json({ ok: true }); }));
 
   // ---- Word templates (drafts — the attorney reviews before filing)
   const templates = require("./templates");
@@ -289,7 +321,8 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   // ===================== Tasks =====================
   R.get("/tasks", requireAuth, wrap(async (req, res) => {
     const p = [req.user.firm_id]; let w = "t.firm_id=$1";
-    if (req.query.who !== "firm") { p.push(req.user.id); w += ` AND t.assignee=$${p.length}`; } else if (+req.query.attorney) { p.push(+req.query.attorney); w += ` AND t.assignee=$${p.length}`; }
+    if (!access.seesFirm(req.user)) { p.push(req.user.id); const me = p.length; w += ` AND (t.assignee=$${me} OR t.created_by=$${me} OR t.case_id IN ${visibleCaseIds(req.user, p)})`; }
+    else if (req.query.who !== "firm") { p.push(req.user.id); w += ` AND t.assignee=$${p.length}`; } else if (+req.query.attorney) { p.push(+req.query.attorney); w += ` AND t.assignee=$${p.length}`; }
     if (req.query.status === "done") w += " AND t.done"; else if (req.query.status !== "all") w += " AND NOT t.done";
     if (+req.query.case_id) { p.push(+req.query.case_id); w += ` AND t.case_id=$${p.length}`; }
     const { rows } = await q(`SELECT t.*, c.cause_no, c.style, u.name AS assignee_name FROM tasks t LEFT JOIN cases c ON c.id=t.case_id LEFT JOIN users u ON u.id=t.assignee WHERE ${w} ORDER BY t.done, t.due_date NULLS LAST, t.id LIMIT 500`, p);
@@ -302,7 +335,9 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const { rows } = await q("INSERT INTO tasks(firm_id, case_id, assignee, title, due_date, created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING *", [req.user.firm_id, +b.case_id || null, assignee, title, isDate(b.due_date) ? b.due_date : null, req.user.id]);
     res.json({ task: rows[0] });
   }));
+  const taskOk = async (req, id) => { const pr = [+id, req.user.firm_id, req.user.id]; return (await q(`SELECT 1 FROM tasks t WHERE t.id=$1 AND t.firm_id=$2 AND (t.assignee=$3 OR t.created_by=$3 OR t.case_id IN ${visibleCaseIds(req.user, pr)})`, pr)).rowCount > 0; };
   R.patch("/tasks/:id", requireAuth, wrap(async (req, res) => {
+    if (!(await taskOk(req, req.params.id))) return res.status(404).json({ error: "Not found" });
     const b = req.body || {}, sets = [], p = [+req.params.id, req.user.firm_id];
     if (b.done !== undefined) { p.push(!!b.done); sets.push(`done=$${p.length}, done_at=CASE WHEN $${p.length} THEN now() ELSE NULL END`); }
     if (b.title) { p.push(clean(b.title, 300)); sets.push(`title=$${p.length}`); }
@@ -311,7 +346,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     if (sets.length) await q(`UPDATE tasks SET ${sets.join(",")} WHERE id=$1 AND firm_id=$2`, p);
     res.json({ ok: true });
   }));
-  R.delete("/tasks/:id", requireAuth, wrap(async (req, res) => { await q("DELETE FROM tasks WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true }); }));
+  R.delete("/tasks/:id", requireAuth, wrap(async (req, res) => { if (!(await taskOk(req, req.params.id))) return res.status(404).json({ error: "Not found" }); await q("DELETE FROM tasks WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true }); }));
   R.get("/firm/task-templates", requireAuth, wrap(async (req, res) => { await seedTemplates(req.user.firm_id); res.json({ templates: (await q("SELECT * FROM task_templates WHERE firm_id=$1 ORDER BY case_type, sort, id", [req.user.firm_id])).rows }); }));
   R.post("/firm/task-templates", requireAuth, requireAdmin, wrap(async (req, res) => {
     const title = clean(req.body.title, 300); if (!title) return res.status(400).json({ error: "Task is required." });
@@ -322,11 +357,12 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
 
   // ===================== Today dashboard (one set of filters for every number) =====================
   R.get("/dashboard", requireAuth, wrap(async (req, res) => {
-    const firm = req.user.firm_id, t = today();
-    const userId = req.query.who === "firm" ? (+req.query.attorney || null) : req.user.id;
+    const firm = req.user.firm_id, t = today(), lim = !access.seesFirm(req.user);
+    const userId = lim ? req.user.id : req.query.who === "firm" ? (+req.query.attorney || null) : req.user.id;
     const county = req.query.county || null;
     const cp = [firm]; let cw = "c.firm_id=$1";
-    if (userId) { cp.push(userId); cw += ` AND c.user_id=$${cp.length}`; }
+    if (lim) cw += " AND " + access.caseCond(req.user, "c", cp);
+    else if (userId) { cp.push(userId); cw += ` AND c.user_id=$${cp.length}`; }
     if (county) { cp.push(county); cw += ` AND c.county=$${cp.length}`; }
     const caseIds = `SELECT c.id FROM cases c WHERE ${cw}`;
     const [byCounty, byCourt, open, tasksDue, overdue, hours, unbilled, outstanding, collected, trust, alerts] = await Promise.all([
@@ -336,18 +372,19 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
       q(`SELECT t.id, t.title, t.due_date, c.cause_no, c.style, t.case_id FROM tasks t LEFT JOIN cases c ON c.id=t.case_id WHERE t.firm_id=$1 AND NOT t.done AND t.due_date <= $2 ${userId ? "AND t.assignee=$3" : ""} ORDER BY t.due_date LIMIT 20`, userId ? [firm, addDays(t, 7), userId] : [firm, addDays(t, 7)]),
       q(`SELECT count(*)::int n FROM tasks t WHERE t.firm_id=$1 AND NOT t.done AND t.due_date < $2 ${userId ? "AND t.assignee=$3" : ""}`, userId ? [firm, t, userId] : [firm, t]),
       q(`SELECT coalesce(sum(minutes),0)::int m FROM time_entries te WHERE te.firm_id=$1 AND te.on_date >= date_trunc('month', $2::date) ${userId ? "AND te.user_id=$3" : ""}`, userId ? [firm, t, userId] : [firm, t]),
-      q(`SELECT coalesce(sum(coalesce(te.amount, te.minutes/60.0*te.rate)),0) AS v FROM time_entries te WHERE te.firm_id=$1 AND te.billable AND te.invoice_id IS NULL AND (te.case_id IS NULL OR te.case_id IN (${caseIds}))`, cp),
-      q(`SELECT coalesce(sum(total-paid),0) AS v, count(*)::int n FROM invoices i WHERE i.firm_id=$1 AND i.status IN ('sent','draft') AND total>paid AND (i.case_id IS NULL OR i.case_id IN (${caseIds}))`, cp),
-      q(`SELECT coalesce(sum(p.amount),0) AS v FROM payments p JOIN invoices i ON i.id=p.invoice_id WHERE p.firm_id=$1 AND p.on_date >= date_trunc('month', $2::date)`, [firm, t]),
+      q(`SELECT coalesce(sum(coalesce(te.amount, te.minutes/60.0*te.rate)),0) AS v FROM time_entries te WHERE te.firm_id=$1 AND te.billable AND te.invoice_id IS NULL AND (${lim ? `te.user_id=${req.user.id | 0}` : "te.case_id IS NULL"} OR te.case_id IN (${caseIds}))`, cp),
+      q(`SELECT coalesce(sum(total-paid),0) AS v, count(*)::int n FROM invoices i WHERE i.firm_id=$1 AND i.status IN ('sent','draft') AND total>paid AND (${lim ? "FALSE" : "i.case_id IS NULL"} OR i.case_id IN (${caseIds}))`, cp),
+      lim ? q(`SELECT coalesce(sum(p.amount),0) AS v FROM payments p JOIN invoices i ON i.id=p.invoice_id WHERE p.firm_id=$1 AND p.on_date >= date_trunc('month', current_date) AND i.case_id IN (${caseIds})`, cp)
+        : q(`SELECT coalesce(sum(p.amount),0) AS v FROM payments p JOIN invoices i ON i.id=p.invoice_id WHERE p.firm_id=$1 AND p.on_date >= date_trunc('month', $2::date)`, [firm, t]),
       q(`SELECT coalesce(sum(amount),0) AS v FROM trust_tx WHERE firm_id=$1`, [firm]),
       q(`SELECT count(*)::int n FROM cases c WHERE ${cw} AND (c.date_alert IS NOT NULL OR c.filing_alert IS NOT NULL OR c.law_alert IS NOT NULL)`, cp)
     ]);
-    const upcoming = (await calendarItems(firm, { from: t, to: addDays(t, 14), userId, county })).filter(i => !i.done);
-    const overdueDl = (await calendarItems(firm, { from: addDays(t, -60), to: addDays(t, -1), userId, county })).filter(i => !i.done && i.kind === "deadline" && i.src === "event");
+    const upcoming = (await calendarItems(firm, { from: t, to: addDays(t, 14), userId, county, viewer: req.user })).filter(i => !i.done);
+    const overdueDl = (await calendarItems(firm, { from: addDays(t, -60), to: addDays(t, -1), userId, county, viewer: req.user })).filter(i => !i.done && i.kind === "deadline" && i.src === "event");
     const hoursToday = (await q("SELECT coalesce(sum(minutes),0)::int m FROM time_entries WHERE firm_id=$1 AND user_id=$2 AND on_date=$3", [firm, req.user.id, t])).rows[0].m;
     res.json({ today: t, open: open.rows[0].n, alerts: alerts.rows[0].n, byCounty: byCounty.rows, byCourt: byCourt.rows, upcoming, overdueDl, hoursToday: Math.round(hoursToday / 6) / 10,
       tasksDue: tasksDue.rows, overdue: overdue.rows[0].n, hours: Math.round(hours.rows[0].m / 6) / 10, unbilled: money(unbilled.rows[0].v),
-      outstanding: money(outstanding.rows[0].v), outstandingCount: outstanding.rows[0].n, collected: money(collected.rows[0].v), trust: money(trust.rows[0].v) });
+      outstanding: money(outstanding.rows[0].v), outstandingCount: outstanding.rows[0].n, collected: money(collected.rows[0].v), trust: access.trustOk(req.user) ? money(trust.rows[0].v) : null, sees_firm: !lim });
   }));
 
   // ===================== Time & billing =====================
@@ -359,7 +396,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   R.get("/time", requireAuth, wrap(async (req, res) => {
     const p = [req.user.firm_id]; let w = "te.firm_id=$1";
     if (+req.query.case_id) { p.push(+req.query.case_id); w += ` AND te.case_id=$${p.length}`; }
-    if (req.query.who !== "firm") { p.push(req.user.id); w += ` AND te.user_id=$${p.length}`; }
+    if (req.query.who !== "firm" || !access.seesFirm(req.user)) { p.push(req.user.id); w += ` AND te.user_id=$${p.length}`; }
     if (req.query.unbilled) w += " AND te.invoice_id IS NULL AND te.billable";
     const { rows } = await q(`SELECT te.*, c.cause_no, c.style, u.name AS who, coalesce(te.amount, round(te.minutes/60.0*te.rate, 2)) AS value FROM time_entries te LEFT JOIN cases c ON c.id=te.case_id LEFT JOIN users u ON u.id=te.user_id WHERE ${w} ORDER BY te.on_date DESC, te.id DESC LIMIT 300`, p);
     res.json({ entries: rows, rate: await rateFor(req.user.firm_id, null, req.user.id) });
@@ -393,7 +430,8 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   }
   R.get("/invoices", requireAuth, notPara, wrap(async (req, res) => {
     const p = [req.user.firm_id]; let w = "i.firm_id=$1";
-    if (["draft", "sent", "paid", "void"].includes(req.query.status)) { p.push(req.query.status); w += ` AND i.status=$2`; }
+    if (["draft", "sent", "paid", "void"].includes(req.query.status)) { p.push(req.query.status); w += ` AND i.status=$${p.length}`; }
+    if (!access.seesFirm(req.user)) w += ` AND i.case_id IN ${visibleCaseIds(req.user, p)}`;
     const { rows } = await q(`SELECT i.*, c.cause_no, c.style, ct.name AS client FROM invoices i LEFT JOIN cases c ON c.id=i.case_id LEFT JOIN contacts ct ON ct.id=i.contact_id WHERE ${w} ORDER BY i.id DESC LIMIT 300`, p);
     res.json({ invoices: rows });
   }));
@@ -426,16 +464,18 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     inv.card_fee = inv.card_fee_pct != null ? money(inv.balance * inv.card_fee_pct / 100 + Number(inv.card_fee_fixed || 0)) : null;
     return inv;
   }
-  R.get("/invoices/:id", requireAuth, notPara, wrap(async (req, res) => { const inv = await invoiceFull(req.user.firm_id, +req.params.id); if (!inv) return res.status(404).json({ error: "Not found" }); res.json({ invoice: inv }); }));
+  // one invoice, only if its case is visible to this person
+  async function invFor(req, id) { const inv = await invoiceFull(req.user.firm_id, id); if (!inv) return null; if (access.seesFirm(req.user)) return inv; return inv.case_id && await caseOf(req, inv.case_id) ? inv : null; }
+  R.get("/invoices/:id", requireAuth, notPara, wrap(async (req, res) => { const inv = await invFor(req, +req.params.id); if (!inv) return res.status(404).json({ error: "Not found" }); res.json({ invoice: inv }); }));
   R.patch("/invoices/:id", requireAuth, notPara, wrap(async (req, res) => {
-    const inv = await invoiceFull(req.user.firm_id, +req.params.id); if (!inv) return res.status(404).json({ error: "Not found" });
+    const inv = await invFor(req, +req.params.id); if (!inv) return res.status(404).json({ error: "Not found" });
     const st = req.body.status;
     if (st === "void") { if (inv.payments.length) return res.status(400).json({ error: "This invoice has payments — it can't be voided." }); await q("UPDATE time_entries SET invoice_id=NULL WHERE invoice_id=$1", [inv.id]); await q("UPDATE invoices SET status='void' WHERE id=$1", [inv.id]); }
     else if (st === "sent" || st === "draft") await q("UPDATE invoices SET status=$2 WHERE id=$1 AND status NOT IN ('paid','void')", [inv.id, st]);
     await audit(req, "invoice_status", { id: inv.id, status: st }); res.json({ ok: true });
   }));
   R.post("/invoices/:id/payments", requireAuth, notPara, wrap(async (req, res) => {
-    const inv = await invoiceFull(req.user.firm_id, +req.params.id); if (!inv) return res.status(404).json({ error: "Not found" });
+    const inv = await invFor(req, +req.params.id); if (!inv) return res.status(404).json({ error: "Not found" });
     if (inv.status === "void") return res.status(400).json({ error: "Invoice is void." });
     const amount = money(req.body.amount); if (!(amount > 0)) return res.status(400).json({ error: "Enter the amount paid." });
     if (amount > inv.balance + 0.001) return res.status(400).json({ error: `That's more than the balance (${usd(inv.balance)}).` });
@@ -452,7 +492,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   }));
   // Printable invoice (save as PDF from the browser)
   app.get("/invoice/:id/print", requireAuth, wrap(async (req, res) => {
-    const inv = await invoiceFull(req.user.firm_id, +req.params.id); if (!inv) return res.status(404).send("Not found");
+    const inv = await invFor(req, +req.params.id); if (!inv) return res.status(404).send("Not found");
     res.set("Content-Type", "text/html; charset=utf-8").send(invoiceHtml(inv, { print: true }));
   }));
 
@@ -510,13 +550,13 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   }));
 
   // ===================== Trust (IOLTA) ledger — beta =====================
-  R.get("/trust", requireAuth, notPara, wrap(async (req, res) => {
+  R.get("/trust", requireAuth, trustOnly, wrap(async (req, res) => {
     const clients = (await q(`SELECT ct.id, ct.name, sum(t.amount) AS balance, max(t.on_date) AS last FROM trust_tx t JOIN contacts ct ON ct.id=t.contact_id WHERE t.firm_id=$1 GROUP BY ct.id ORDER BY ct.name`, [req.user.firm_id])).rows;
     const recent = (await q(`SELECT t.*, ct.name, c.cause_no FROM trust_tx t JOIN contacts ct ON ct.id=t.contact_id LEFT JOIN cases c ON c.id=t.case_id WHERE t.firm_id=$1 ORDER BY t.on_date DESC, t.id DESC LIMIT 100`, [req.user.firm_id])).rows;
     const recons = (await q("SELECT * FROM trust_recon WHERE firm_id=$1 ORDER BY as_of DESC, id DESC LIMIT 12", [req.user.firm_id])).rows;
     res.json({ clients, recent, recons, total: money(clients.reduce((s, c) => s + Number(c.balance), 0)) });
   }));
-  R.post("/trust", requireAuth, notPara, wrap(async (req, res) => {
+  R.post("/trust", requireAuth, trustOnly, wrap(async (req, res) => {
     const b = req.body || {}; const ct = await contactOf(req, b.contact_id); if (!ct) return res.status(404).json({ error: "Pick the client." });
     const amount = money(b.amount); if (!amount) return res.status(400).json({ error: "Enter an amount (+ deposit, − payment out)." });
     if (b.case_id && !(await caseOf(req, b.case_id))) return res.status(404).json({ error: "Case not found" });
@@ -526,7 +566,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     await q("INSERT INTO trust_tx(firm_id, contact_id, case_id, on_date, amount, memo, ref, created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8)", [req.user.firm_id, ct.id, +b.case_id || null, isDate(b.on_date) ? b.on_date : today(), amount, clean(b.memo, 300), clean(b.ref, 100) || null, req.user.id]);
     await audit(req, "trust_entry", { contact: ct.id, amount }); res.json({ ok: true, balance: money(bal + amount) });
   }));
-  R.post("/trust/reconcile", requireAuth, notPara, wrap(async (req, res) => {
+  R.post("/trust/reconcile", requireAuth, trustOnly, wrap(async (req, res) => {
     const asOf = isDate(req.body.as_of) ? req.body.as_of : today(), bank = money(req.body.bank_balance);
     if (req.body.bank_balance === "" || req.body.bank_balance == null) return res.status(400).json({ error: "Enter the bank statement balance." });
     const book = money((await q("SELECT coalesce(sum(amount),0) v FROM trust_tx WHERE firm_id=$1 AND on_date<=$2", [req.user.firm_id, asOf])).rows[0].v);

@@ -15,6 +15,7 @@ const lawdb = require("./lawdb");
 const inbound = require("./inbound");
 const mail = require("./mail");
 const practice = require("./practice");
+const access = require("./access");
 const myapps = require("./myapps");
 const cl = require("./courtlistener");
 const { COUNTIES, APPEALS, CONNECTORS } = require("./counties");
@@ -59,7 +60,8 @@ async function audit(req, action, detail = {}) {
 function publicUser(u) {
   return { id: u.id, email: u.email, name: u.name, bar_number: u.bar_number, role: u.role, firm_id: u.firm_id, firm_name: u.firm_name,
     counties: u.counties || [], totp_enabled: u.totp_enabled, must_change_pw: u.must_change_pw,
-    phone: u.phone || "", title: u.title || "", doc_email: u.doc_email || "", firm_logo: u.logo_token ? `/brand/${u.logo_token}` : null };
+    phone: u.phone || "", title: u.title || "", doc_email: u.doc_email || "", firm_logo: u.logo_token ? `/brand/${u.logo_token}` : null,
+    access: u.access || "own", works_with: u.works_with || [], sees_firm: access.seesFirm(u), trust_access: access.trustOk(u) };
 }
 async function loadUser(id) {
   const { rows } = await q("SELECT u.*, f.name AS firm_name, f.logo_token, f.plan, f.plan_expires, f.plan_source, f.plan_checked, f.disabled AS firm_disabled FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
@@ -200,6 +202,14 @@ app.put("/api/me/counties", requireAuth, wrap(async (req, res) => {
 }));
 
 // ---------- firm seats (admin) ----------
+// every /api/cases/<id>/... route: the case must be one this person may see (role + access rules in access.js)
+app.use("/api/cases/:id", wrap(async (req, res, next) => {
+  if (!/^\d+$/.test(req.params.id) || !req.session.uid || !req.session.mfa) return next();
+  const u = await loadUser(req.session.uid); if (!u) return next();
+  const p = [+req.params.id, u.firm_id], cond = access.caseCond(u, "c", p);
+  if (!(await q(`SELECT 1 FROM cases c WHERE c.id=$1 AND c.firm_id=$2 AND ${cond}`, p)).rowCount) return res.status(404).json({ error: "Case not found" });
+  next();
+}));
 // ---------- firm profile + logo (admin) and each person's own profile ----------
 const pclean = (v, n) => String(v ?? "").replace(/[\u0000-\u001f\u007f]+/g, m => (m.includes("\n") ? "\n" : " ")).trim().slice(0, n);
 const okEmail = e => !e || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
@@ -259,19 +269,29 @@ app.put("/api/me/profile", requireAuth, wrap(async (req, res) => {
   res.json({ user: publicUser(await loadUser(req.user.id)) });
 }));
 app.get("/api/firm/users", requireAuth, requireAdmin, wrap(async (req, res) => {
-  const { rows } = await q("SELECT id,email,name,bar_number,role,counties,totp_enabled,active,last_login FROM users WHERE firm_id=$1 ORDER BY name", [req.user.firm_id]);
+  const { rows } = await q("SELECT id,email,name,bar_number,role,counties,totp_enabled,active,last_login,access,works_with,trust_access,title,phone FROM users WHERE firm_id=$1 ORDER BY name", [req.user.firm_id]);
   res.json({ users: rows });
 }));
+const ROLES = ["admin", "manager", "attorney", "paralegal"], ACCESS = ["own", "team", "firm"];
+async function cleanWorksWith(firmId, ids) {
+  const want = [...new Set((Array.isArray(ids) ? ids : []).map(Number).filter(Boolean))].slice(0, 50);
+  if (!want.length) return [];
+  return (await q("SELECT id FROM users WHERE firm_id=$1 AND id = ANY($2::int[]) AND role IN ('admin','manager','attorney')", [firmId, want])).rows.map(r => r.id);
+}
 app.post("/api/firm/users", requireAuth, requireAdmin, wrap(async (req, res) => {
   const { name, email, bar, role } = req.body || {};
   const em = String(email || "").trim().toLowerCase();
-  if (!name || !isEmail(em) || !["admin", "attorney", "paralegal"].includes(role)) return res.status(400).json({ error: "Name, email and role required." });
-  if (role !== "paralegal" && !isBar(bar)) return res.status(400).json({ error: "Attorneys need an 8-digit Texas bar #." });
+  if (!name || !isEmail(em) || !ROLES.includes(role)) return res.status(400).json({ error: "Name, email and role required." });
+  if ((role === "attorney" || role === "manager" && bar) && !isBar(bar)) return res.status(400).json({ error: "Attorneys need an 8-digit Texas bar #." });
+  if (role === "admin" && bar && !isBar(bar)) return res.status(400).json({ error: "Bar # must be 8 digits." });
   if ((await q("SELECT 1 FROM users WHERE email=$1", [em])).rowCount) return res.status(409).json({ error: "Email already registered." });
+  const acc = role === "admin" || role === "manager" ? "firm" : ACCESS.includes(req.body.access) ? req.body.access : role === "paralegal" ? "team" : "own";
+  const ww = await cleanWorksWith(req.user.firm_id, req.body.works_with);
+  const trust = role === "admin" || role === "manager" ? req.body.trust_access !== false : !!req.body.trust_access && role !== "paralegal";
   const pw = tempPw();
-  const { rows } = await q("INSERT INTO users(firm_id,email,name,bar_number,role,pw_hash,must_change_pw) VALUES($1,$2,$3,$4,$5,$6,true) RETURNING id",
-    [req.user.firm_id, em, String(name).trim(), role === "paralegal" ? (bar || null) : bar, role, await bcrypt.hash(pw, 12)]);
-  await audit(req, "seat_added", { id: rows[0].id, email: em, role });
+  const { rows } = await q("INSERT INTO users(firm_id,email,name,bar_number,role,pw_hash,must_change_pw,access,works_with,trust_access) VALUES($1,$2,$3,$4,$5,$6,true,$7,$8,$9) RETURNING id",
+    [req.user.firm_id, em, String(name).trim(), bar ? String(bar).trim() : null, role, await bcrypt.hash(pw, 12), acc, ww, trust]);
+  await audit(req, "seat_added", { id: rows[0].id, email: em, role, access: acc });
   res.json({ id: rows[0].id, temp_password: pw });
 }));
 app.patch("/api/firm/users/:id", requireAuth, requireAdmin, wrap(async (req, res) => {
@@ -280,7 +300,18 @@ app.patch("/api/firm/users/:id", requireAuth, requireAdmin, wrap(async (req, res
   const { rows } = await q("SELECT id FROM users WHERE id=$1 AND firm_id=$2", [id, req.user.firm_id]);
   if (!rows[0]) return res.status(404).json({ error: "Not found" });
   if (typeof req.body.active === "boolean") await q("UPDATE users SET active=$1 WHERE id=$2", [req.body.active, id]);
-  if (["admin", "attorney", "paralegal"].includes(req.body.role)) await q("UPDATE users SET role=$1 WHERE id=$2", [req.body.role, id]);
+  const b = req.body || {};
+  if (ROLES.includes(b.role)) {
+    const cur = (await q("SELECT role FROM users WHERE id=$1", [id])).rows[0].role;
+    if (cur === "admin" && b.role !== "admin" && !(await q("SELECT 1 FROM users WHERE firm_id=$1 AND role='admin' AND active AND id<>$2", [req.user.firm_id, id])).rowCount)
+      return res.status(400).json({ error: "The firm needs at least one admin. Make someone else an admin first." });
+    await q("UPDATE users SET role=$1 WHERE id=$2", [b.role, id]);
+    if (b.role === "admin" || b.role === "manager") await q("UPDATE users SET access='firm' WHERE id=$1", [id]);
+    if (b.role === "paralegal") await q("UPDATE users SET trust_access=false WHERE id=$1", [id]);
+  }
+  if (ACCESS.includes(b.access)) await q("UPDATE users SET access=$1 WHERE id=$2 AND role IN ('attorney','paralegal')", [b.access, id]);
+  if (Array.isArray(b.works_with)) await q("UPDATE users SET works_with=$1 WHERE id=$2", [await cleanWorksWith(req.user.firm_id, b.works_with.filter(x => +x !== id)), id]);
+  if (typeof b.trust_access === "boolean") await q("UPDATE users SET trust_access=$1 WHERE id=$2 AND role <> 'paralegal'", [b.trust_access, id]);
   let temp_password;
   if (req.body.reset) { temp_password = tempPw(); await q("UPDATE users SET pw_hash=$1, must_change_pw=true, totp_enabled=false, totp_secret=NULL WHERE id=$2", [await bcrypt.hash(temp_password, 12), id]); }
   await audit(req, "seat_updated", { id, ...req.body });
@@ -305,7 +336,8 @@ app.get("/api/cases", requireAuth, wrap(async (req, res) => {
   const { view = "mine", county, type } = req.query;
   const params = [req.user.firm_id, req.user.counties || []];
   let where = "c.firm_id=$1 AND (c.county = ANY($2) OR c.tracked)";
-  if (view === "mine") { params.push(req.user.id); where += ` AND c.user_id=$${params.length}`; }
+  if (!access.seesFirm(req.user)) where += " AND " + access.caseCond(req.user, "c", params);
+  else if (view === "mine") { params.push(req.user.id); where += ` AND c.user_id=$${params.length}`; }
   if (view === "tracked") where += " AND c.tracked";
   if (view === "alerts") where += " AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL)";
   if (view === "watched") where += " AND c.watch_dates";
@@ -313,7 +345,8 @@ app.get("/api/cases", requireAuth, wrap(async (req, res) => {
   if (county) { params.push(county); where += ` AND c.county=$${params.length}`; }
   if (type) { params.push(type); where += ` AND c.case_type=$${params.length}`; }
   const { rows } = await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} ORDER BY (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL) DESC, c.filed_date DESC NULLS LAST, c.id DESC LIMIT 500`, params);
-  const al = await q("SELECT count(*)::int n FROM cases WHERE firm_id=$1 AND (county = ANY($2) OR tracked) AND (date_alert IS NOT NULL OR law_alert IS NOT NULL OR filing_alert IS NOT NULL)" + (req.user.role === "paralegal" || req.user.role === "admin" ? "" : " AND user_id=$3"), req.user.role === "paralegal" || req.user.role === "admin" ? [req.user.firm_id, req.user.counties || []] : [req.user.firm_id, req.user.counties || [], req.user.id]);
+  const ap = [req.user.firm_id, req.user.counties || []];
+  const al = await q(`SELECT count(*)::int n FROM cases c WHERE c.firm_id=$1 AND (c.county = ANY($2) OR c.tracked) AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL) AND ${access.seesFirm(req.user) && req.user.role !== "attorney" ? "TRUE" : access.seesFirm(req.user) ? (ap.push(req.user.id), "c.user_id=$3") : access.caseCond(req.user, "c", ap)}`, ap);
   res.json({ cases: rows, alerts: al.rows[0].n });
 }));
 app.post("/api/cases", requireAuth, wrap(async (req, res) => {
@@ -370,7 +403,7 @@ app.get("/api/cases/:id/changes", requireAuth, wrap(async (req, res) => {
 }));
 // Firm admins: tick "watch court dates" on all of one attorney's cases at once.
 app.post("/api/cases/watch-all", requireAuth, wrap(async (req, res) => {
-  const uid = req.user.role === "admin" && req.body?.user_id ? +req.body.user_id : req.user.id;
+  const uid = access.seesFirm(req.user) && req.body?.user_id ? +req.body.user_id : req.user.id;
   const r = await q("UPDATE cases SET watch_dates=$3 WHERE firm_id=$1 AND user_id=$2", [req.user.firm_id, uid, req.body?.on !== false]);
   await audit(req, "watch_all", { user_id: uid, on: req.body?.on !== false, count: r.rowCount });
   res.json({ updated: r.rowCount });

@@ -99,7 +99,8 @@ const ic = (k, s = 18, w = 1.75) => `<svg aria-hidden="true" width="${s}" height
 const initials = n => String(n || "").split(/\s+/).filter(Boolean).slice(0, 2).map(x => x[0].toUpperCase()).join("") || "?";
 function navGroups() {
   const g = [["Practice", [["today", "Today"], ["cases", "Cases"], ["calendar", "Calendar"], ["inbox", "Court mail"], ["clients", "Clients"], ["tasks", "Tasks"]]]];
-  if (me.role !== "paralegal") g.push(["Money", [["billing", "Billing"], ["trust", "Trust"]]]);
+  const money = []; if (me.role !== "paralegal") money.push(["billing", "Billing"]); if (me.trust_access) money.push(["trust", "Trust"]);
+  if (money.length) g.push(["Money", money]);
   g.push(["Research", [["law", "Case law"], ["saved", "Saved"]]]);
   const set = [["counties", "My counties"], ["court", "Court updates"]]; if (me.role === "admin") set.push(["firm", "Firm settings"]);
   g.push(["Setup", set]);
@@ -126,7 +127,7 @@ function renderNav() {
   if (!me) return;
   const badge = k => k === "inbox" && inboxUnread ? `<span class="badge">${inboxUnread}</span>` : "";
   const item = ([k, v]) => `<a href="#${k}" data-t="${k}" class="ni${tab === k ? " on" : ""}"${tab === k ? ' aria-current="page"' : ""}>${ic(k)}<span>${v}</span>${badge(k)}</a>`;
-  const role = me.role === "admin" ? "Attorney · Admin" : me.role === "paralegal" ? "Paralegal" : "Attorney";
+  const role = me.role === "admin" ? "Firm admin" : me.role === "manager" ? "Manager" : me.role === "paralegal" ? "Paralegal" : "Attorney";
   $("#side").innerHTML = (me.firm_logo ? `<div class="brand withlogo"><span class="blogo"><img src="${esc(me.firm_logo)}" alt=""></span><span class="bt"><b>${esc(me.firm_name || "")}</b><small>TX Case Desk</small></span></div>`
     : `<div class="brand"><span class="mark" aria-hidden="true">TX</span><span><b>TX Case Desk</b><small>${esc(me.firm_name || "")}</small></span></div>`) + `
     <nav aria-label="Main" style="display:flex;flex-direction:column;gap:18px">${navGroups().map(([h, items]) => `<div class="ng"><div class="nh">${h}</div>${items.map(item).join("")}</div>`).join("")}</nav>
@@ -426,7 +427,7 @@ async function casesView() {
   <div class="card"><div class="mute">Your counties</div><div style="font-weight:600">${esc(me.counties.join(", ") || "None selected")}</div>
    <div class="mute" style="margin-top:4px">Auto-pull: connect under <a class="link" id="goCourt">Court Logins</a> (live: ${esc(Object.entries(META.connectors).filter(([, v]) => v.status !== "blocked").map(([k]) => k).join(", ") || "none right now — use re:SearchTX alerts")}). Other counties: add cases below or import a CSV.</div></div>
   <div class="card"><div class="grid">
-   <div><label>Show</label><select id="v"><option value="mine">My cases</option><option value="firm">Whole firm (my counties)</option><option value="tracked">Tracked cases</option><option value="watched">Watching court dates</option><option value="alerts">Alerts (dates, filings, case law)</option></select></div>
+   <div><label>Show</label><select id="v"><option value="mine">${me.sees_firm ? "My cases" : "My cases (and cases I'm on)"}</option>${me.sees_firm ? `<option value="firm">Whole firm (my counties)</option>` : ""}<option value="tracked">Tracked cases</option><option value="watched">Watching court dates</option><option value="alerts">Alerts (dates, filings, case law)</option></select></div>
    ${me.role === "admin" ? `<div><label>Attorney</label><select id="af2"><option value="">All attorneys</option>${(firmUsers || []).filter(u => u.role !== "paralegal").map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("")}</select></div>` : ""}
    <div><label>County</label><select id="cf"><option value="">All my counties</option>${me.counties.map(c => `<option>${esc(c)}</option>`).join("")}</select></div>
    <div><label>Case type</label><select id="tf"><option value="">All types</option>${TYPES.map(t => `<option>${t}</option>`).join("")}</select></div></div></div>
@@ -693,9 +694,11 @@ async function firmView() {
   $("#app").innerHTML = secTabs(FS_SECS, fsSec, "fs") + profileCard(fp) + fmCard + mkCard + `<div class="card" data-fs="people"><h2>${esc(me.firm_name)} – seats</h2>${us.map(u => `<div style="border-top:1px solid var(--line);padding:10px 0" data-u="${u.id}">
     <b>${esc(u.name)}</b> <span class="tag ${u.active ? "g" : "r"}">${u.active ? u.role : "disabled"}</span> ${u.totp_enabled ? "" : `<span class="tag y">2FA not set</span>`}
     <div class="mute">${esc(u.email)}${u.bar_number ? " · Bar #" + esc(u.bar_number) : ""}</div><div class="mute">Counties: ${esc((u.counties || []).join(", ") || "none")} · Last login: ${u.last_login ? new Date(u.last_login).toLocaleString() : "never"}</div>
+    <div style="margin-top:4px;font-size:14px">${esc(accessSummary(u, us))}</div>
+    ${u.id !== me.id ? `<details style="margin-top:6px" data-acc="${u.id}"><summary class="mute">Change role and access</summary>${accessFields(u, us, "u" + u.id)}<div class="err"></div><button type="button" class="btn sm" data-a="acc">Save</button></details>` : ""}
     ${u.id !== me.id ? `<div class="row" style="margin-top:6px"><button class="btn sm ghost" data-a="reset">Reset password & 2FA</button><button class="btn sm ${u.active ? "danger" : "ghost"}" data-a="toggle">${u.active ? "Disable" : "Enable"}</button></div>` : ""}</div>`).join("")}</div>
    <div class="card" data-fs="people"><h2>Add a seat</h2><p class="mute" style="margin-top:0">Each person gets their own sign-in. You set them up here; they get a temporary password, then set their own password and two-factor at first sign-in.</p><form id="af"><div class="grid"><div><label>Name</label><input name="name" required></div><div><label>Email</label><input name="email" type="email" required></div>
-   <div><label>Bar # (attorneys)</label><input name="bar" inputmode="numeric"></div><div><label>Role</label><select name="role"><option value="attorney">Attorney</option><option value="paralegal">Paralegal</option><option value="admin">Firm admin</option></select></div></div>
+   <div><label>Bar # (attorneys)</label><input name="bar" inputmode="numeric"></div></div><div id="newAcc">${accessFields({ id: 0, role: "attorney", access: "own", works_with: [], trust_access: false }, us, "ns")}</div>
    <div class="err" id="aerr"></div><button class="btn">Add seat</button></form><div id="temp"></div></div><div id="firmExtras"></div>`;
   const setFs = k => { fsSec = k; $$("#app [data-fs]").forEach(s => s.hidden = s.dataset.fs !== k); $$("[data-fs-go]").forEach(b => b.dataset.fsGo === k ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")); $("#fsSel").value = k; };
   $$("[data-fs-go]").forEach(b => b.onclick = () => setFs(b.dataset.fsGo)); $("#fsSel").onchange = e => setFs(e.target.value);
@@ -714,10 +717,13 @@ async function firmView() {
   if ($("#fmSync")) $("#fmSync").onclick = async () => { await api("/api/firm/mail/sync", { method: "POST" }); toast("Checking firm email…"); setTimeout(firmView, 2000); };
   if ($("#fmDel")) $("#fmDel").onclick = async () => { const b = $("#fmDel"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to disconnect"; return; } await api("/api/firm/mail", { method: "DELETE" }); firmView(); };
   if ($("#fmG")) $("#fmG").onclick = async () => { try { await api("/api/firm/mail/google", { method: "POST" }); toast("Firm email connected"); firmView(); } catch (e) { $("#fmGerr").textContent = e.message; } };
-  $("#af").onsubmit = async e => { e.preventDefault(); const b = Object.fromEntries(new FormData(e.target)); try { const r = await api("/api/firm/users", { method: "POST", body: b }); await firmView(); showTemp(b.email, r.temp_password); } catch (err) { $("#aerr").textContent = err.message; } };
+  const newAcc = wireAccess($("#newAcc"));
+  $("#af").onsubmit = async e => { e.preventDefault(); const b = { ...Object.fromEntries(new FormData(e.target)), ...newAcc() }; try { const r = await api("/api/firm/users", { method: "POST", body: b }); await firmView(); showTemp(b.email, r.temp_password); } catch (err) { $("#aerr").textContent = err.message; } };
   $$("[data-u]").forEach(row => {
     const u = us.find(x => x.id === +row.dataset.u);
     row.querySelector("[data-a=reset]")?.addEventListener("click", async () => { try { const r = await api(`/api/firm/users/${u.id}`, { method: "PATCH", body: { reset: true } }); await firmView(); showTemp(u.email, r.temp_password); } catch (e) { fail(e); } });
+    const det = row.querySelector("[data-acc]");
+    if (det) { const get = wireAccess(det); det.querySelector("[data-a=acc]").onclick = async () => { try { await api(`/api/firm/users/${u.id}`, { method: "PATCH", body: get() }); toast("Role and access saved"); firmView(); } catch (x) { det.querySelector(".err").textContent = x.message; } }; }
     row.querySelector("[data-a=toggle]")?.addEventListener("click", async () => { try { await api(`/api/firm/users/${u.id}`, { method: "PATCH", body: { active: !u.active } }); firmView(); } catch (e) { fail(e); } });
   });
 }
@@ -737,6 +743,31 @@ function subLine(sub) {
 }
 
 // ---------------- account ----------------
+// ---------------- roles and access (admin sets them per person) ----------------
+const ROLE_LBL = { admin: "Firm admin", manager: "Manager", attorney: "Attorney", paralegal: "Paralegal" };
+const ACC_LBL = { own: "Own cases + cases they're added to", team: "Cases of the attorneys they work with", firm: "Whole firm" };
+function accessSummary(u, us) {
+  const all = u.role === "admin" || u.role === "manager" || u.access === "firm";
+  const ww = (u.works_with || []).map(id => (us.find(x => x.id === id) || {}).name).filter(Boolean);
+  const sees = all ? "sees the whole firm" : u.access === "team" ? (ww.length ? `sees cases of ${ww.join(", ")}` : "sees no cases yet — pick who they work with") : "sees own cases and cases they're added to";
+  return `${ROLE_LBL[u.role] || u.role} · ${sees}${u.role === "admin" || (u.trust_access && u.role !== "paralegal") ? " · trust ledger" : ""}`;
+}
+function accessFields(u, us, pre) {
+  const atts = us.filter(x => x.active && x.id !== u.id && ["admin", "manager", "attorney"].includes(x.role));
+  return `<div class="grid" style="margin-top:8px">
+    <div><label for="${pre}r">Role</label><select id="${pre}r" data-f="role">${Object.entries(ROLE_LBL).map(([k, v]) => `<option value="${k}"${u.role === k ? " selected" : ""}>${v}</option>`).join("")}</select></div>
+    <div class="full" data-show="access"><label for="${pre}a">Sees</label><select id="${pre}a" data-f="access">${Object.entries(ACC_LBL).map(([k, v]) => `<option value="${k}"${(u.access || "own") === k ? " selected" : ""}>${v}</option>`).join("")}</select></div>
+    <fieldset class="full" data-show="ww" style="border:0;padding:0;margin:0"><legend style="font-size:12px;color:var(--mute);font-weight:500;margin-bottom:4px;padding:0">Works with</legend><div class="row" style="gap:0">${atts.map(x => `<label class="ck"><input type="checkbox" data-ww="${x.id}"${(u.works_with || []).includes(x.id) ? " checked" : ""}>${esc(x.name)}</label>`).join("") || `<span class="mute">Add attorneys first.</span>`}</div></fieldset>
+    <div class="full" data-show="trust"><label class="ck"><input type="checkbox" data-f="trust"${u.trust_access || (u.role === "manager" && u.trust_access == null) ? " checked" : ""}>Can see the trust ledger</label></div></div>`;
+}
+function wireAccess(box) {
+  const role = () => box.querySelector("[data-f=role]").value, acc = () => box.querySelector("[data-f=access]").value;
+  const sync = () => { const r = role(), lim = r === "attorney" || r === "paralegal";
+    box.querySelector("[data-show=access]").hidden = !lim; box.querySelector("[data-show=ww]").hidden = !(lim && acc() === "team"); box.querySelector("[data-show=trust]").hidden = r === "admin" || r === "paralegal"; };
+  box.querySelectorAll("select").forEach(s => s.addEventListener("change", sync)); sync();
+  return () => ({ role: role(), access: acc(), works_with: [...box.querySelectorAll("[data-ww]:checked")].map(x => +x.dataset.ww), trust_access: box.querySelector("[data-f=trust]").checked });
+}
+
 // ---------------- firm settings: sections + firm profile + logo ----------------
 const FS_SECS = [["profile", "Firm profile"], ["people", "People & sign-ins"], ["email", "Email & Microsoft"], ["money", "Payments & rates"], ["court", "Court days & checklists"], ["data", "Export"]];
 let fsSec = "profile";

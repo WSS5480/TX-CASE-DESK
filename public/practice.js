@@ -19,16 +19,16 @@
 
   // ---------- shared filter bar ----------
   async function filterBar(id, onChange, title) {
-    const ps = me.role === "admin" ? await loadPeople().catch(() => []) : [];
+    const ps = me.sees_firm ? await loadPeople().catch(() => []) : [];
     setTimeout(() => {
       const el = $("#" + id); if (!el) return;
-      el.querySelector("[name=who]").value = pf.who; el.querySelector("[name=county]").value = pf.county;
+      if (el.querySelector("[name=who]")) el.querySelector("[name=who]").value = pf.who; el.querySelector("[name=county]").value = pf.county;
       const at = el.querySelector("[name=attorney]"); if (at) at.value = pf.attorney;
       el.querySelectorAll("select").forEach(s => s.onchange = () => { pf[s.name] = s.value; if (s.name === "attorney" && s.value) pf.who = "firm"; onChange(); });
     });
     return `<div class="ph" id="${id}" aria-label="${esc(title || "Filters")}"><div class="row">
-      <select name="who" aria-label="Show"><option value="mine">Mine</option><option value="firm">Whole firm</option></select>
-      ${me.role === "admin" ? `<select name="attorney" aria-label="Attorney"><option value="">All attorneys</option>${peopleOptions(ps.filter(p => p.role !== "paralegal"))}</select>` : ""}
+      ${me.sees_firm ? `<select name="who" aria-label="Show"><option value="mine">Mine</option><option value="firm">Whole firm</option></select>` : ""}
+      ${me.sees_firm ? `<select name="attorney" aria-label="Attorney"><option value="">All attorneys</option>${peopleOptions(ps.filter(p => p.role !== "paralegal"))}</select>` : ""}
       <select name="county" aria-label="County"><option value="">All my counties</option>${me.counties.map(c => `<option>${esc(c)}</option>`).join("")}</select></div></div>`;
   }
   const qs = extra => new URLSearchParams({ who: pf.who, attorney: pf.attorney, county: pf.county, ...(extra || {}) });
@@ -71,7 +71,7 @@
   // ===================== TODAY =====================
   VIEWS.today = async function todayView() {
     $("#app").innerHTML = `<div class="card mute">Loading today…</div>`;
-    const ps = me.role === "admin" ? await loadPeople().catch(() => []) : [];
+    const ps = me.sees_firm ? await loadPeople().catch(() => []) : [];
     let d, cs, ib; try { [d, cs, ib] = await Promise.all([api("/api/dashboard?" + qs()), isLawyer() ? loadCases() : Promise.resolve([]), api("/api/inbox").catch(() => ({ emails: [], unread: 0 }))]); } catch (e) { return fail(e); }
     const t = d.today, hr = new Date().getHours(), first = String(me.name || "").split(/\s+/)[0];
     const longDate = new Date(t + "T12:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
@@ -98,12 +98,12 @@
         <div class="meta">${esc([c ? (c.case && c.case.style) || c.cause_no : "", m.type && m.type !== "Email" ? String(m.subject || "").slice(0, 70) : "", ago(m.received_at)].filter(Boolean).join(" · "))}</div></div>
         <button type="button" class="btn sm ghost" data-mail="${m.id}">Open</button></li>`; };
     const gl = [["Open cases", d.open + (d.alerts ? ` · ${d.alerts} with alerts` : ""), "cases"], ["Overdue tasks", d.overdue, "tasks"]];
-    if (isLawyer()) gl.push(["Hours this month", d.hours, "billing"], ["Unbilled", usd(d.unbilled), "billing"], ["Outstanding", usd(d.outstanding) + (d.outstandingCount ? ` · ${d.outstandingCount}` : ""), "billing"], ["Collected this month", usd(d.collected), "billing"], ["Trust held", usd(d.trust), "trust"]);
+    if (isLawyer()) gl.push(["Hours this month", d.hours, "billing"], ["Unbilled", usd(d.unbilled), "billing"], ["Outstanding", usd(d.outstanding) + (d.outstandingCount ? ` · ${d.outstandingCount}` : ""), "billing"], ["Collected this month", usd(d.collected), "billing"]); if (isLawyer() && d.trust != null) gl.push(["Trust held", usd(d.trust), "trust"]);
     const bars = rows => { const mx = Math.max(1, ...rows.map(r => r.n)); return rows.map(r => `<div style="margin:8px 0"><div class="row" style="justify-content:space-between;font-size:14px"><span>${esc(r.k)}</span><b>${r.n}</b></div><div style="height:6px;background:var(--chip);border-radius:4px;margin-top:4px"><div style="height:6px;width:${Math.round(r.n / mx * 100)}%;background:var(--navy);border-radius:4px"></div></div></div>`).join("") || `<div class="mute">No open cases.</div>`; };
     $("#app").innerHTML = `
       <div class="ph"><div><div class="eyebrow">${esc(longDate)}</div><h1 class="pt">${hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening"}${first ? ", " + esc(first) : ""}</h1></div>
-        <div class="row" id="pfToday"><div class="seg" role="group" aria-label="Show"><button type="button" data-who="mine" aria-pressed="${mine}">Mine</button><button type="button" data-who="firm" aria-pressed="${!mine}">Whole firm</button></div>
-        ${me.role === "admin" ? `<select name="attorney" aria-label="Attorney"><option value="">All attorneys</option>${peopleOptions(ps.filter(p => p.role !== "paralegal"), pf.attorney)}</select>` : ""}
+        <div class="row" id="pfToday">${me.sees_firm ? `<div class="seg" role="group" aria-label="Show"><button type="button" data-who="mine" aria-pressed="${mine}">Mine</button><button type="button" data-who="firm" aria-pressed="${!mine}">Whole firm</button></div>` : ""}
+        ${me.sees_firm ? `<select name="attorney" aria-label="Attorney"><option value="">All attorneys</option>${peopleOptions(ps.filter(p => p.role !== "paralegal"), pf.attorney)}</select>` : ""}
         ${me.counties.length > 1 ? `<select name="county" aria-label="County"><option value="">All my counties</option>${me.counties.map(c => `<option ${pf.county === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>` : ""}</div></div>
       <div class="cols"><div class="cmain">
         <section class="box" aria-labelledby="tdCourt"><div class="bh"><h2 id="tdCourt">In court today</h2><a data-go="calendar">Open calendar</a></div>
@@ -318,11 +318,11 @@
   }
   VIEWS.billing = async function billingView() {
     $("#app").innerHTML = `<div class="card mute">Loading billing…</div>`;
-    let t, inv, cs; try { [t, inv, cs] = await Promise.all([api("/api/time?unbilled=1&who=" + (me.role === "admin" ? "firm" : "mine")), api("/api/invoices" + (bl.inv ? "?status=" + bl.inv : "")), loadCases()]); } catch (e) { return fail(e); }
+    let t, inv, cs; try { [t, inv, cs] = await Promise.all([api("/api/time?unbilled=1&who=" + (me.sees_firm ? "firm" : "mine")), api("/api/invoices" + (bl.inv ? "?status=" + bl.inv : "")), loadCases()]); } catch (e) { return fail(e); }
     const byCase = {}; t.entries.forEach(e => { const k = e.case_id || 0; (byCase[k] = byCase[k] || { label: e.case_id ? `${e.cause_no} · ${e.style || ""}` : "No case", total: 0, n: 0, id: e.case_id }); byCase[k].total += Number(e.value); byCase[k].n++; });
     $("#app").innerHTML = `${timerCard(cs)}
       <details class="card"><summary>+ Log time or a charge</summary><div style="margin-top:8px">${timeForm(cs)}</div></details>
-      <div class="card"><h2>Unbilled ${me.role === "admin" ? "(whole firm)" : "(mine)"}</h2>
+      <div class="card"><h2>Unbilled ${me.sees_firm ? "(whole firm)" : "(mine)"}</h2>
         ${Object.values(byCase).map(g => `<div style="border-top:1px solid var(--line);padding:8px 0"><div class="row"><b style="flex:1">${esc(g.label)}</b><b>${usd(g.total)}</b></div><div class="row" style="margin-top:4px"><span class="mute">${g.n} entr${g.n === 1 ? "y" : "ies"}</span>${g.id ? `<button class="btn sm" data-bill="${g.id}" style="margin-left:auto">Create invoice</button>` : ""}</div></div>`).join("") || `<div class="mute">Nothing unbilled.</div>`}
         <details style="margin-top:8px"><summary class="mute">Show entries</summary>${t.entries.map(e => `<div style="border-top:1px solid var(--line);padding:6px 0"><div class="row"><span style="flex:1">${esc(e.description || "—")}</span><b>${usd(e.value)}</b></div><div class="row"><span class="mute">${d10(e.on_date)} · ${e.amount != null ? "flat" : (e.minutes / 60).toFixed(2) + " h × " + usd(e.rate)} · ${esc(e.who || "")}${e.cause_no ? " · " + esc(e.cause_no) : ""}</span><button class="btn sm ghost" data-tedel="${e.id}" style="margin-left:auto">Delete</button></div></div>`).join("") || ""}</details></div>
       <div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Invoices</h2><select id="invSt" style="width:auto"><option value="">All</option><option value="draft">Draft</option><option value="sent">Sent</option><option value="paid">Paid</option><option value="void">Void</option></select></div>
@@ -443,6 +443,9 @@
           <div><label id="dlTrigLabel">Date</label><input type="date" id="dlTrig"></div><div id="dlOpts" class="full"></div></div><button class="btn sm" id="dlCalc" style="margin-top:8px">Calculate</button><div class="err" id="dlErr"></div><div id="dlOut"></div>
           <details style="margin-top:8px"><summary class="mute">Or add a hearing / meeting by hand</summary><form id="hbEv" style="margin-top:6px"><div class="grid"><div class="full"><label>What</label><input name="title" required></div><div><label>Date</label><input type="date" name="on_date" required></div><div><label>Time</label><input name="at_time" placeholder="9:00 AM"></div><div><label>Type</label><select name="kind"><option value="hearing">Hearing</option><option value="meeting">Meeting</option><option value="deadline">Deadline</option><option value="event">Other</option></select></div></div><button class="btn sm">Add</button></form></details></div>
         ${r.events.filter(e => e.date >= addD(t, -30)).map(e => itemRow(e, { date: true, noCase: true }) + (e.src === "event" ? `<div class="row" style="margin:2px 0 6px 74px"><label style="display:flex;gap:6px;align-items:center;font-size:13px;color:var(--ink)"><input type="checkbox" data-done="${e.id}" ${e.done ? "checked" : ""} style="width:auto"> Done</label><button class="btn sm ghost" data-evdel="${e.id}">Delete</button></div>` : "")).join("") || `<div class="mute" style="margin-top:6px">No dates yet.</div>`}</div>
+      <div class="card" data-sec="people"><h3>Firm team</h3><p class="mute" style="margin:0 0 8px">Who at the firm works this case. People added here can see it.</p>
+        <div class="row" style="gap:6px"><span class="tag n">Lead: ${esc(c.attorney || "—")}</span>${(r.team || []).map(m => `<span class="tag k">${esc(m.name)}${r.can_team ? ` <button type="button" class="lk" data-team-del="${m.id}" aria-label="Remove ${esc(m.name)}" style="border:0;background:none;cursor:pointer;color:var(--bad);font-weight:700;padding:0 0 0 4px">×</button>` : ""}</span>`).join("")}</div>
+        ${r.can_team ? `<div class="row" style="margin-top:10px"><label for="tmAdd" style="margin:0">Add to team</label><select id="tmAdd" style="flex:1;min-width:180px"><option value="">Pick a person</option>${ps.filter(x => x.id !== c.user_id && !(r.team || []).some(m => m.id === x.id)).map(x => `<option value="${x.id}">${esc(x.name)} (${esc(x.role)})</option>`).join("")}</select><button type="button" class="btn sm" id="tmAddGo">Add</button></div>` : ""}</div>
       <div class="card" data-sec="people"><div class="row" style="justify-content:space-between"><h3 style="margin:0">People</h3><button class="btn sm" id="hbPp">+ Add</button></div>
         <div id="hbPpBox" hidden style="margin-top:8px"><label>Existing contact</label><input id="ppSearch" placeholder="Type a name"><div id="ppRes"></div>
           <details style="margin-top:8px"><summary class="mute">Or a new person</summary><form id="ppNew" style="margin-top:6px">${contactFields()}<label>Role on this case</label><select name="role"><option value="client">Client</option><option value="opposing party">Opposing party</option><option value="opposing counsel">Opposing counsel</option><option value="witness">Witness</option><option value="other">Other</option></select><div class="cfOut"></div><div class="err"></div><button class="btn sm">Add</button></form></details></div>
@@ -487,6 +490,8 @@
     $$("[data-evdel]").forEach(b => b.onclick = () => sure(b, async () => { await api(`/api/events/${b.dataset.evdel}`, { method: "DELETE" }); reload(); }));
     // people
     $("#hbPp").onclick = () => { $("#hbPpBox").hidden = !$("#hbPpBox").hidden; };
+    if ($("#tmAddGo")) $("#tmAddGo").onclick = async () => { const v = +$("#tmAdd").value; if (!v) return; try { await api(`/api/cases/${id}/team`, { method: "POST", body: { user_id: v } }); toast("Added to the team"); reload(); } catch (x) { fail(x); } };
+    $$("[data-team-del]").forEach(b => b.onclick = async () => { try { await api(`/api/cases/${id}/team/${b.dataset.teamDel}`, { method: "DELETE" }); reload(); } catch (x) { fail(x); } });
     let ps2; $("#ppSearch").oninput = e => { clearTimeout(ps2); ps2 = setTimeout(async () => { const v = e.target.value.trim(); if (v.length < 2) { $("#ppRes").innerHTML = ""; return; }
       const x = await api("/api/contacts?q=" + encodeURIComponent(v)); $("#ppRes").innerHTML = x.contacts.slice(0, 8).map(p => `<div class="row" style="border-top:1px solid var(--line);padding:6px 0"><span style="flex:1">${esc(p.name)} <span class="mute">${esc(p.kind)}</span></span>
         <select data-role="${p.id}" style="width:auto"><option value="client">Client</option><option value="opposing party">Opposing party</option><option value="opposing counsel">Opposing counsel</option><option value="witness">Witness</option><option value="other">Other</option></select><button class="btn sm" data-addp="${p.id}">Add</button></div>`).join("") || `<div class="mute">No match — add a new person below.</div>`;
