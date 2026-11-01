@@ -8,7 +8,9 @@ function toast(m) { const t = $("#toast"); t.textContent = m; t.style.display = 
 async function api(path, opts = {}) {
   const res = await fetch(path, { method: opts.method || "GET", headers: { "Content-Type": "application/json", "X-Requested-With": "tcd" }, body: opts.body ? JSON.stringify(opts.body) : undefined, credentials: "same-origin" });
   let data = {}; try { data = await res.json(); } catch (e) {}
-  if (!res.ok) { const err = new Error(data.error || "Request failed"); err.status = res.status; err.code = data.code; throw err; }
+  if (!res.ok) { const err = new Error(data.error || "Request failed"); err.status = res.status; err.code = data.code; err.reconnect = !!data.reconnect; throw err; }
+  // a case was added, changed or removed: case pickers everywhere reload instead of waiting up to a minute
+  if (opts.method && opts.method !== "GET" && /^\/api\/(cases|import|court-queue|court-inbox|research|court-logins|mail\/)/.test(path)) dispatchEvent(new Event("tcd:cases"));
   return data;
 }
 
@@ -124,6 +126,8 @@ function shellOn() {
 }
 function start() {
   if (me.must_change_pw) return changePwView(true);
+  // paralegals don't lead cases, so "My cases" would be empty for one who sees the whole firm
+  if (me.role === "paralegal" && me.sees_firm && me.firm_kind !== "solo" && caseF.view === "mine") caseF.view = "firm";
   api("/api/inbox").then(r => { if (r.unread !== inboxUnread) { inboxUnread = r.unread; renderNav(); } }).catch(() => {});
   if (!me.counties.length && (tab === "cases" || tab === "today")) tab = "counties";
   shellOn(); renderNav(); renderTimer(); show();
@@ -147,7 +151,7 @@ function renderNav() {
   $("#moreBtn").onclick = moreSheet;
 }
 function nav(k) { tab = k; closeSheet(); closeSearch(); renderNav(); return show(); }
-function show() { subView = false; clearTimeout(courtPoll); const v = VIEWS[tab] || ({ inbox: inboxView, cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab] || casesView; const r = v(); window.scrollTo(0, 0); return r; }
+function show() { subView = false; viewSeq++; clearTimeout(courtPoll); const v = VIEWS[tab] || ({ inbox: inboxView, cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab] || casesView; const r = v(); window.scrollTo(0, 0); return r; }
 
 // sheet: menus on desktop, bottom sheet on phones
 function openSheet(title, html, wire) {
@@ -237,6 +241,7 @@ document.addEventListener("click", e => { if (!e.target.closest("#srch") && !e.t
 // ---------------- inbox (court emails) ----------------
 const TYPE_TAG = { "Hearing / setting": "y", "New filing": "g", "Order / judgment": "r", "Case notice": "n", "Account activation": "n", "Email": "n" };
 let subView = false;
+let viewSeq = 0;   // bumped on every screen change; a view that finishes loading late checks it before drawing
 // copy boxes: value in its own box + Copy button (no stray spaces)
 function copyBox(val) { return `<div class="row" style="margin:4px 0;flex-wrap:nowrap"><div class="secret" style="flex:1">${esc(val)}</div><button type="button" class="btn sm" data-copy="${esc(val)}">Copy</button></div>`; }
 document.addEventListener("click", async e => { const b = e.target.closest("[data-copy]"); if (!b) return; try { await navigator.clipboard.writeText(b.dataset.copy.trim()); toast("Copied"); } catch { toast(b.dataset.copy); } });
@@ -255,7 +260,7 @@ function imapForm(mb, open) {
 function wireImap(after) {
   $$(".imapF").forEach(f => f.onsubmit = async e => {
     e.preventDefault(); const btn = f.querySelector("button.btn"), err = f.querySelector(".imapErr"); err.textContent = ""; btn.disabled = true; btn.textContent = "Checking…";
-    try { const r = await api("/api/mail/imap", { method: "POST", body: Object.fromEntries(new FormData(f)) }); toast(`Connected ${r.email} — checking court emails now`); after(); }
+    try { const r = await api("/api/mail/imap", { method: "POST", body: Object.fromEntries(new FormData(f)) }); toast(`Connected ${r.email} — checking court emails now`); after(r); }
     catch (x) { err.textContent = x.message; btn.disabled = false; btn.textContent = "Connect email"; }
   });
 }
@@ -275,7 +280,7 @@ function queueCards(qd) {
         <div><label>What is it?</label><select name="what"><option value="new"${m.notice.cause_no ? " selected" : ""}>A new case — add it</option><option value="link">A case already in the app</option><option value="send"${m.notice.cause_no ? "" : " selected"}>Just send it to an attorney</option></select></div>
         <div data-w="new send"><label>Attorney</label><select name="attorney"><option value="">Pick…</option>${att}</select></div>
         <div data-w="new"><label>Cause #</label><input name="cause_no" value="${esc(m.notice.cause_no)}"></div>
-        <div data-w="new"><label>County</label><select name="county"><option value="">Pick…</option>${(META.counties || []).map(c => `<option${c === m.notice.county ? " selected" : ""}>${esc(c)}</option>`).join("")}</select></div>
+        <div data-w="new link"><label>County</label><select name="county"><option value="">Pick…</option>${(META.counties || []).map(c => `<option${c === m.notice.county ? " selected" : ""}>${esc(c)}</option>`).join("")}</select></div>
         <div class="full" data-w="new"><label>Case style</label><input name="style" value="${esc(m.notice.style)}"></div>
         <div class="full" data-w="link"><label>Cause # of the case in the app</label><input name="link_cause" value="${esc(m.notice.cause_no)}"></div></div>
         <div class="err"></div><div class="row"><button class="btn">Assign</button><button type="button" class="btn ghost" data-qa="cancel">Cancel</button></div></form></div>`).join("")}`;
@@ -290,7 +295,7 @@ function wireQueue(qd, after) {
     card.querySelector("[data-qa=open]").onclick = () => emailView(id);
     card.querySelector("[data-qa=dismiss]").onclick = async e => { const b = e.currentTarget; if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to remove"; return; } try { await api(`/api/court-queue/${id}/dismiss`, { method: "POST" }); toast("Removed"); after(); } catch (x) { fail(x); } };
     f.onsubmit = async e => { e.preventDefault(); const w = f.what.value, er = f.querySelector(".err"); er.textContent = "";
-      const body = w === "link" ? { link_cause: f.link_cause.value } : { attorney: +f.attorney.value || 0, ...(w === "new" ? { create: { cause_no: f.cause_no.value, county: f.county.value, style: f.style.value, court: m.notice.court, next_setting: m.notice.next_setting } } : {}) };
+      const body = w === "link" ? { link_cause: f.link_cause.value, county: f.county.value } : { attorney: +f.attorney.value || 0, ...(w === "new" ? { create: { cause_no: f.cause_no.value, county: f.county.value, style: f.style.value, court: m.notice.court, next_setting: m.notice.next_setting } } : {}) };
       try { const r = await api(`/api/court-queue/${id}/assign`, { method: "POST", body }); toast(r.created ? "Case added and assigned" : "Assigned"); after(); } catch (x) { er.textContent = x.message; } };
   });
 }
@@ -327,11 +332,13 @@ async function inboxView(quiet) {
   $$("[data-open]").forEach(c => c.onclick = () => emailView(+c.dataset.open));
 }
 async function emailView(id) {
-  subView = true;
+  const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
+  subView = true; if (window.leaveMail) leaveMail(); else document.body.classList.remove("mailmode");
   window.scrollTo(0, 0);
   let r; try { r = await api(`/api/email-alerts/${id}`); } catch (e) { return fail(e); }
   const m = r.email, sm = r.summary;
   const linkify = t => esc(t).replace(/(https?:\/\/[^\s<]+)/g, u => `<a class="link" href="${u}" target="_blank" rel="noopener">${u.length > 70 ? u.slice(0, 70) + "…" : u}</a>`);
+  if (__v !== viewSeq) return;   // the person already opened another screen
   $("#app").innerHTML = `<button class="btn sm ghost" id="bk">← Court notices</button>
    <div class="card" style="margin-top:10px"><div class="row"><span class="tag ${TYPE_TAG[sm.type] || "n"}">${esc(sm.type)}</span><span class="mute" style="margin-left:auto">${new Date(m.received_at).toLocaleString()}</span></div>
    <h2 style="margin-top:8px">${esc(m.subject || "(no subject)")}</h2><div class="mute">From: ${esc(m.from_addr)}</div></div>
@@ -358,11 +365,13 @@ async function emailView(id) {
 // ---------------- court logins / county sync ----------------
 let courtPoll;
 async function courtView() {
+  const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
   clearTimeout(courtPoll);
   let d, ea, mb, det; try { [d, ea, mb, det] = await Promise.all([api("/api/court-logins"), api("/api/email-alerts"), api("/api/mail"), api("/api/mail/detect")]); } catch (e) { return fail(e); }
   const order = det.provider === "google" ? ["google", "microsoft"] : ["microsoft", "google"];
   const byCounty = Object.fromEntries(d.logins.map(l => [l.county, l]));
   const ago = t => t ? new Date(t).toLocaleString() : "never";
+  if (__v !== viewSeq) return;   // the person already opened another screen
   $("#app").innerHTML = `<div class="card"><h2>Court logins</h2>
    <p class="mute">Your cases are pulled from each county portal under <b>your</b> login and <b>your</b> bar # (${esc(me.bar_number || "not set")}) — only for counties you picked. Pulls run when you sign in, nightly, and when you tap Sync now. Passwords are encrypted and never shown again.</p>
    ${d.bar_ok ? "" : `<p class="err">Your account needs an 8-digit bar # before cases can be pulled.</p>`}</div>
@@ -438,9 +447,10 @@ async function courtView() {
     try { const m = (await api(`/api/email-alerts/${b.dataset.view}`)).email;
       box.innerHTML = `<div class="optext" style="font-family:inherit;font-size:14px;margin-top:8px;max-height:50vh">${linkify(m.body || "(empty)")}</div>`; b.textContent = "Hide email"; } catch (e) { fail(e); }
   });
-  $$("[data-msync]").forEach(b => b.onclick = async () => { await api(`/api/mail/${b.dataset.msync}/sync`, { method: "POST" }); toast("Checking your email…"); setTimeout(courtView, 1500); });
+  const courtIfOpen = () => { if (tab === "court" && !subView) courtView(); };   // only if they're still on this screen
+  $$("[data-msync]").forEach(b => b.onclick = async () => { await api(`/api/mail/${b.dataset.msync}/sync`, { method: "POST" }); toast("Checking your email…"); setTimeout(courtIfOpen, 1500); });
   $$("[data-mdel]").forEach(b => b.onclick = async () => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to disconnect"; return; } await api(`/api/mail/${b.dataset.mdel}`, { method: "DELETE" }); courtView(); });
-  wireImap(() => setTimeout(courtView, 2500));
+  wireImap(() => setTimeout(courtIfOpen, 2500));
   if (mb.mailboxes.some(m => m.status === "syncing")) courtPoll = setTimeout(() => { if (tab === "court") courtView(); }, 4000);
   if ($("#goInbox")) $("#goInbox").onclick = () => { tab = "inbox"; renderNav(); show(); };
   const cpa = $("#cpAddr"); if (cpa) cpa.onclick = async () => { try { await navigator.clipboard.writeText(ea.address); toast("Address copied"); } catch (e) { toast(ea.address); } };
@@ -459,11 +469,13 @@ function fail(err) {
 // ---------------- pending cases ----------------
 const TYPES = ["Civil – Contract", "Civil – Personal Injury", "Civil – DTPA / Consumer", "Civil – Real Property", "Eviction", "Family", "Probate", "Criminal – Felony", "Criminal – Misdemeanor", "Other"];
 async function casesView() {
+  const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
   const app = $("#app");
   app.innerHTML = `<div class="card mute">Loading cases…</div>`;
   let data; try { data = await api(`/api/cases?${new URLSearchParams(caseF)}`); } catch (e) { return fail(e); }
   const cs = data.cases;
   if (me.role === "admin" && !firmUsers) { try { firmUsers = (await api("/api/firm/users")).users; } catch (e) { firmUsers = []; } }
+  if (__v !== viewSeq) return;   // the person already opened another screen
   app.innerHTML = `
   ${data.alerts ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4"><b>${data.alerts} case alert${data.alerts === 1 ? "" : "s"}</b> (court dates, court emails, new case law). <a class="link" id="seeAlerts">Show them</a></div>` : ""}
   ${!me.counties.length ? `<div class="card"><b>Pick your counties first.</b> <span class="mute">You only see and add cases in counties you practice in.</span></div>` : ""}
@@ -582,7 +594,7 @@ async function wireAnalysis(c) {
 // Rankings run in the background (the free case-law source allows 5 lookups a minute); show progress until done.
 async function runRanking(url, body, btn, savesToCase) {
   const ar = $("#ar"); btn.disabled = true; const label = btn.textContent; btn.textContent = "Ranking…";
-  const show = h => { if ($("#ar")) $("#ar").innerHTML = h; };
+  const show = h => { if (ar && ar.isConnected) ar.innerHTML = h; };
   const prog = (d, t, live) => show(`<div class="card"><b>Ranking cases… ${d} of ${t} lookups</b><div class="meter" aria-hidden="true" style="margin:10px 0 6px"><span style="width:${t ? Math.round(d / t * 100) : 0}%"></span></div>
     <p class="mute" style="margin:0">${live ? `The free case-law source allows 5 lookups a minute, so this takes about ${Math.max(1, Math.ceil((t - d) / 5))} minute${Math.ceil((t - d) / 5) === 1 ? "" : "s"}. ${savesToCase ? "You can leave this page; the result is saved to the case." : "Keep this page open until it finishes."}` : "Using saved lookups — almost done."}</p></div>`);
   let r;
@@ -592,23 +604,26 @@ async function runRanking(url, body, btn, savesToCase) {
   for (;;) {
     await new Promise(ok => setTimeout(ok, 2500));
     let j; try { j = await api(`/api/law/jobs/${r.job}`); } catch (e) { show(`<div class="card err">${esc(e.message)}</div>`); break; }
-    if (j.status === "done") { if ($("#ar")) renderAnalysis(j.result, j.created_at); btn.disabled = false; btn.textContent = "Run again"; return j; }
+    if (!ar || !ar.isConnected) return j.status === "done" ? j : null;     // the person moved on; a case's result is still saved
+    if (j.status === "done") { renderAnalysis(j.result, j.created_at, ar); btn.disabled = false; btn.textContent = "Run again"; return j; }
     if (j.status === "error") { show(`<div class="card err">${esc(j.error)}</div>`); break; }
     prog(j.done, j.total, j.live);
   }
   btn.disabled = false; btn.textContent = label; return null;
 }
 async function analysisView(c) {
+  const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
   window.scrollTo(0, 0);
   $("#app").innerHTML = `<button class="btn sm ghost" id="bk">← Back to cases</button><div class="mute" style="margin:10px 4px 0">${esc(c.cause_no)} · ${esc(c.style || "")} · ${esc(c.county)} County</div>` + analysisPanel(c);
   $("#bk").onclick = () => casesView();
   wireAnalysis(c);
 }
-function renderAnalysis(r, at) {
+function renderAnalysis(r, at, el) {
+  const box = el || $("#ar"); if (!box) return;
   const bar = pct => `<div style="background:var(--chip);border-radius:6px;height:8px;margin-top:6px"><div style="width:${pct}%;background:var(--ok);height:8px;border-radius:6px"></div></div>`;
   const op = o => `<a class="link" data-c="${o.cluster_id}">${esc(o.case_name)}</a> <span class="mute">${esc(o.citation || "")} · ${esc(o.court)} · ${esc(o.date_filed || "")}</span>`;
   const ranked = r.paths.filter(p => p.enough), thin = r.paths.filter(p => !p.enough);
-  $("#ar").innerHTML = `
+  box.innerHTML = `
   <div class="card"><div class="mute">Run ${new Date(at).toLocaleString()} · ${r.total_opinions.toLocaleString()} Texas opinions (last 10 yrs) match: ${esc(r.mode)}${r.source ? ` · Source: ${esc(r.source)}` : ""}</div>
    ${r.trend ? `<p style="margin:8px 0 0"><b>Trend:</b> ${esc(r.trend.path)} — ${r.trend.recentRate ?? "–"}% upheld in the last 3 years (${r.trend.recentN} cases) vs ${r.trend.olderRate ?? "–"}% before (${r.trend.olderN}). <b>${esc(r.trend.direction)}</b>.</p>` : ""}</div>
   <div class="card"><h3>Ways forward — ranked</h3><p class="mute">How often Texas appeals courts upheld each path in cases on these issues.</p>
@@ -622,12 +637,16 @@ function renderAnalysis(r, at) {
    ${r.authorities.map((o, i) => `<div class="auth"><label class="ck auck"><input type="checkbox" data-au="${i}"${i < 3 ? " checked" : ""}><span class="sr">Pick ${esc(o.case_name)}</span></label><div style="min-width:0"><b>${i + 1}.</b> ${op(o)}<div class="mute">${esc(o.binding)} · cited ${o.cite_count}×</div>${o.snippet ? `<div style="font-size:13px">${esc(cleanSnip(o.snippet))}…</div>` : ""}</div></div>`).join("") || `<p class="mute">No opinions found.</p>`}
    ${r.authorities.length ? `<div class="row" style="margin-top:10px"><button type="button" class="btn sm" id="auCopy">Copy picked citations</button><button type="button" class="btn sm ghost" id="auAll">Copy all</button></div>` : ""}</div>
   <div class="card mute" style="font-size:13px"><b>How this works:</b> ${esc(r.method)}<br>Search used: <code>${esc(r.query)}</code></div>`;
-  $$("#ar [data-c]").forEach(a => a.onclick = () => { law.open = +a.dataset.c; tab = "law"; renderNav(); opinionView(law.open); window.scrollTo(0, 0); });
+  box.querySelectorAll("[data-c]").forEach(a => a.onclick = () => { law.open = +a.dataset.c; tab = "law"; renderNav(); opinionView(law.open); window.scrollTo(0, 0); });
   const citeOf = o => `${o.case_name}${o.citation ? ", " + o.citation : ""} (${[o.court, String(o.date_filed || "").slice(0, 4)].filter(Boolean).join(" ")})`;
   const copyCites = async list => { if (!list.length) return toast("Tick at least one case"); const txt = list.map(citeOf).join("\n");
-    try { await navigator.clipboard.writeText(txt); toast(`Copied ${list.length} citation${list.length === 1 ? "" : "s"}`); } catch { toast(txt); } };
-  if ($("#auCopy")) $("#auCopy").onclick = () => copyCites($$("#ar [data-au]:checked").map(x => r.authorities[+x.dataset.au]));
-  if ($("#auAll")) $("#auAll").onclick = () => copyCites(r.authorities);
+    try { await navigator.clipboard.writeText(txt); toast(`Copied ${list.length} citation${list.length === 1 ? "" : "s"}`); }
+    catch {   // the browser blocked copying: show them in a box to select and copy by hand
+      openSheet("Citations to copy", `<p class="mute" style="margin:0 0 8px">Press and hold (or Ctrl+A, Ctrl+C) to copy.</p><textarea id="ciTxt" rows="8" readonly style="width:100%">${esc(txt)}</textarea>`, sh => { const t = sh.querySelector("#ciTxt"); t.focus(); t.select(); });
+    } };
+  const cp = box.querySelector("#auCopy"), ca = box.querySelector("#auAll");
+  if (cp) cp.onclick = () => copyCites([...box.querySelectorAll("[data-au]:checked")].map(x => r.authorities[+x.dataset.au]));
+  if (ca) ca.onclick = () => copyCites(r.authorities);
 }
 
 // ---------------- case law ----------------
@@ -674,11 +693,13 @@ function renderResults() {
   $$("[data-c]").forEach(a => a.onclick = () => { law.open = +a.dataset.c; opinionView(law.open); window.scrollTo(0, 0); });
 }
 async function opinionView(cid) {
+  const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
   $("#app").innerHTML = `<button class="btn sm ghost" id="bk">← Back to results</button><div class="card" style="margin-top:10px"><div class="mute">Loading opinion…</div></div>`;
-  $("#bk").onclick = () => { law.open = null; lawView(); };
-  let op; try { op = (await api(`/api/law/opinion/${cid}`)).opinion; } catch (e) { $("#app .card").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  $("#bk").onclick = () => { law.open = null; viewSeq++; lawView(); };
+  let op; try { op = (await api(`/api/law/opinion/${cid}`)).opinion; } catch (e) { if (__v === viewSeq && $("#app .card")) $("#app .card").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
   let myCases = []; try { myCases = (await api("/api/cases?view=firm")).cases; } catch (e) {}
   const cite = `${op.case_name}${op.citations ? ", " + op.citations : ""}${op.court || op.date_filed ? ` (${[op.court, (op.date_filed || "").slice(0, 4)].filter(Boolean).join(" ")})` : ""}`;
+  if (__v !== viewSeq) return;   // the person already opened another screen
   $("#app").innerHTML = `<button class="btn sm ghost" id="bk">← Back to results</button>
    <div class="card" style="margin-top:10px"><div id="flag"><span class="tag n">Checking citing references…</span></div>
    <h2 style="margin-top:8px">${esc(op.case_name)}</h2><div class="mute">${esc(op.citations || "")} · ${esc(op.court || "")} · ${esc(String(op.date_filed || "").slice(0, 10))}${op.judges ? " · " + esc(op.judges) : ""}</div>
@@ -702,8 +723,10 @@ async function opinionView(cid) {
 
 // ---------------- saved research ----------------
 async function savedView() {
+  const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
   $("#app").innerHTML = `<div class="card mute">Loading…</div>`;
   let r; try { r = (await api("/api/research")).research; } catch (e) { return fail(e); }
+  if (__v !== viewSeq) return;   // the person already opened another screen
   $("#app").innerHTML = `<div class="card"><h2>Saved research</h2></div>` + (r.map(x => `<div class="card"><h3><a class="link" data-c="${x.cluster_id}">${esc(x.case_name)}</a></h3><div class="mute">${esc(x.citation || "")}</div>
    ${x.cause_no ? `<div class="mute">Case: ${esc(x.cause_no)} – ${esc(x.case_style || "")}</div>` : ""}${x.note ? `<p style="margin:6px 0 0">${esc(x.note)}</p>` : ""}
    <button class="btn sm danger" data-d="${x.id}" style="margin-top:8px">Remove</button></div>`).join("") || `<div class="card mute">Nothing saved yet. Open an opinion and tap Save research.</div>`);
@@ -731,6 +754,7 @@ function countiesView() {
 
 // ---------------- firm seats ----------------
 async function firmView() {
+  const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
   $("#app").innerHTML = `<div class="card mute">Loading…</div>`;
   let us; try { us = (await api("/api/firm/users")).users; } catch (e) { return fail(e); }
   let fm = null; try { fm = await api("/api/firm/mail"); } catch (e) {}
@@ -752,7 +776,7 @@ async function firmView() {
      <li><b>Name:</b>${copyBox("TX Case Desk")}<b>Supported account types:</b> <i>Single tenant only</i> (your organization only).</li>
      <li><b>Redirect URI:</b> pick <b>Web</b> and paste:${copyBox(mk.redirects[0])}Click <b>Register</b>.</li>
      <li>Left menu → <b>Authentication</b> → <b>Add Redirect URI</b> → paste the second one → <b>Configure</b>:${copyBox(mk.redirects[1])}</li>
-     <li>Left menu → <b>API permissions</b> → <b>+ Add a permission</b> → <b>Microsoft Graph</b> → <b>Delegated permissions</b> → tick <b>Mail.ReadWrite</b> and <b>Mail.Send</b> (full email in the app), <b>Calendars.ReadWrite</b> (calendar sync), <b>User.Read</b>, <b>offline_access</b>, <b>openid</b> and <b>email</b> → <b>Add permissions</b>.<br>
+     <li>Left menu → <b>API permissions</b> → <b>+ Add a permission</b> → <b>Microsoft Graph</b> → <b>Delegated permissions</b> → tick <b>Mail.Read</b>, <b>User.Read</b>, <b>offline_access</b>, <b>openid</b> and <b>email</b> (court emails). For full email and calendar in the app, also tick <b>Mail.ReadWrite</b>, <b>Mail.Send</b> and <b>Calendars.ReadWrite</b> → <b>Add permissions</b>.<br>
        For firm-wide connect also add → <b>Application permissions</b> → <b>Mail.Read</b>. Then click <b>✓ Grant admin consent</b> for your organization.</li>
      <li>Left menu → <b>Certificates &amp; secrets</b> → <b>+ New client secret</b> → 24 months → <b>Add</b>. Copy the <b>Value</b> right away (shown only once — not the Secret ID).</li>
      <li>Left menu → <b>Overview</b>: copy the <b>Application (client) ID</b> and the <b>Directory (tenant) ID</b>, and paste all three below.</li>
@@ -777,6 +801,7 @@ async function firmView() {
        <li>Client ID:<div class="secret">${esc(fm.google_sa_client_id)}</div></li><li>OAuth scope:<div class="secret">https://www.googleapis.com/auth/gmail.readonly</div></li><li>Tap <b>Authorize</b>, then come back and tap the button below.</li></ol>
        <button class="btn" id="fmG" style="width:100%;padding:14px">I've authorized it — turn on for the whole firm</button><div class="err" id="fmGerr"></div>` : `<button class="btn ghost" disabled style="width:100%;padding:14px">Google Workspace firm connect — coming soon</button>`}`
    : `<p class="mute">Your firm's email (@${esc(fm.detect.domain)}) is hosted by ${esc(fm.detect.host)}. Firm-wide connect works with Microsoft 365 and Google Workspace. Each attorney can connect their own email in a minute with <b>Connect with your email password</b> (Inbox or Court Updates).</p>`}</div>`;
+  if (__v !== viewSeq) return;   // the person already opened another screen
   $("#app").innerHTML = setupCard(fp, us, fm, ci) + secTabs(FS_SECS, fsSec, "fs") + profileCard(fp) + courtCard(ci) + fmCard + mkCard + `<div class="card" data-fs="people"><h2>${esc(me.firm_name)} – seats</h2>${us.map(u => `<div style="border-top:1px solid var(--line);padding:10px 0" data-u="${u.id}">
     <b>${esc(u.name)}</b> <span class="tag ${u.active ? "g" : "r"}">${u.active ? u.role : "disabled"}</span> ${u.totp_enabled ? "" : `<span class="tag y">2FA not set</span>`}
     <div class="mute">${esc(u.email)}${u.phone ? " · " + esc(u.phone) : ""}</div><div class="mute">Counties: ${esc((u.counties || []).join(", ") || "none")} · Last login: ${u.last_login ? new Date(u.last_login).toLocaleString() : "never"}</div>
@@ -799,7 +824,10 @@ async function firmView() {
   $$("[data-fs-go]").forEach(b => b.onclick = () => setFs(b.dataset.fsGo)); $("#fsSel").onchange = e => setFs(e.target.value);
   setFs(fsSec); wireProfileCard(fp); wireCourtCard(ci);
   Promise.resolve(window.renderFirmExtras && renderFirmExtras(us)).then(() => setFs(fsSec));
-  const showTemp = (name, email, pw, phone) => { $("#temp").innerHTML = credCard(name, email, pw, phone); $("#temp").scrollIntoView({ behavior: "smooth", block: "center" }); };
+  // the sign-in details are shown once: if the person already left this screen, show them in a sheet instead of losing them
+  const showTemp = (name, email, pw, phone) => { const t = $("#temp");
+    if (!t) return openSheet("Sign-in details", credCard(name, email, pw, phone));
+    t.innerHTML = credCard(name, email, pw, phone); t.scrollIntoView({ behavior: "smooth", block: "center" }); };
   if ($("#mkF")) $("#mkF").onsubmit = async e => {
     e.preventDefault(); const f = e.target, btn = f.querySelector("button.btn"); $("#mkErr").textContent = ""; btn.disabled = true; btn.textContent = "Testing with Microsoft…";
     const body = Object.fromEntries([...new FormData(f)].map(([k, v]) => [k, String(v).trim()]));
@@ -1064,7 +1092,7 @@ async function checkVersion() {
   try { const r = await api("/api/version"); if (appVer && r.v !== appVer) return location.reload(); appVer = r.v;
     const el = document.getElementById("ver"); if (el) el.textContent = `Version ${r.v} · updated ${new Date(r.updated).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} · Outlook connect ${r.outlook ? "on" : "OFF"}`; } catch {}
 }
-function busy() { const a = document.activeElement; return a && /INPUT|TEXTAREA|SELECT/.test(a.tagName); }
+function busy() { const a = document.activeElement; return !!document.getElementById("cmp") || (a && (/INPUT|TEXTAREA|SELECT/.test(a.tagName) || a.isContentEditable)); }
 async function autoRefresh() {
   if (document.hidden || !me || !me.id || busy()) return;
   await checkVersion();
@@ -1078,7 +1106,9 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) auto
   ind.style.cssText = "position:fixed;top:0;left:0;right:0;text-align:center;font-size:14px;padding:8px;color:var(--mute,#666);transform:translateY(-100%);transition:transform .15s;z-index:999;pointer-events:none";
   document.body.appendChild(ind);
   let y0 = null, pull = 0;
-  addEventListener("touchstart", e => { y0 = window.scrollY <= 0 && e.touches.length === 1 ? e.touches[0].clientY : null; pull = 0; }, { passive: true });
+  // pull-to-refresh: never while writing an email or inside a sheet (it would redraw over them)
+  addEventListener("touchstart", e => { const inside = e.target && e.target.closest && e.target.closest("#cmp, .sheet, #sheet, .cmp");
+    y0 = !inside && !document.getElementById("cmp") && window.scrollY <= 0 && e.touches.length === 1 ? e.touches[0].clientY : null; pull = 0; }, { passive: true });
   addEventListener("touchmove", e => {
     if (y0 === null) return; pull = e.touches[0].clientY - y0;
     if (pull <= 0) { ind.style.transform = "translateY(-100%)"; return; }

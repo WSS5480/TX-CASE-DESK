@@ -96,18 +96,22 @@
   }
   function phoneBar() {
     const multi = (M.accounts || []).length > 1;
-    const opts = `<option value="__court"${M.court ? " selected" : ""}>Court notices${M.queueCount ? ` (${M.queueCount} to assign)` : inboxUnread ? ` (${inboxUnread})` : ""}</option>` +
+    const opts = `<option value="__court"${M.court ? " selected" : ""}>Court notices${M.queueCount ? ` (${M.queueCount})` : inboxUnread ? ` (${inboxUnread})` : ""}</option>` +   // short: the banner below says "to assign"
       M.folders.map(f => `<option value="${esc(f.id)}"${!M.court && f.id === M.folder ? " selected" : ""}>${"  ".repeat(f.depth || 0)}${esc(f.role ? (ROLE_NAME[f.role] || f.name) : f.name)}${f.unread && f.role !== "sent" ? ` (${f.unread})` : ""}</option>`).join("");
     return `<div class="mpb">${multi ? `<select id="mxAcctP" aria-label="Account">${M.accounts.map(x => `<option value="${x.id}"${x.id === M.acct ? " selected" : ""}>${esc(x.shared ? "Shared court inbox" : x.email)}</option>`).join("")}</select>` : ""}
-      <select id="mxFoldP" aria-label="Folder">${opts}</select>
-      <button type="button" class="btn sm" data-compose aria-label="New email">${ic("edit", 16)}New</button></div>`;
+      ${M.acct ? `<select id="mxFoldP" aria-label="Folder">${opts}</select>` : ""}
+      ${M.acct ? `<button type="button" class="btn sm" data-compose aria-label="New email">${ic("edit", 16)}New</button>
+        <button type="button" class="btn sm ghost" data-connect>${ic("mail", 16)}Accounts</button>`
+        : `<div class="mconn" style="flex:1 1 100%"><p>Connect your email to read, send and organize all of it here.</p><button type="button" class="btn sm" data-connect>Connect email</button></div>`}</div>`;
   }
   function banner() {
     const a = acct();
     if (M.court) return "";
     if (M.err && M.err.reconnect || (a && a.reconnect)) {
       const ms = a && a.provider === "microsoft";
-      return `<div class="mban">${ms ? `<b>Reconnect Outlook once</b> to see all your email and send from here (it only had permission for court emails).<a class="btn sm" href="/api/mail/connect/microsoft">Reconnect Outlook</a>`
+      return `<div class="mban">${a && a.shared ? `The shared court inbox is <b>read-only</b> here. Court notices keep coming in as usual.`
+        : ms && a.full ? `<b>Sign in to Outlook again.</b> Microsoft ended the connection (a password change or an expired sign-in).<a class="btn sm" href="/api/mail/connect/microsoft?full=1">Sign in again</a>`
+        : ms ? `<b>Turn on full mail</b> to organize and send from here. Outlook asks you to approve it once (right now it only has permission to read court emails).<a class="btn sm" href="/api/mail/connect/microsoft?full=1">Turn on full mail</a>`
         : a && a.provider === "google" ? `<b>Gmail:</b> to see all your email here, disconnect Gmail under Court Updates and connect with an <b>app password</b> instead.`
         : `<b>Sign in again:</b> ${esc((M.err && M.err.message) || "your email host stopped accepting the saved password.")} <button type="button" class="btn sm" data-connect>Fix</button>`}</div>`;
     }
@@ -117,14 +121,14 @@
   function row(m) {
     if (M.court) {
       const isQ = m.kind === "queue";
-      return `<button type="button" class="mrow${!isQ && !m.read ? " u" : ""}${String(M.sel) === "c" + m.id ? " on" : ""}" data-cid="${m.id}" data-k="${m.kind}">
+      return `<button type="button" class="mlrow${!isQ && !m.read ? " u" : ""}${String(M.sel) === "c" + m.id ? " on" : ""}" data-cid="${m.id}" data-k="${m.kind}">
         <span class="mfrom">${esc(m.from_addr || "")}</span><span class="mdate">${esc(shortDate(m.received_at))}</span>
         <span class="msub">${esc(m.subject || "(no subject)")}</span><span class="mico">${isQ ? `<span class="tag y">To assign</span>` : `<span class="tag ${TYPE_TAG[m.type] || "n"}">${esc(m.type)}</span>`}</span>
         <span class="mprev">${esc(m.preview || "")}</span></button>`;
     }
     const sentish = ["sent", "drafts"].includes(roleOf(M.folder));
     const name = sentish ? "To: " + (m.to || []).map(who).join(", ") : who(m.from);
-    return `<button type="button" class="mrow${m.unread ? " u" : ""}${M.sel === m.id ? " on" : ""}" data-id="${esc(m.id)}">
+    return `<button type="button" class="mlrow${m.unread ? " u" : ""}${M.sel === m.id ? " on" : ""}" data-id="${esc(m.id)}">
       <span class="mfrom">${m.draft ? `<span class="mdr">Draft</span> ` : ""}${esc(name || "(no sender)")}</span><span class="mdate">${esc(shortDate(m.date))}</span>
       <span class="msub">${esc(m.subject || "(no subject)")}</span><span class="mico">${m.court ? `<span class="tag n">Court</span>` : ""}${m.important ? `<span class="tag r">!</span>` : ""}${m.att ? ic("clip", 15) : ""}${m.flagged ? `<span class="mflag">${ic("flag", 15, 2)}</span>` : ""}</span>
       <span class="mprev">${esc(m.preview || "")}</span></button>`;
@@ -143,6 +147,7 @@
   const emptyReader = () => `<div class="mnone">${ic("mail", 40, 1.3)}<p>Select an email to read it.</p></div>`;
 
   function paint() {
+    if (tab !== "inbox" || subView) return;          // the person moved on (e.g. a draft finished saving after they opened Calendar)
     const app = $("#app");
     if (!$("#mx")) app.innerHTML = `<div class="mx" id="mx"><aside class="mxf" id="mxF"></aside><section class="mxl" id="mxL" aria-label="Messages"></section><section class="mxr" id="mxR" aria-label="Reading pane"></section></div>`;
     $("#mx").classList.toggle("reading", M.reading);
@@ -176,16 +181,16 @@
   }
   function openFolder(id) { M.court = false; M.folder = id; M.sel = null; M.q = ""; M.reading = false; $("#mxR").innerHTML = emptyReader(); refresh(); if (!desk()) window.scrollTo(0, 0); $("#mxF").innerHTML = folderPane(); wire(); }
   function openCourt() { M.court = true; M.sel = null; M.q = ""; M.reading = false; if ($("#mxR")) $("#mxR").innerHTML = emptyReader(); refresh(); if ($("#mxF")) { $("#mxF").innerHTML = folderPane(); wire(); } }
-  window.mailOpenCourt = () => { M.court = true; M.sel = null; M.reading = false; tab = "inbox"; renderNav(); show(); };
+  window.mailOpenCourt = () => { M.court = true; M.q = ""; M.sel = null; M.reading = false; tab = "inbox"; renderNav(); show(); };
   function back() { M.reading = false; M.sel = null; $("#mx").classList.remove("reading"); paintList(); }
 
   // ---------- reading pane ----------
   async function openMsg(id) {
     M.sel = id; M.reading = true; $("#mx").classList.add("reading");
-    $$("#mxList .mrow").forEach(r => r.classList.toggle("on", r.dataset.id === id));
+    $$("#mxList .mlrow").forEach(r => r.classList.toggle("on", r.dataset.id === id));
     const R = $("#mxR"); R.innerHTML = `<div class="mnone"><p>Loading…</p></div>`; if (!desk()) window.scrollTo(0, 0);
-    let m; try { m = await api(`/api/mailx/message?acct=${M.acct}&id=${encodeURIComponent(id)}`); } catch (e) { R.innerHTML = `${readerBack()}<div class="mban r" style="margin:16px">${esc(e.message)}</div>`; wireBack(); return; }
-    if (M.sel !== id) return;
+    let m; try { m = await api(`/api/mailx/message?acct=${M.acct}&id=${encodeURIComponent(id)}`); } catch (e) { if (M.sel !== id || !R.isConnected) return; R.innerHTML = `${readerBack()}<div class="mban r" style="margin:16px">${esc(e.message)}</div>`; wireBack(); return; }
+    if (M.sel !== id || !R.isConnected) return;
     M.msg = m;
     const it = M.items.find(x => x.id === id);
     if (it && it.unread) { it.unread = false; const f = fold(M.folder); if (f && f.unread) f.unread--; $("#mxF").innerHTML = folderPane(); wire(); const r = $(`#mxList [data-id="${CSS.escape(id)}"]`); if (r) r.classList.remove("u"); }
@@ -213,7 +218,7 @@
       ${m.attachments && m.attachments.length ? `<div class="ratt">${m.attachments.map(x => { const viewable = /^image\/(png|jpe?g|gif|webp)$|^application\/pdf$/i.test(x.type) || /\.pdf$/i.test(x.name);
         const href = `/api/mailx/attachment?${qsx({ acct: M.acct, id, att: x.id })}`;
         return `<span class="achip">${ic("clip", 15)}<a href="${esc(href + (viewable ? "&inline=1" : ""))}" target="_blank" rel="noopener" class="an">${esc(x.name)}</a><span class="mute">${kb(x.size)}</span><a href="${esc(href)}" class="lk" download>Download</a></span>`; }).join("")}</div>` : ""}
-      ${m.remote && !M.images[id] ? `<div class="rimg">${ic("junk", 15)}Pictures from the web are hidden to protect your privacy. <button type="button" class="lk" data-r="images">Show pictures</button></div>` : ""}
+      ${m.remote && !M.images[id] ? `<div class="rimg">${ic("junk", 15)}<span>Pictures from the web are hidden to protect your privacy. <button type="button" class="lk" data-r="images">Show pictures</button></span></div>` : ""}
       <iframe class="rframe" title="Email body" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" src="/api/mailx/view?${qsx({ acct: M.acct, id, images: M.images[id] ? 1 : null })}"></iframe></div>`;
     wireBack(); fitFrame(R.querySelector(".rframe"));
     const act = (k, fn) => { const b = R.querySelector(`[data-r=${k}]`); if (b) b.onclick = fn; };
@@ -239,7 +244,7 @@
   // court notices in the reading pane (summary + exact email), and assigning shared-inbox notices
   async function openNotice(cid, kind) {
     M.sel = "c" + cid; M.reading = true; $("#mx").classList.add("reading");
-    $$("#mxList .mrow").forEach(r => r.classList.toggle("on", r.dataset.cid === cid));
+    $$("#mxList .mlrow").forEach(r => r.classList.toggle("on", r.dataset.cid === cid));
     const R = $("#mxR"); R.innerHTML = `<div class="mnone"><p>Loading…</p></div>`; if (!desk()) window.scrollTo(0, 0);
     if (kind === "queue") {
       const one = { people: M.queue.people, emails: M.queue.emails.filter(x => String(x.id) === String(cid)) };
@@ -247,7 +252,8 @@
       wireQueue(one, () => { M.sel = null; M.reading = false; R.innerHTML = emptyReader(); countQueue().then(() => refresh()); });
       return;
     }
-    let r; try { r = await api(`/api/email-alerts/${cid}`); } catch (e) { R.innerHTML = `${readerBack()}<div class="mban r" style="margin:16px">${esc(e.message)}</div>`; wireBack(); return; }
+    let r; try { r = await api(`/api/email-alerts/${cid}`); } catch (e) { if (M.sel === "c" + cid && R.isConnected) { R.innerHTML = `${readerBack()}<div class="mban r" style="margin:16px">${esc(e.message)}</div>`; wireBack(); } return; }
+    if (M.sel !== "c" + cid || !R.isConnected) return;
     const m = r.email, sm = r.summary;
     const it = M.items.find(x => String(x.id) === String(cid) && x.kind === "notice"); if (it && !it.read) { it.read = true; inboxUnread = Math.max(0, inboxUnread - 1); renderNav(); }
     R.innerHTML = `<div class="rd">${readerBack()}<h2 class="rsub">${esc(m.subject || "(no subject)")}</h2>
@@ -260,18 +266,23 @@
         ${sm.links.length ? `<div style="margin:6px 0"><b>Links:</b><br>${sm.links.map(u => `<a class="link brk" href="${esc(u)}" target="_blank" rel="noopener">${esc(u.length > 70 ? u.slice(0, 70) + "…" : u)}</a>`).join("<br>")}</div>` : ""}
         <p class="mute" style="margin-bottom:0;font-size:12px">Summary is pulled from the email automatically — check the exact email before relying on it.</p></div>
         <h3>Exact email</h3></div>
-      ${m.html ? `<iframe class="rframe" title="Email body" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>` : `<div class="rpad"><div class="optext">${esc(m.body || "(empty)")}</div></div>`}</div>`;
+      ${m.html ? `<iframe class="rframe" title="Email body" style="height:70vh" sandbox="allow-popups allow-popups-to-escape-sandbox"></iframe>` : `<div class="rpad"><div class="optext">${esc(m.body || "(empty)")}</div></div>`}</div>`;
     wireBack();
     const fr = R.querySelector(".rframe");
-    if (fr) { fitFrame(fr); fr.srcdoc = `<!doctype html><meta charset="utf-8"><base target="_blank"><style>body{margin:0;padding:14px 18px;font:14px/1.5 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#1d2433;overflow-wrap:anywhere}img{max-width:100%;height:auto}</style>` + m.html; }
+    if (fr) { fr.srcdoc = `<!doctype html><meta charset="utf-8"><base target="_blank"><style>body{margin:0;padding:14px 18px;font:14px/1.5 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#1d2433;overflow-wrap:anywhere}img{max-width:100%;height:auto}</style>` + m.html; }
     $$("#mxR [data-case]").forEach(b => b.onclick = () => window.caseHub && caseHub(+b.dataset.case));
   }
   async function countQueue() { if (!me.court_handler) { M.queueCount = 0; return; } try { M.queueCount = (await api("/api/court-queue")).emails.length; } catch { M.queueCount = 0; } }
 
   // ---------- actions ----------
   async function del(ids) {
+    const it = M.items.find(x => x.id === ids[0]) || M.msg || {};
+    const hasTrash = M.folders.some(f => f.role === "deleted");
+    const permanent = !hasTrash || roleOf(it.folder || M.folder) === "deleted";
+    if (permanent && !confirm(ids.length > 1 ? `Delete these ${ids.length} emails for good? This can't be undone here.` : "Delete this email for good? This can't be undone here.")) return;
     try { const r = await api("/api/mailx/delete", { method: "POST", body: { acct: M.acct, ids, folder: M.folder } });
       toast(r.permanent ? "Deleted for good" : "Moved to Deleted");
+      M.items = M.items.filter(x => !ids.includes(x.id)); if (!$("#mx")) return;
       M.items = M.items.filter(x => !ids.includes(x.id)); M.sel = null; M.reading = false; $("#mxR").innerHTML = emptyReader(); $("#mx").classList.remove("reading");
       await loadFolders(); paint();
     } catch (e) { toast(e.message); }
@@ -281,6 +292,7 @@
     openSheet("Move to folder", `<div class="mvl">${list.map(f => `<button type="button" class="mfold" data-mv="${esc(f.id)}" style="padding-left:${12 + (f.depth || 0) * 16}px">${ic(ROLE_ICON[f.role] || "folder", 17)}<span class="mfn">${esc(f.role ? (ROLE_NAME[f.role] || f.name) : f.name)}</span></button>`).join("")}</div>`, sh => {
       sh.querySelectorAll("[data-mv]").forEach(b => b.onclick = async () => {
         try { await api("/api/mailx/move", { method: "POST", body: { acct: M.acct, ids, folder: b.dataset.mv } }); closeSheet(); toast("Moved to " + b.textContent.trim());
+          if (!$("#mx")) return;
           M.items = M.items.filter(x => !ids.includes(x.id)); M.sel = null; M.reading = false; $("#mxR").innerHTML = emptyReader(); $("#mx").classList.remove("reading"); await loadFolders(); paint(); }
         catch (e) { toast(e.message); }
       });
@@ -310,9 +322,9 @@
     let mb; try { mb = await api("/api/mail"); } catch (e) { return toast(e.message); }
     const list = mb.mailboxes.map(x => `<div class="row" style="justify-content:space-between;border-top:1px solid var(--line);padding:8px 0"><span class="brk"><b>${esc(x.email || mb.names[x.provider])}</b><br><span class="mute">${esc(mb.names[x.provider] || x.provider)} · ${esc(x.status)}</span></span><button type="button" class="btn sm danger" data-dis="${x.id}">Disconnect</button></div>`).join("");
     openSheet("Email accounts", `${list ? `<div>${list}</div>` : `<p class="mute" style="margin:0">Sign in once with your work email. You'll see all of it here, and court emails keep updating your cases.</p>`}
-      ${mb.configured.microsoft ? `<a class="btn" href="/api/mail/connect/microsoft" style="display:block;text-align:center;text-decoration:none;padding:12px">Sign in with Outlook / Microsoft 365</a>` : ""}
+      ${mb.configured.microsoft ? `<a class="btn" href="/api/mail/connect/microsoft?full=1" style="display:block;text-align:center;text-decoration:none;padding:12px">Sign in with Outlook / Microsoft 365</a>` : ""}
       ${imapForm(mb, !mb.configured.microsoft)}`, sh => {
-      wireImap(() => { closeSheet(); M.accounts = null; start(); });
+      wireImap(r => { closeSheet(); M.accounts = null; M.acct = r && r.id ? r.id : null; M.folder = null; M.sel = null; M.reading = false; M.q = ""; M.court = false; start(); });   // just connected: open that account's Inbox
       sh.querySelectorAll("[data-dis]").forEach(b => b.onclick = async () => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again"; return; } await api(`/api/mail/${b.dataset.dis}`, { method: "DELETE" }); closeSheet(); M.accounts = null; M.acct = null; start(); });
     });
   }
@@ -330,6 +342,7 @@
     const a = acct();
     if (!a) return connectSheet();
     if (!a.full) return toast("Reconnect this account first (see the note at the top of the list).");
+    const acctId = a.id;     // always send from the account this email was started in, even if the list switches accounts
     const self = String(a.email || "").toLowerCase();
     let to = [], cc = [], bcc = [], subject = "";
     if (ref && mode !== "forward") {
@@ -342,6 +355,8 @@
     } else if (ref && mode === "forward") subject = /^fw:|^fwd:/i.test(ref.subject || "") ? ref.subject : "FW: " + (ref.subject || "");
     if (draft) { to = draft.to || []; cc = draft.cc || []; bcc = draft.bcc || []; subject = draft.subject || ""; }
     const ttl = draft ? "Draft" : { new: "New email", reply: "Reply", replyAll: "Reply all", forward: "Forward" }[mode];
+    // starting another email never loses the first: save it to Drafts, then open the new one (if it can't be saved, it stays open)
+    if ($("#cmp") && window.__cmpDirty && window.__cmpDirty()) { const args = arguments[0]; toast("Saving the email you were writing to Drafts…"); window.__cmpSave().then(ok => { if (ok) compose(args); }); return; }
     closeCompose();
     const box = document.createElement("div"); box.className = "cmp"; box.id = "cmp"; box.setAttribute("role", "dialog"); box.setAttribute("aria-label", ttl);
     const field = (k, lab, hidden) => `<div class="frow"${hidden ? " hidden" : ""} data-row="${k}"><label for="cf_${k}">${lab}</label><div class="chipin" data-f="${k}"><input id="cf_${k}" list="cfPeople" autocomplete="off" inputmode="email"></div>${k === "to" ? `<button type="button" class="lk" data-ccbcc>Cc Bcc</button>` : ""}</div>`;
@@ -352,7 +367,7 @@
           <button type="button" data-cmd="insertUnorderedList" aria-label="Bulleted list">• List</button><button type="button" data-cmd="insertOrderedList" aria-label="Numbered list">1. List</button><button type="button" data-cmd="link" aria-label="Add link">Link</button><button type="button" data-cmd="removeFormat" aria-label="Clear formatting">Clear</button></div>
         <div class="ed" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message"></div>
         ${ref && !draft ? `<p class="mute cnote">${mode === "forward" ? "The original email and its attachments are included below your message." : "The original email is included below your message."}</p>` : ""}
-        <div class="atts" id="cfAtts"></div></div>
+        <div class="catts" id="cfAtts"></div></div>
       <div class="cmpf"><button type="button" class="btn" data-send>${ic("send", 16)}Send</button><label class="btn ghost" style="cursor:pointer">${ic("clip", 16)}Attach<input type="file" multiple hidden id="cfFile"></label>
         <button type="button" class="btn ghost" data-save>Save draft</button><button type="button" class="lk" data-discard>Discard</button><div class="err" id="cfErr"></div></div>
       <datalist id="cfPeople"></datalist>`;
@@ -370,14 +385,14 @@
       inp.onpaste = e => { const t = (e.clipboardData || window.clipboardData).getData("text"); if (/[;,\n]/.test(t)) { e.preventDefault(); take(k, t); } };
       box.querySelector(`[data-f=${k}]`).onclick = e => { if (e.target === e.currentTarget) inp.focus(); }; });
     contacts().then(cs => { box.querySelector("#cfPeople").innerHTML = cs.map(c => `<option value="${esc(c.name ? `${c.name} <${c.email}>` : c.email)}">`).join(""); });
-    box.querySelector("[data-ccbcc]").onclick = () => { box.querySelector("[data-row=cc]").hidden = false; box.querySelector("[data-row=bcc]").hidden = false; box.querySelector("#cf_cc").focus(); };
+    box.querySelector("[data-ccbcc]").onclick = e => { box.querySelector("[data-row=cc]").hidden = false; box.querySelector("[data-row=bcc]").hidden = false; e.currentTarget.hidden = true; box.querySelector("#cf_cc").focus(); };
     box.querySelectorAll("[data-cmd]").forEach(b => b.onmousedown = e => { e.preventDefault(); const c = b.dataset.cmd;
       if (c === "link") { const u = prompt("Link address (https://…)"); if (u && /^(https?:|mailto:)/i.test(u.trim())) document.execCommand("createLink", false, u.trim()); }
       else document.execCommand(c, false, null); ed.focus(); });
     const drawFiles = () => { box.querySelector("#cfAtts").innerHTML = files.map((f, i) => `<span class="achip">${ic("clip", 15)}<span class="an">${esc(f.name)}</span><span class="mute">${f.token ? kb(f.size) : "Uploading…"}</span><button type="button" class="lk" data-rm="${i}" aria-label="Remove ${esc(f.name)}">Remove</button></span>`).join("");
       box.querySelectorAll("[data-rm]").forEach(b => b.onclick = () => { files.splice(+b.dataset.rm, 1); drawFiles(); }); };
-    box.querySelector("#cfFile").onchange = async e => {
-      for (const file of [...e.target.files]) {
+    const addFiles = async list => {
+      for (const file of list) {
         const total = files.reduce((s, f) => s + f.size, 0) + file.size;
         if (total > 25 * 1024 * 1024) { toast("Attachments can be 25 MB in all."); break; }
         const f = { name: file.name, size: file.size, token: null }; files.push(f); drawFiles();
@@ -386,9 +401,25 @@
         catch (x) { files.splice(files.indexOf(f), 1); toast(`${file.name}: ${x.message}`); }
         drawFiles();
       }
-      e.target.value = "";
     };
-    const sendIt = async asDraft => {
+    box.querySelector("#cfFile").onchange = async e => { await addFiles([...e.target.files]); e.target.value = ""; };
+    ed.addEventListener("paste", e => {
+      const cd = e.clipboardData; if (!cd) return;
+      const pics = [...(cd.files || [])];
+      if (pics.length) { e.preventDefault(); addFiles(pics.map((f, i) => f.name && f.name !== "image.png" ? f : new File([f], `Pasted picture ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(/[: ]/g, "")}${i ? "-" + i : ""}.${(f.type.split("/")[1] || "png").replace("jpeg", "jpg")}`, { type: f.type }))); toast("Added the picture as an attachment"); return; }
+      const h = cd.getData("text/html");
+      if (h) { e.preventDefault(); insertAtCaret(ed, cleanPaste(h)); }
+    });
+    ed.addEventListener("dragover", e => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) e.preventDefault(); });
+    ed.addEventListener("drop", e => { if (e.dataTransfer && e.dataTransfer.files.length) { e.preventDefault(); addFiles([...e.dataTransfer.files]); } });
+    let inFlight = null, inFlightDraft = false;     // one send/save at a time; a second press of the same kind shares the first one's result
+    const sendIt = asDraft => {
+      if (inFlight && inFlightDraft && !asDraft) { toast("Still saving to Drafts. When it's saved, open it from Drafts to send."); return inFlight.then(() => false); }
+      if (!inFlight) { inFlightDraft = !!asDraft; box.querySelectorAll("[data-send],[data-save]").forEach(b => b.disabled = true);
+        inFlight = sendNow(asDraft).finally(() => { inFlight = null; box.querySelectorAll("[data-send],[data-save]").forEach(b => b.disabled = false); }); }
+      return inFlight;
+    };
+    const sendNow = async asDraft => {
       ["to", "cc", "bcc"].forEach(k => { const inp = box.querySelector(`#cf_${k}`); if (inp.value.trim()) { take(k, inp.value); inp.value = ""; } });
       const er = box.querySelector("#cfErr"); er.textContent = "";
       const bad = [...lists.to, ...lists.cc, ...lists.bcc].find(p => p.bad); if (bad) { er.textContent = `"${bad.email}" isn't an email address.`; return; }
@@ -397,21 +428,56 @@
       if (!asDraft && !box.querySelector("#cfSub").value.trim() && !confirm("Send without a subject?")) return;
       const btn = box.querySelector(asDraft ? "[data-save]" : "[data-send]"); btn.disabled = true; const t0 = btn.innerHTML; btn.textContent = asDraft ? "Saving…" : "Sending…";
       try {
-        await api("/api/mailx/send", { method: "POST", body: { acct: M.acct, mode: draft ? "new" : mode, ref: ref && !draft ? ref.id : null, draftId: draft ? draft.id : null, draft: asDraft,
+        await api("/api/mailx/send", { method: "POST", body: { acct: acctId, mode: draft ? "new" : mode, ref: ref && !draft ? ref.id : null, draftId: draft ? draft.id : null, draft: asDraft,
           to: lists.to, cc: lists.cc, bcc: lists.bcc, subject: box.querySelector("#cfSub").value, html: ed.innerHTML, atts: files.map(f => f.token) } });
-        closeCompose(true); toast(asDraft ? "Saved to Drafts" : "Sent");
-        if (["sent", "drafts"].includes(roleOf(M.folder)) || draft) { await loadFolders(); await loadList(); paint(); } else { loadFolders().then(() => { if ($("#mxF")) { $("#mxF").innerHTML = folderPane(); wire(); } }); }
-      } catch (x) { er.textContent = x.message; btn.disabled = false; btn.innerHTML = t0; }
+      } catch (x) { er.textContent = x.message; btn.disabled = false; btn.innerHTML = t0; return false; }
+      closeCompose(box); toast(asDraft ? "Saved to Drafts" : "Sent");
+      (async () => {    // refresh the list in the background; the email is already saved or sent
+        if (M.acct === acctId && (["sent", "drafts"].includes(roleOf(M.folder)) || draft)) { await loadFolders(); await loadList(); paint(); }
+        else { await loadFolders(); if ($("#mxF")) { $("#mxF").innerHTML = folderPane(); wire(); } }
+      })().catch(() => {});
+      return true;
     };
     box.querySelector("[data-send]").onclick = () => sendIt(false);
     box.querySelector("[data-save]").onclick = () => sendIt(true);
-    const dirty = () => lists.to.length || lists.cc.length || box.querySelector("#cfSub").value.trim() !== subject.trim() || ed.innerText.trim().length > (draft ? 0 : signature().replace(/<[^>]+>/g, "").trim().length + 2) || files.length;
-    box.querySelector("[data-discard]").onclick = () => { if (dirty() && !confirm("Discard this email?")) return; closeCompose(true); };
-    box.querySelector("[data-x]").onclick = () => { if (dirty() && !draft && confirm("Save it to Drafts before closing?")) return sendIt(true); closeCompose(true); };
+    const snap = () => JSON.stringify([lists.to.map(x => x.email), lists.cc.map(x => x.email), lists.bcc.map(x => x.email), ["to", "cc", "bcc"].map(k => box.querySelector(`#cf_${k}`).value.trim()), box.querySelector("#cfSub").value, ed.innerHTML, files.length]);   // includes addresses typed but not yet turned into chips
+    const start = snap(), dirty = () => snap() !== start;
+    window.__cmpDirty = dirty; window.__cmpSave = () => sendIt(true);
+    box.querySelector("[data-discard]").onclick = () => { if (dirty() && !confirm(draft ? "Discard your changes to this draft?" : "Discard this email?")) return; closeCompose(box); };
+    // closing (X or Escape) never loses typing: changes go to Drafts, like Outlook
+    box.querySelector("[data-x]").onclick = () => { if (dirty()) return sendIt(true); closeCompose(box); };
     box.onkeydown = e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendIt(false); } if (e.key === "Escape") box.querySelector("[data-x]").click(); };
     setTimeout(() => (to.length ? ed : box.querySelector("#cf_to")).focus(), 30);
   }
-  function closeCompose() { const c = $("#cmp"); if (c) c.remove(); document.body.classList.remove("composing"); }
+  function closeCompose(only) { const c = $("#cmp"); if (!c || (only && only !== true && c !== only)) return; c.remove(); document.body.classList.remove("composing"); window.__cmpDirty = null; window.__cmpSave = null; }
+  // pasted HTML keeps simple formatting only (no styles, scripts or pictures from the page it came from)
+  const PASTE_OK = new Set(["P", "BR", "DIV", "SPAN", "B", "STRONG", "I", "EM", "U", "S", "UL", "OL", "LI", "A", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "TABLE", "THEAD", "TBODY", "TR", "TD", "TH", "PRE", "CODE"]);
+  const PASTE_DROP = new Set(["SCRIPT", "STYLE", "SVG", "MATH", "IFRAME", "OBJECT", "EMBED", "TEMPLATE", "NOSCRIPT", "TEXTAREA", "TITLE", "HEAD", "META", "LINK", "BASE", "FORM", "INPUT", "BUTTON", "SELECT", "IMG", "PICTURE", "VIDEO", "AUDIO", "CANVAS"]);
+  function cleanPaste(html) {
+    const doc = new DOMParser().parseFromString(String(html), "text/html");
+    const walk = node => { for (const el of [...node.childNodes]) {
+      if (el.nodeType === 3) continue;
+      const tag = el.nodeType === 1 ? el.tagName.toUpperCase() : "";
+      if (el.nodeType !== 1 || el.namespaceURI !== "http://www.w3.org/1999/xhtml" || PASTE_DROP.has(tag) || tag.includes(":")) { el.remove(); continue; }
+      walk(el);
+      if (!PASTE_OK.has(tag)) { el.replaceWith(...el.childNodes); continue; }
+      for (const at of [...el.attributes]) if (!(tag === "A" && at.name === "href" && /^(https?:|mailto:)/i.test(at.value.replace(/[\u0000-\u0020]/g, "")))) el.removeAttribute(at.name);
+    } };
+    walk(doc.body);
+    const frag = document.createDocumentFragment();
+    for (const n of [...doc.body.childNodes]) frag.appendChild(document.adoptNode(n));
+    return frag;
+  }
+  // put cleaned nodes where the cursor is (the browser's own insertHTML re-adds inline styles)
+  function insertAtCaret(ed, frag) {
+    const sel = getSelection();
+    if (!sel.rangeCount || !ed.contains(sel.getRangeAt(0).commonAncestorContainer)) { ed.focus(); const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false); sel.removeAllRanges(); sel.addRange(r); }
+    const r = sel.getRangeAt(0); r.deleteContents();
+    const last = frag.lastChild; r.insertNode(frag);
+    if (last) { r.setStartAfter(last); r.collapse(true); sel.removeAllRanges(); sel.addRange(r); }
+    ed.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  addEventListener("beforeunload", e => { if ($("#cmp") && window.__cmpDirty && window.__cmpDirty()) { e.preventDefault(); e.returnValue = ""; } });
   async function editDraft(m) {
     let full; try { full = await api(`/api/mailx/message?acct=${M.acct}&id=${encodeURIComponent(m.id)}&body=1&peek=1`); } catch (e) { return toast(e.message); }
     compose({ mode: "new", draft: { id: m.id, to: full.to, cc: full.cc, bcc: full.bcc, subject: full.subject, body: full.body } });
@@ -421,17 +487,24 @@
   async function start() {
     document.body.classList.add("mailmode");
     $("#app").innerHTML = `<div class="card mute">Loading mail…</div>`;
-    try { if (!M.accounts) await loadAccounts(); } catch (e) { return fail(e); }
+    try { if (!M.accounts) await loadAccounts(); }
+    catch (e) { if (tab === "inbox" && !subView) $("#app").innerHTML = `<div class="card"><p class="err" style="margin:0 0 10px">${esc(e.message || "Couldn't load your mail.")}</p><button type="button" class="btn" id="mxRetry">Try again</button></div>`; if ($("#mxRetry")) $("#mxRetry").onclick = start; return; }
     await Promise.all([loadFolders(), countQueue()]);
     M.loading = true; paint(); await loadList(); M.loading = false;
-    if (tab !== "inbox") return;
+    if (tab !== "inbox" || subView) return;
     paint();
     if (M.sel && !M.court) openMsg(M.sel); else if (desk() && M.reading) M.reading = false;
   }
   VIEWS.inbox = function mailView() { M.sel = null; M.reading = false; $("#app").innerHTML = ""; return start(); };
   // leaving Mail: drop the full-width layout
   const _show = show;
-  show = function () { document.body.classList.remove("mailmode"); closeCompose(); return _show.apply(this, arguments); };
+  // leaving Mail (any screen change, or opening a case/contact/notice from search): drop the full-width layout and keep any unsent email
+  window.leaveMail = () => {
+    document.body.classList.remove("mailmode");
+    if ($("#cmp") && window.__cmpDirty && window.__cmpDirty()) { toast("Saving your email to Drafts…"); window.__cmpSave(); }
+    else closeCompose();
+  };
+  show = function () { window.leaveMail(); return _show.apply(this, arguments); };
   window.mailRefresh = async () => {
     if (tab !== "inbox" || $("#cmp") || !$("#mx")) return;
     await Promise.all([M.acct ? loadFolders() : null, countQueue()]);
@@ -439,7 +512,7 @@
     if ($("#mxF")) { $("#mxF").innerHTML = folderPane(); wire(); }
   };
   addEventListener("keydown", e => {
-    if (tab !== "inbox" || $("#cmp") || /INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || "") || !M.sel || M.court) return;
+    if (tab !== "inbox" || subView || !$("#mx") || $("#cmp") || !$("#sheet").hidden || /INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || "") || (document.activeElement || {}).isContentEditable || !M.sel || M.court) return;
     if (e.key === "Delete") del([M.sel]);
   });
   let lastDesk = desk();

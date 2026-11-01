@@ -108,6 +108,8 @@ async function attorneyIn(firmId, text) {
 // u = the attorney whose mailbox it came from, or { id: null, firm_id, shared: true } for the firm's shared court inbox.
 async function processEmail(u, { from = "", subject = "", text, html, ext_id = null, source = "forward", received = null }) {
   const shared = !!u.shared;
+  // "Each attorney's own email" chosen: the shared court inbox is switched off, whatever still feeds it
+  if (shared && ((await q("SELECT court_mode FROM firms WHERE id=$1", [u.firm_id])).rows[0] || {}).court_mode === "each") return { ignored: "court inbox off" };
   subject = String(subject || "").slice(0, 300);
   let body = (text && String(text).trim() ? String(text) : strip(html)).slice(0, 50000);
   const hrefs = [...new Set([...String(html || "").matchAll(/href=["']([^"']+)["']/gi)].map(m => m[1].replace(/&amp;/g, "&")).filter(x => /^https?:\/\//i.test(x)))].slice(0, 30);
@@ -129,12 +131,28 @@ async function processEmail(u, { from = "", subject = "", text, html, ext_id = n
 
   let matched = [], created = [], owner = shared ? null : u.id, routed = shared ? null : undefined;
   if (causes.length) {
-    const m = await q("SELECT id, user_id, upper(cause_no) c, next_setting, watch_dates FROM cases WHERE firm_id=$1 AND upper(cause_no) = ANY($2)", [u.firm_id, causes]);
-    // shared inbox: the notice belongs to whoever has the case
-    if (shared && m.rows.length) { const main = m.rows.find(r => r.c === parsed.cause_no) || m.rows[0]; owner = main.user_id; routed = "case"; }
+    const m = await q(`SELECT c.id, c.user_id, upper(c.cause_no) c, c.county, c.next_setting, c.watch_dates,
+      coalesce(u.active, false) AND u.role IN ('admin','partner','manager','attorney') AS owner_active   -- notices only go to active attorneys
+      FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE c.firm_id=$1 AND upper(c.cause_no) = ANY($2)`, [u.firm_id, causes]);
+    // The same cause number can exist in two counties. Only then does the county matter: keep the case in the county the
+    // notice names (when one matches); if it's still unclear, a personal mailbox keeps only its own cases and the shared
+    // inbox leaves it for someone to assign. A county read from the body is never used to drop the only match.
+    const existing = m.rows.slice();
+    const lc = x => String(x || "").toLowerCase(), nCounties = rows => new Set(rows.map(r => lc(r.county))).size;
+    const onTeam = shared ? new Set() : new Set((await q("SELECT case_id FROM case_team WHERE user_id=$1 AND case_id = ANY($2)", [u.id, m.rows.map(r => r.id)]).catch(() => ({ rows: [] }))).rows.map(x => x.case_id));
+    const keep = [];
+    for (const no of new Set(m.rows.map(r => r.c))) {          // one cause number at a time (a notice can name several cases)
+      let g = m.rows.filter(r => r.c === no);
+      if (nCounties(g) > 1 && parsed.county) { const f = g.filter(r => lc(r.county) === lc(parsed.county)); if (f.length) g = f; }
+      if (nCounties(g) > 1) g = shared ? [] : g.filter(r => r.user_id === u.id || onTeam.has(r.id));
+      keep.push(...g);
+    }
+    m.rows = keep;
+    // shared inbox: the notice belongs to whoever has the case (if they still work here — otherwise it waits to be assigned)
+    if (shared && m.rows.length) { const main = m.rows.find(r => r.c === parsed.cause_no && r.owner_active) || m.rows.find(r => r.owner_active); if (main) { owner = main.user_id; routed = "case"; } }
     // New case from a court notice: create it (tracked, so it shows even outside the attorney's county list).
     // From the shared inbox, only when the notice names exactly one of the firm's attorneys — otherwise it waits to be assigned.
-    if (parsed.cause_no && kind === "research_alert" && !m.rows.some(r => r.c === parsed.cause_no) && parsed.county) {
+    if (parsed.cause_no && kind === "research_alert" && !existing.some(r => r.c === parsed.cause_no) && parsed.county) {   // never a second case with the same cause #
       let who = u.id;
       if (shared) { who = await attorneyIn(u.firm_id, subject + "\n" + body); if (who && !owner) { owner = who; routed = "attorney"; } }
       if (who) {
@@ -159,10 +177,35 @@ async function processEmail(u, { from = "", subject = "", text, html, ext_id = n
     }
   }
   // the attorney already got this exact email in their own connected mailbox — the case is updated, don't list it twice
-  if (shared && owner && ext_id && (await q("SELECT 1 FROM inbound_emails WHERE user_id=$1 AND ext_id=$2", [owner, ext_id])).rowCount) return { duplicate: true, matched, created };
-  await q(`INSERT INTO inbound_emails(user_id, firm_id, from_addr, subject, body, kind, causes, matched_case_ids, confirm_code, html, ext_id, source, parsed, received_at, shared, routed)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,now()),$15,$16) ON CONFLICT DO NOTHING`,
-    [owner, u.firm_id, String(from).slice(0, 200), subject, body, kind, causes, matched, confirm, String(html || "").slice(0, 400000) || null, extKey, source, parsed, received, shared, routed || null]);
+  // "Both" mode: one court email can reach the shared inbox AND the attorney's own mailbox. The case is already updated;
+  // list it once. Outlook and Gmail give each copy its own id, so a copy also counts as the same email when the sender
+  // and subject match within 10 minutes. The second copy is kept as a hidden marker so later syncs skip it.
+  const fromAddr = String(from).slice(0, 200);
+  let dupe = false;
+  if (shared && owner && ext_id && (await q("SELECT 1 FROM inbound_emails WHERE user_id=$1 AND ext_id=$2", [owner, ext_id])).rowCount) dupe = true;
+  // Only when it names the same cause numbers too — generic subjects like "Hearing Notice" must never hide a different notice.
+  if (!dupe && kind !== "forward_confirm" && subject.trim() && causes.length) {
+    const sorted = [...causes].sort();
+    const near = `firm_id=$1 AND dismissed_at IS NULL AND lower(subject)=lower($2) AND lower(from_addr)=lower($3) AND abs(extract(epoch FROM received_at - COALESCE($4::timestamptz, now()))) < 600
+      AND (SELECT array_agg(x ORDER BY x COLLATE "C") FROM unnest(causes) x) = $5::text[]`;
+    if (shared) {
+      // the shared copy is redundant when the attorney (or, before routing, anyone at the firm) already has their own copy
+      // (only an attorney's own copy counts — a paralegal's copy never takes a notice away from the attorneys)
+      const t = await q(`SELECT user_id FROM inbound_emails WHERE ${near} AND NOT shared ${owner ? "AND user_id=$6" : ""}
+        AND user_id IN (SELECT id FROM users WHERE firm_id=$1 AND active AND role IN ('admin','partner','manager','attorney')) LIMIT 1`,
+        owner ? [u.firm_id, subject, fromAddr, received, sorted, owner] : [u.firm_id, subject, fromAddr, received, sorted]);
+      if (t.rows[0]) { dupe = true; if (!owner) { owner = t.rows[0].user_id; routed = "duplicate"; } }
+    } else {
+      const t = await q(`SELECT id, user_id FROM inbound_emails WHERE ${near} AND shared AND (user_id=$6 OR user_id IS NULL) LIMIT 1`, [u.firm_id, subject, fromAddr, received, sorted, u.id]);
+      if (t.rows[0] && t.rows[0].user_id === u.id) dupe = true;
+      else if (t.rows[0] && (await q("SELECT 1 FROM users WHERE id=$1 AND active AND role IN ('admin','partner','manager','attorney')", [u.id])).rowCount)
+        await q("UPDATE inbound_emails SET dismissed_at=now(), routed='duplicate', user_id=$2 WHERE id=$1 AND user_id IS NULL", [t.rows[0].id, u.id]);  // it was waiting to be assigned — this attorney already has it
+    }
+  }
+  await q(`INSERT INTO inbound_emails(user_id, firm_id, from_addr, subject, body, kind, causes, matched_case_ids, confirm_code, html, ext_id, source, parsed, received_at, shared, routed, dismissed_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,now()),$15,$16,$17) ON CONFLICT DO NOTHING`,
+    [owner, u.firm_id, fromAddr, subject, body, kind, causes, matched, confirm, String(html || "").slice(0, 400000) || null, extKey, source, parsed, received, shared, dupe ? "duplicate" : (routed || null), dupe ? new Date() : null]);
+  if (dupe) { console.log(`[inbound] ${shared ? "shared" : "user " + u.id} copy already listed — kept hidden: "${subject.slice(0, 80)}"`); return { duplicate: true, matched, created }; }
   await q("INSERT INTO audit_log(user_id, firm_id, action, detail) VALUES($1,$2,'email_alert',$3)", [owner, u.firm_id, { source, kind, subject, causes: causes.length, matched: matched.length, created: created.length, ...(shared ? { shared: true, routed: routed || "unassigned" } : {}) }]);
   console.log(`[inbound] ${shared ? `firm ${u.firm_id} shared inbox → ${owner ? "user " + owner + " (" + routed + ")" : "needs assigning"}` : "user " + u.id} ${source} kind=${kind} causes=${causes.length} matched=${matched.length} created=${created.length} subject="${subject.slice(0, 80)}"`);
   return { ok: true, kind, causes, matched, created, owner, routed };

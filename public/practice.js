@@ -4,7 +4,7 @@
   const pf = { who: "mine", attorney: "", county: "" };       // one set of filters shared by Today, Calendar and Tasks
   const usd = n => "$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const d10 = v => v ? String(v).slice(0, 10) : "";
-  const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+  const todayStr = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });   // the Texas date (YYYY-MM-DD), whatever the device's time zone
   const addD = (s, n) => { const d = new Date(s + "T12:00:00"); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
   const niceDate = s => { const d = new Date(d10(s) + "T12:00:00"); return isNaN(d) ? esc(s) : d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: d.getFullYear() !== new Date().getFullYear() ? "numeric" : undefined }); };
   const KIND_TAG = { hearing: ["n", "Hearing"], deadline: ["a", "Deadline"], meeting: ["k", "Meeting"], event: ["k", "Event"] };
@@ -16,25 +16,32 @@
   let counties = null, countiesAt = 0;      // every county with a case this person can see (not just "my counties")
   async function loadCounties() { if (!counties || Date.now() - countiesAt > 5 * 60e3) { counties = (await api("/api/case-counties").catch(() => ({ counties: me.counties || [] }))).counties; countiesAt = Date.now(); } return counties; }
   const countySelect = (list, sel) => `<select name="county" aria-label="County"><option value="">All counties</option>${list.map(c => `<option ${sel === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>`;
+  addEventListener("tcd:cases", () => { caseCache = null; });
   async function loadCases() { if (!caseCache || Date.now() - caseAt > 60e3) { caseCache = (await api("/api/cases?view=firm")).cases; caseAt = Date.now(); } return caseCache; }
   const caseOptions = (cs, sel) => `<option value="">— No case —</option>` + cs.map(c => `<option value="${c.id}" ${+sel === c.id ? "selected" : ""}>${esc(c.cause_no)} · ${esc((c.style || "").slice(0, 50))}</option>`).join("");
   const peopleOptions = (ps, sel) => ps.map(p => `<option value="${p.id}" ${+sel === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("");
   const sure = (btn, fn) => { if (!btn.dataset.sure) { btn.dataset.sure = 1; btn.dataset.t = btn.textContent; btn.textContent = "Tap again"; setTimeout(() => { delete btn.dataset.sure; btn.textContent = btn.dataset.t; }, 3000); return; } fn(); };
 
   // ---------- shared filter bar ----------
+  // Calendar and Tasks filters. One listener for the page: the bar is drawn after the data loads, so wiring it at
+  // build time missed it (the filters did nothing). Values are drawn as "selected" in the HTML.
+  const filterCb = {};
+  document.addEventListener("change", e => {
+    const s = e.target, bar = s && s.tagName === "SELECT" ? s.closest(".ph[data-fb]") : null;
+    if (!bar || !filterCb[bar.id] || !(s.name in pf)) return;
+    pf[s.name] = s.value;
+    if (s.name === "attorney" && s.value) pf.who = "firm";
+    if (s.name === "who" && s.value === "mine") pf.attorney = "";
+    filterCb[bar.id]();
+  });
   async function filterBar(id, onChange, title) {
     const ps = firmToggle() ? await loadPeople().catch(() => []) : [];
     const cos = await loadCounties();
-    setTimeout(() => {
-      const el = $("#" + id); if (!el) return;
-      if (el.querySelector("[name=who]")) el.querySelector("[name=who]").value = pf.who; if (el.querySelector("[name=county]")) el.querySelector("[name=county]").value = pf.county;
-      const at = el.querySelector("[name=attorney]"); if (at) at.value = pf.attorney;
-      el.querySelectorAll("select").forEach(s => s.onchange = () => { pf[s.name] = s.value; if (s.name === "attorney" && s.value) pf.who = "firm"; onChange(); });
-    });
-    return `<div class="ph" id="${id}" aria-label="${esc(title || "Filters")}"><div class="row">
-      ${firmToggle() ? `<select name="who" aria-label="Show"><option value="mine">Mine</option><option value="firm">Whole firm</option></select>` : ""}
-      ${firmToggle() ? `<select name="attorney" aria-label="Attorney"><option value="">All attorneys</option>${peopleOptions(ps.filter(p => p.role !== "paralegal"))}</select>` : ""}
-      ${cos.length > 1 || pf.county ? countySelect(cos, pf.county) : ""}</div></div>`;
+    filterCb[id] = onChange;
+    const inner = `${firmToggle() ? `<select name="who" aria-label="Show"><option value="mine"${pf.who === "mine" ? " selected" : ""}>Mine</option><option value="firm"${pf.who === "firm" ? " selected" : ""}>Whole firm</option></select>` : ""}
+      ${firmToggle() ? `<select name="attorney" aria-label="Attorney"><option value="">All attorneys</option>${peopleOptions(ps.filter(p => p.role !== "paralegal"), pf.attorney)}</select>` : ""}
+      ${cos.length > 1 || pf.county ? countySelect(cos, pf.county) : ""}`;
+    return inner.trim() ? `<div class="ph" id="${id}" data-fb aria-label="${esc(title || "Filters")}"><div class="row">${inner}</div></div>` : "";   // nothing to filter: no empty band
   }
   const qs = extra => new URLSearchParams({ who: pf.who, attorney: pf.attorney, county: pf.county, ...(extra || {}) });
 
@@ -76,6 +83,7 @@
   // ===================== TODAY =====================
   const TODAY_CARDS = [["court", "In court today"], ["deadlines", "Deadlines"], ["mail", "New from court email"], ["next", "Next 14 days"], ["timer", "Timer"], ["tasks", "My tasks"], ["glance", "At a glance (numbers)"], ["caseload", "Open cases by county"]];
   VIEWS.today = async function todayView() {
+    const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
     $("#app").innerHTML = `<div class="card mute">Loading today…</div>`;
     const [ps, cos] = await Promise.all([firmToggle() ? loadPeople().catch(() => []) : [], loadCounties()]);
     const hid = new Set((me.prefs && me.prefs.today_hidden) || []);
@@ -107,6 +115,7 @@
     const gl = [["Open cases", d.open + (d.alerts ? ` · ${d.alerts} with alerts` : ""), "cases"], ["Overdue tasks", d.overdue, "tasks"]];
     if (isLawyer()) gl.push(["Hours this month", d.hours, "billing"], ["Unbilled", usd(d.unbilled), "billing"], ["Outstanding", usd(d.outstanding) + (d.outstandingCount ? ` · ${d.outstandingCount}` : ""), "billing"], ["Collected this month", usd(d.collected), "billing"]); if (isLawyer() && d.trust != null) gl.push(["Trust held", usd(d.trust), "trust"]);
     const bars = rows => { const mx = Math.max(1, ...rows.map(r => r.n)); return rows.map(r => `<div style="margin:8px 0"><div class="row" style="justify-content:space-between;font-size:14px"><span>${esc(r.k)}</span><b>${r.n}</b></div><div style="height:6px;background:var(--chip);border-radius:4px;margin-top:4px"><div style="height:6px;width:${Math.round(r.n / mx * 100)}%;background:var(--navy);border-radius:4px"></div></div></div>`).join("") || `<div class="mute">No open cases.</div>`; };
+    if (__v !== viewSeq) return;   // the person already opened another screen
     $("#app").innerHTML = `
       <div class="ph"><div><div class="eyebrow">${esc(longDate)}</div><h1 class="pt">${hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening"}${first ? ", " + esc(first) : ""}</h1></div>
         <div class="row" id="pfToday">${firmToggle() ? `<div class="seg" role="group" aria-label="Show"><button type="button" data-who="mine" aria-pressed="${mine}">Mine</button><button type="button" data-who="firm" aria-pressed="${!mine}">Whole firm</button></div>` : ""}
@@ -184,6 +193,7 @@
   }
   const hbars = rows => { const mx = Math.max(1, ...rows.map(r => r.n)); return rows.map(r => `<div class="hb"><div class="row" style="justify-content:space-between;font-size:14px"><span>${esc(r.k)}</span><b>${r.n}</b></div><div class="hbt"><span style="width:${Math.max(2, Math.round(r.n / mx * 100))}%"></span></div></div>`).join("") || `<div class="mute">No open cases.</div>`; };
   VIEWS.dashboard = async function dashboardView() {
+    const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
     if (!dash.scope) dash.scope = me.firm_dash ? "firm" : "mine";
     $("#app").innerHTML = `<div class="card mute">Loading dashboard…</div>`;
     const solo = me.firm_kind === "solo";
@@ -205,6 +215,7 @@
     if (money && T.trust != null) tiles.push(tile("Trust held", short$(T.trust), "all clients", "trust"));
     const wkLbl = w => new Date(w + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
     const moLbl = m => new Date(m + "T12:00:00").toLocaleDateString("en-US", { month: "short" });
+    if (__v !== viewSeq) return;   // the person already opened another screen
     $("#app").innerHTML = `
       <div class="ph"><div><div class="eyebrow">${esc(month)}${firm && !attName && !solo ? " · every attorney" : ""}</div><h1 class="pt">${esc(title)}</h1></div>
         ${me.firm_dash && !solo ? `<div class="row" id="dashF"><div class="seg" role="group" aria-label="Show"><button type="button" data-scope="firm" aria-pressed="${firm}">Firm</button><button type="button" data-scope="mine" aria-pressed="${!firm}">My cases</button></div>
@@ -273,6 +284,7 @@
   const chip = (i, k, firm) => `<button type="button" class="ev ${KCLS[i.kind] || "k-o"}${i.done ? " done" : ""}" data-ev="${k}" aria-label="${esc(KWORD[i.kind] || "Event")}: ${esc(i.title)}${i.time ? ", " + esc(i.time) : ""}${i.done ? ", done" : ""}">${i.time ? `<span class="et">${esc(shortT(i.time))}</span>` : ""}${i.kind === "deadline" ? "Due: " : ""}${esc(i.title)}${firm && i.who ? ` <span class="ew">${esc(initialsOf(i.who))}</span>` : ""}</button>`;
 
   VIEWS.calendar = async function calendarView() {
+    const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
     if (!cal.anchor) cal.anchor = todayStr();
     $("#app").innerHTML = `<div class="card mute">Loading calendar…</div>`;
     const bar = await filterBar("pfCal", calendarView, "Calendar");
@@ -312,6 +324,7 @@
     } else {
       body = Object.keys(byDay).length ? Object.entries(byDay).map(([day, its]) => `<div class="card"><div style="font-weight:700;margin-bottom:4px">${day === t ? "Today · " : ""}${niceDate(day)}</div>${its.map(i => itemRow(i) + (i.src === "event" ? `<div class="row" style="margin:2px 0 6px 82px"><label style="display:flex;gap:6px;align-items:center;font-size:13px;color:var(--ink);margin:0"><input type="checkbox" data-done="${i.id}" ${i.done ? "checked" : ""}> Done</label><button class="btn sm ghost" data-del="${i.id}">Delete</button></div>` : "")).join("")}</div>`).join("") : `<div class="card mute">Nothing on the calendar from ${esc(niceDate(rg.from))} to ${esc(niceDate(rg.to))}.</div>`;
     }
+    if (__v !== viewSeq) return;   // the person already opened another screen
     $("#app").innerHTML = `${bar}
       <div class="calbar"><div class="row calnav"><button type="button" class="btn ghost sm" id="calToday">Today</button>
           <button type="button" class="iconb" id="calPrev" aria-label="Previous">${ic("back", 20, 2)}</button><button type="button" class="iconb" id="calNext" aria-label="Next">${ic("chev", 20, 2)}</button>
@@ -435,8 +448,10 @@
     inp.oninput = run; form.querySelector("[name=company]").oninput = run;
   }
   VIEWS.clients = async function clientsView() {
+    const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
     $("#app").innerHTML = `<div class="card mute">Loading clients…</div>`;
     let r; try { r = await api(`/api/contacts?${new URLSearchParams({ q: cl.q, kind: cl.kind })}`); } catch (e) { return fail(e); }
+    if (__v !== viewSeq) return;   // the person already opened another screen
     $("#app").innerHTML = `<div class="card"><div class="grid"><div><label>Search</label><input id="clQ" value="${esc(cl.q)}" placeholder="Name, company, email, phone"></div>
       <div><label>Type</label><select id="clK"><option value="">Everyone</option><option value="client">Clients</option><option value="opposing">Opposing</option><option value="witness">Witnesses</option><option value="other">Other</option></select></div></div></div>
       <details class="card" ${r.contacts.length ? "" : "open"}><summary>+ New contact (with conflict check)</summary><form id="ctF" style="margin-top:8px">${contactFields()}<div class="cfOut"></div><div class="err"></div><button class="btn">Save contact</button></form></details>
@@ -450,7 +465,7 @@
         <input type="file" id="imFile" accept=".csv,text/csv" style="margin-top:8px"><textarea id="imCsv" placeholder="Paste CSV here" style="margin-top:8px"></textarea>
         <div class="err" id="imErr"></div><button class="btn" id="imGo">Import</button></div></details>`;
     $("#clK").value = cl.kind;
-    let st; $("#clQ").oninput = e => { clearTimeout(st); st = setTimeout(() => { cl.q = e.target.value; clientsView().then(() => { const i = $("#clQ"); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }); }, 400); };
+    let st; $("#clQ").oninput = e => { clearTimeout(st); st = setTimeout(() => { cl.q = e.target.value; clientsView().then(() => { const i = $("#clQ"); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }); }, 400); };
     $("#clK").onchange = e => { cl.kind = e.target.value; clientsView(); };
     $$("[data-ct]").forEach(c => c.onclick = () => contactView(+c.dataset.ct));
     liveConflicts($("#ctF"));
@@ -460,11 +475,13 @@
     $("#imGo").onclick = async () => { try { const w = $("#imWhat").value; const x = await api(`/api/import/${w}`, { method: "POST", body: { csv: $("#imCsv").value, county: $("#imCo").value } }); toast(`Imported ${x.added}, skipped ${x.skipped}`); caseCache = null; clientsView(); } catch (e) { $("#imErr").textContent = e.message; } };
   };
   async function contactView(id, conflicts) {
-    window.scrollTo(0, 0); $("#app").innerHTML = `<div class="card mute">Loading…</div>`;
+    const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
+    if (window.leaveMail) leaveMail(); else document.body.classList.remove("mailmode"); window.scrollTo(0, 0); $("#app").innerHTML = `<div class="card mute">Loading…</div>`;
     let r; try { r = await api(`/api/contacts/${id}`); } catch (e) { return fail(e); }
     const c = r.contact;
     const next = r.cases.map(x => x.next_setting).find(Boolean);
     const sms = c.phone && next ? `sms:${encodeURIComponent(c.phone)}?&body=${encodeURIComponent(`Reminder from ${me.firm_name}: your next court date is ${next}. Please call us with any questions.`)}` : null;
+    if (__v !== viewSeq) return;   // the person already opened another screen
     $("#app").innerHTML = `<button class="btn sm ghost" id="bk">← Clients</button>
       <div class="card" style="margin-top:10px"><div class="row"><h2 style="margin:0">${esc(c.name)}</h2><span class="tag ${c.kind === "client" ? "g" : "n"}">${esc(c.kind)}</span></div>
         <div class="row" style="margin-top:8px">${c.phone ? `<a class="btn sm ghost" href="tel:${esc(c.phone)}" style="text-decoration:none">Call</a>` : ""}${c.email ? `<a class="btn sm ghost" href="mailto:${esc(c.email)}" style="text-decoration:none">Email</a>` : ""}${sms ? `<a class="btn sm ghost" href="${sms}" style="text-decoration:none">Text court-date reminder</a>` : ""}</div>
@@ -487,10 +504,12 @@
   // ===================== TASKS =====================
   const tk = { status: "open" };
   VIEWS.tasks = async function tasksView() {
+    const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
     $("#app").innerHTML = `<div class="card mute">Loading tasks…</div>`;
     const bar = await filterBar("pfTasks", tasksView, "Tasks");
     let r, cs, ps; try { [r, cs, ps] = await Promise.all([api("/api/tasks?" + qs({ status: tk.status })), loadCases(), loadPeople()]); } catch (e) { return fail(e); }
     const t = todayStr();
+    if (__v !== viewSeq) return;   // the person already opened another screen
     $("#app").innerHTML = `${bar}
       <details class="card"><summary>+ Add a task</summary><form id="tkF" style="margin-top:8px"><div class="grid"><div class="full"><label>Task</label><input name="title" required></div>
         <div><label>Due</label><input type="date" name="due_date"></div><div><label>For</label><select name="assignee">${peopleOptions(ps, me.id)}</select></div>
@@ -522,14 +541,16 @@
       try { const r = await api("/api/time", { method: "POST", body }); toast(r.entry.amount == null && !Number(r.entry.rate) ? "Saved — set your hourly rate in Billing so this time is priced" : "Saved"); after(); } catch (y) { e.target.querySelector(".err").textContent = y.message; } };
   }
   VIEWS.billing = async function billingView() {
+    const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
     $("#app").innerHTML = `<div class="card mute">Loading billing…</div>`;
     let t, inv, cs; try { [t, inv, cs] = await Promise.all([api("/api/time?unbilled=1&who=" + (me.sees_firm ? "firm" : "mine")), api("/api/invoices" + (bl.inv ? "?status=" + bl.inv : "")), loadCases()]); } catch (e) { return fail(e); }
     const byCase = {}; t.entries.forEach(e => { const k = e.case_id || 0; (byCase[k] = byCase[k] || { label: e.case_id ? `${e.cause_no} · ${e.style || ""}` : "No case", total: 0, n: 0, id: e.case_id }); byCase[k].total += Number(e.value); byCase[k].n++; });
+    if (__v !== viewSeq) return;   // the person already opened another screen
     $("#app").innerHTML = `${timerCard(cs)}
       <details class="card"><summary>+ Log time or a charge</summary><div style="margin-top:8px">${timeForm(cs)}</div></details>
       <div class="card"><h2>Unbilled ${me.sees_firm ? "(whole firm)" : "(mine)"}</h2>
         ${Object.values(byCase).map(g => `<div style="border-top:1px solid var(--line);padding:8px 0"><div class="row"><b style="flex:1">${esc(g.label)}</b><b>${usd(g.total)}</b></div><div class="row" style="margin-top:4px"><span class="mute">${g.n} entr${g.n === 1 ? "y" : "ies"}</span>${g.id ? `<button class="btn sm" data-bill="${g.id}" style="margin-left:auto">Create invoice</button>` : ""}</div></div>`).join("") || `<div class="mute">Nothing unbilled.</div>`}
-        <details style="margin-top:8px"><summary class="mute">Show entries</summary>${t.entries.map(e => `<div style="border-top:1px solid var(--line);padding:6px 0"><div class="row"><span style="flex:1">${esc(e.description || "—")}</span><b>${usd(e.value)}</b></div><div class="row"><span class="mute">${d10(e.on_date)} · ${e.amount != null ? "flat" : (e.minutes / 60).toFixed(2) + " h × " + usd(e.rate)} · ${esc(e.who || "")}${e.cause_no ? " · " + esc(e.cause_no) : ""}</span><button class="btn sm ghost" data-tedel="${e.id}" style="margin-left:auto">Delete</button></div></div>`).join("") || ""}</details></div>
+        <details style="margin-top:8px"><summary class="mute">Show entries</summary>${t.entries.map(e => `<div style="border-top:1px solid var(--line);padding:6px 0"><div class="row"><span style="flex:1">${esc(e.description || "—")}</span><b>${usd(e.value)}</b></div><div class="row"><span class="mute">${d10(e.on_date)} · ${e.amount != null ? "flat" : (e.minutes / 60).toFixed(2) + " h × " + usd(e.rate)} · ${esc(e.who || "")}${e.cause_no ? " · " + esc(e.cause_no) : ""}</span>${e.user_id === me.id || ["admin", "partner", "manager"].includes(me.role) ? `<button class="btn sm ghost" data-tedel="${e.id}" style="margin-left:auto">Delete</button>` : ""}</div></div>`).join("") || ""}</details></div>
       <div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Invoices</h2><select id="invSt" style="width:auto"><option value="">All</option><option value="draft">Draft</option><option value="sent">Sent</option><option value="paid">Paid</option><option value="void">Void</option></select></div>
         ${inv.invoices.map(i => `<div style="border-top:1px solid var(--line);padding:8px 0;cursor:pointer" data-inv="${i.id}"><div class="row"><b>#${esc(i.number)}</b><span class="tag ${i.status === "paid" ? "g" : i.status === "void" ? "n" : i.status === "sent" ? "y" : "n"}">${esc(i.status)}</span><b style="margin-left:auto">${usd(i.total)}</b></div>
           <div class="mute">${esc(i.client || "No client")} · ${esc(i.cause_no || "")} · issued ${d10(i.issued)}${Number(i.total) - Number(i.paid) > 0 && i.status !== "void" ? ` · balance ${usd(Number(i.total) - Number(i.paid))}` : ""}</div></div>`).join("") || `<div class="mute" style="margin-top:8px">No invoices yet.</div>`}</div>
@@ -542,9 +563,11 @@
     $("#myRateSave").onclick = async () => { await api("/api/me/rate", { method: "PUT", body: { rate: $("#myRate").value } }); toast("Rate saved"); };
   };
   async function invoiceView(id) {
+    const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
     window.scrollTo(0, 0); $("#app").innerHTML = `<div class="card mute">Loading invoice…</div>`;
     let r; try { r = await api(`/api/invoices/${id}`); } catch (e) { return fail(e); }
     const i = r.invoice;
+    if (__v !== viewSeq) return;   // the person already opened another screen
     $("#app").innerHTML = `<button class="btn sm ghost" id="bk">← Billing</button>
       <div class="card" style="margin-top:10px"><div class="row"><h2 style="margin:0">Invoice #${esc(i.number)}</h2><span class="tag ${i.status === "paid" ? "g" : i.status === "sent" ? "y" : "n"}">${esc(i.status)}</span></div>
         <div class="mute">${esc(i.client || "No client linked")} · ${esc(i.style || "")} · Cause ${esc(i.cause_no || "")}</div>
@@ -567,8 +590,10 @@
 
   // ===================== TRUST (beta) =====================
   VIEWS.trust = async function trustView() {
+    const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
     $("#app").innerHTML = `<div class="card mute">Loading trust…</div>`;
     let r, ct, cs; try { [r, ct, cs] = await Promise.all([api("/api/trust"), api("/api/contacts?kind=client"), loadCases()]); } catch (e) { return fail(e); }
+    if (__v !== viewSeq) return;   // the person already opened another screen
     $("#app").innerHTML = `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4"><b>Beta.</b> Have your trust account procedures reviewed against the Texas rules before relying on this ledger. Client balances can't go below zero here.</div>
       <div class="card"><div class="mute">Held in trust for all clients</div><div class="stat">${usd(r.total)}</div></div>
       <details class="card" ${r.clients.length ? "" : "open"}><summary>+ Record a deposit or payment out</summary><form id="trF" style="margin-top:8px"><div class="grid">
@@ -590,9 +615,10 @@
   };
 
   // ===================== CASE HUB =====================
-  const hub = { id: null, sec: "overview" }, hubList = { mine: true, q: "" };
+  const hub = { id: null, sec: "overview" }, hubList = { mine: null, q: "" };
   // desktop: case list beside the open case (hidden on smaller screens)
   function clist(cs, id) {
+    if (hubList.mine === null) hubList.mine = me.role !== "paralegal";   // paralegals don't lead cases: start them on every case they can see
     const rows = cs.filter(c => !hubList.mine || c.user_id === me.id);
     return `<aside class="clist" aria-label="Case list"><div class="hd"><div class="row" style="justify-content:space-between"><h2 style="margin:0;font:600 16px var(--sans)">Cases</h2><span class="mute">${rows.length} open</span></div>
       <input type="search" id="clQ2" placeholder="Filter by name or cause no." aria-label="Filter cases" value="${esc(hubList.q)}">
@@ -606,7 +632,8 @@
     $$(".clist [data-cid]").forEach(b => b.onclick = () => caseHub(+b.dataset.cid));
   }
   async function caseHub(id) {
-    subView = true; window.scrollTo(0, 0); $("#app").innerHTML = `<div class="card mute">Loading case…</div>`;
+    const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
+    subView = true; if (window.leaveMail) leaveMail(); else document.body.classList.remove("mailmode"); window.scrollTo(0, 0); $("#app").innerHTML = `<div class="card mute">Loading case…</div>`;
     let r, cs, tpl, ps; try { [r, cs, tpl, ps] = await Promise.all([api(`/api/cases/${id}/hub`), loadCases(), api("/api/templates"), loadPeople()]); if (!rules) rules = (await api("/api/deadlines/rules")).rules; } catch (e) { return fail(e); }
     const c = r.case, t = todayStr();
     const unbilled = r.time.filter(x => x.billable && !x.invoice_id).reduce((s, x) => s + (x.amount != null ? Number(x.amount) : x.minutes / 60 * x.rate), 0);
@@ -623,6 +650,7 @@
     const tkRow = x => `<label class="tk"><input type="checkbox" data-task="${x.id}"><span>${esc(x.title)}<small${x.due_date && d10(x.due_date) < t ? ' style="color:var(--bad);font-weight:600"' : ""}>${x.due_date ? "Due " + esc(niceDate(x.due_date)) : "No due date"}${x.assignee_name ? " · " + esc(x.assignee_name) : ""}</small></span></label>`;
     const qaBtns = [["date", "Add date", "calendar"], ["task", "Add task", "tasks"], ["draft", "Draft", "file"], isLawyer() ? ["time", "Log time", "clock"] : ["people", "People", "clients"]];
     const nh = nextH ? new Date(nextH.date + "T12:00:00") : null;
+    if (__v !== viewSeq) return;   // the person already opened another screen
     $("#app").innerHTML = `<div class="ld">${clist(cs, id)}<div class="cdet">
       <nav class="crumb" aria-label="Breadcrumb"><button type="button" id="bk">${esc(back)}</button>${ic("chev", 14, 2)}<span>${esc(c.style || c.cause_no)}</span></nav>
       <button type="button" class="btn sm ghost phone-back" id="bk2">${ic("back", 16, 2)}${esc(back)}</button>

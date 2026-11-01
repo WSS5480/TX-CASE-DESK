@@ -50,11 +50,16 @@ function backend(local, tick) {
 async function plannedLookups(issues) {
   const ph = phrases(issues); if (!ph.length) return { total: 0, live: 0 };
   if (await lawdb.available()) return { total: 1 + PATHS.length * 2 + 2 + 3, live: 0 };
-  const since10 = yearsAgo(10), issueSpec = { all: ph };
-  const qs = [clQuery(issueSpec)];
-  for (const p of PATHS) { const base = merge(issueSpec, p.spec); qs.push(clQuery(merge(base, { any: [AFFIRM], none: [REVERSE] })), clQuery(merge(base, { any: [REVERSE] }))); }
-  let live = 0; for (const qq of qs) if (!(await cl.isCached({ query: qq, after: since10 }))) live++;
-  return { total: qs.length, live };
+  const since10 = yearsAgo(10);
+  const pathQs = spec => PATHS.flatMap(p => { const base = merge(spec, p.spec); return [clQuery(merge(base, { any: [AFFIRM], none: [REVERSE] })), clQuery(merge(base, { any: [REVERSE] }))]; });
+  const uncached = async list => { let n = 0; for (const qq of list) if (!(await cl.isCached({ query: qq, after: since10 }))) n++; return n; };
+  // the first search decides which issue search the ways forward use (all issues, or any issue when that finds too little):
+  // count the larger of the two so the estimate is an upper bound
+  const specs = [{ all: ph }, ...(ph.length > 1 ? [{ any: [ph] }] : [])];
+  const first = specs.map(s => clQuery(s));
+  let live = await uncached(first), worst = 0;
+  for (const s of specs) worst = Math.max(worst, await uncached(pathQs(s)));
+  return { total: first.length + PATHS.length * 2, live: live + worst };
 }
 
 async function analyze({ issues, county, appeals, onProgress }) {

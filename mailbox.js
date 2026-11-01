@@ -23,13 +23,24 @@ const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&a
 const REMOTE_IMG = /<img[^>]+src\s*=\s*["']?\s*https?:|url\(\s*["']?\s*https?:|background\s*=\s*["']?\s*https?:/i;
 
 // ---------- small caches ----------
-const msgCache = new Map();        // `${mbId}|${id}` -> { at, m }
-function cacheGet(mbId, id) { const e = msgCache.get(`${mbId}|${id}`); return e && Date.now() - e.at < 5 * 60e3 ? e.m : null; }
-function cachePut(mbId, id, m) {
-  msgCache.set(`${mbId}|${id}`, { at: Date.now(), m });
-  while (msgCache.size > 40) msgCache.delete(msgCache.keys().next().value);
+// An open email is kept a few minutes so its body and attachments aren't downloaded twice. Keyed by mailbox AND
+// its saved sign-in (a reconnect with another account never sees the old cache), capped in size, purged on a timer.
+const ver = mb => crypto.createHash("sha1").update(String(mb.enc_refresh || "") + "|" + (mb.email || "")).digest("hex").slice(0, 10);
+const ck = (mb, id) => `${mb.id}:${ver(mb)}|${id}`;
+const msgCache = new Map();        // key -> { at, m, size }
+const CACHE_TTL = 5 * 60e3, CACHE_MAX = 60 * 1024 * 1024, CACHE_ONE = 15 * 1024 * 1024;
+let cacheBytes = 0;
+const sizeOf = m => String(m.html || "").length + String(m.text || "").length + (m._atts || []).reduce((t, a) => t + (a.content ? a.content.length : 0), 0);
+function cacheDel(key) { const e = msgCache.get(key); if (e) { cacheBytes -= e.size; msgCache.delete(key); } }
+function cacheGet(mb, id) { const k = ck(mb, id), e = msgCache.get(k); if (!e) return null; if (Date.now() - e.at > CACHE_TTL) { cacheDel(k); return null; } return e.m; }
+function cachePut(mb, id, m) {
+  const k = ck(mb, id), size = sizeOf(m); cacheDel(k);
+  if (size > CACHE_ONE) return;                    // very large emails aren't kept
+  msgCache.set(k, { at: Date.now(), m, size }); cacheBytes += size;
+  while (msgCache.size && (cacheBytes > CACHE_MAX || msgCache.size > 40)) cacheDel(msgCache.keys().next().value);
 }
-function cacheDrop(mbId, id) { msgCache.delete(`${mbId}|${id}`); }
+function cacheDrop(mb, id) { cacheDel(ck(mb, id)); }
+setInterval(() => { const now = Date.now(); for (const [k, e] of msgCache) if (now - e.at > CACHE_TTL) cacheDel(k); }, 60e3).unref();
 const folderCache = new Map();     // mbId -> { at, list }
 
 // attachments the person uploaded for an email they're writing (kept in memory for an hour)
@@ -128,7 +139,7 @@ const MS = {
     return { items: (j?.value || []).map(msRow), next: j?.["@odata.nextLink"] || null };
   },
   async get(mb, id, { markRead = true } = {}) {
-    const hit = cacheGet(mb.id, id); if (hit) return hit;
+    const hit = cacheGet(mb, id); if (hit) return hit;
     const m = await gfetch(mb, `/me/messages/${enc(id)}?$select=${MSEL},ccRecipients,bccRecipients,replyTo,body,internetMessageId`, { headers: { Prefer: 'outlook.body-content-type="html"' } });
     let atts = [];
     const html = m.body?.contentType === "html" ? m.body.content || "" : null;
@@ -140,7 +151,7 @@ const MS = {
     const out = { ...msRow(m), cc: (m.ccRecipients || []).map(r => addr(r.emailAddress)).filter(Boolean), bcc: (m.bccRecipients || []).map(r => addr(r.emailAddress)).filter(Boolean),
       replyTo: (m.replyTo || []).map(r => addr(r.emailAddress)).filter(Boolean), html, text: html == null ? m.body?.content || "" : null,
       attachments: atts.filter(a => !a.inline), inlineAtts: atts.filter(a => a.inline), messageId: m.internetMessageId || null };
-    cachePut(mb.id, id, out); return out;
+    cachePut(mb, id, out); return out;
   },
   async inline(mb, id, m) {
     const map = {};
@@ -161,20 +172,22 @@ const MS = {
     const body = {};
     if (read !== undefined) body.isRead = !!read;
     if (flagged !== undefined) body.flag = { flagStatus: flagged ? "flagged" : "notFlagged" };
-    await gfetch(mb, `/me/messages/${enc(id)}`, { method: "PATCH", body }); cacheDrop(mb.id, id);
+    await gfetch(mb, `/me/messages/${enc(id)}`, { method: "PATCH", body }); cacheDrop(mb, id);
   },
   async move(mb, ids, dest) {
-    for (const id of ids) { await gfetch(mb, `/me/messages/${enc(id)}/move`, { method: "POST", body: { destinationId: dest } }); cacheDrop(mb.id, id); }
+    for (const id of ids) { await gfetch(mb, `/me/messages/${enc(id)}/move`, { method: "POST", body: { destinationId: dest } }); cacheDrop(mb, id); }
   },
-  async remove(mb, ids, folder) {
+  async remove(mb, ids) {
     const roles = await msRoles(mb);
-    const inTrash = folder && (roles[folder] === "deleted" || folder === "deleteditems");
+    let permanent = false;
     for (const id of ids) {
-      if (inTrash) await gfetch(mb, `/me/messages/${enc(id)}`, { method: "DELETE" });
+      // decide by the folder the email is actually in (a search can show emails from any folder)
+      const where = await gfetch(mb, `/me/messages/${enc(id)}?$select=parentFolderId`);
+      if (roles[where?.parentFolderId] === "deleted") { permanent = true; await gfetch(mb, `/me/messages/${enc(id)}`, { method: "DELETE" }); }
       else await gfetch(mb, `/me/messages/${enc(id)}/move`, { method: "POST", body: { destinationId: "deleteditems" } });
-      cacheDrop(mb.id, id);
+      cacheDrop(mb, id);
     }
-    return { permanent: !!inTrash };
+    return { permanent };
   },
   async attach(mb, msgId, f) {
     if (f.data.length < 3 * 1024 * 1024)
@@ -191,7 +204,7 @@ const MS = {
   async send(mb, { mode, ref, to, cc, bcc, subject, html, files, draftOnly, draftId }) {
     const fields = { subject, toRecipients: rc(to), ccRecipients: rc(cc), bccRecipients: rc(bcc) };
     let id;
-    if (draftId) { id = draftId; await gfetch(mb, `/me/messages/${enc(id)}`, { method: "PATCH", body: { ...fields, body: { contentType: "HTML", content: html } } }); }
+    if (draftId) { id = draftId; await gfetch(mb, `/me/messages/${enc(id)}`, { method: "PATCH", body: { ...fields, body: { contentType: "HTML", content: html } } }); cacheDrop(mb, draftId); }
     else if (ref && ["reply", "replyAll", "forward"].includes(mode)) {
       const act = { reply: "createReply", replyAll: "createReplyAll", forward: "createForward" }[mode];
       const d = await gfetch(mb, `/me/messages/${enc(ref)}/${act}`, { method: "POST", body: {} });
@@ -202,6 +215,7 @@ const MS = {
       id = d.id;
     }
     for (const f of files) await MS.attach(mb, id, f);
+    cacheDrop(mb, id); if (ref) cacheDrop(mb, ref);
     if (draftOnly) return { draft: true };
     await gfetch(mb, `/me/messages/${enc(id)}/send`, { method: "POST" });
     return { sent: true };
@@ -219,6 +233,7 @@ function dropConn(id) {
 const creds = mb => JSON.parse(box.open(mb.enc_refresh));
 async function imapConn(mb) {
   const e = pool.get(mb.id);
+  if (e && e.ver !== ver(mb)) { dropConn(mb.id); return imapConn(mb); }   // reconnected with another account or password
   if (e) {
     if (e.p) return e.p;
     if (e.cl.usable) { clearTimeout(e.timer); e.timer = setTimeout(() => dropConn(mb.id), 120e3); return e.cl; }
@@ -226,7 +241,7 @@ async function imapConn(mb) {
   }
   const c = creds(mb);
   const cl = mail.imapClient(c);
-  const entry = { cl, p: null, timer: null };
+  const entry = { cl, p: null, timer: null, ver: ver(mb) };
   cl.on("error", () => { if (pool.get(mb.id) === entry) dropConn(mb.id); });
   cl.on("close", () => { if (pool.get(mb.id) === entry) { clearTimeout(entry.timer); pool.delete(mb.id); } });
   entry.p = cl.connect().then(() => { entry.p = null; entry.timer = setTimeout(() => dropConn(mb.id), 120e3); return cl; },
@@ -365,7 +380,7 @@ const IM = {
     });
   },
   async get(mb, id, { markRead = true } = {}) {
-    const hit = cacheGet(mb.id, id); if (hit) return hit;
+    const hit = cacheGet(mb, id); if (hit) return hit;
     const { path, uid } = unId(id);
     const { simpleParser } = require("mailparser");
     const out = await inFolder(mb, path, async cl => {
@@ -384,7 +399,7 @@ const IM = {
         html: p.html || null, text: p.html ? null : (p.text || ""), preview: "",
         attachments: atts.filter(a => !a.inline).map(({ content, cid, ...a }) => a), _atts: atts, messageId: p.messageId || null, references: refs };
     });
-    cachePut(mb.id, id, out); return out;
+    cachePut(mb, id, out); return out;
   },
   async inline(mb, id, m) {
     const map = {};
@@ -406,12 +421,12 @@ const IM = {
       if (read !== undefined) await (read ? cl.messageFlagsAdd : cl.messageFlagsRemove).call(cl, String(uid), ["\\Seen"], { uid: true });
       if (flagged !== undefined) await (flagged ? cl.messageFlagsAdd : cl.messageFlagsRemove).call(cl, String(uid), ["\\Flagged"], { uid: true });
     });
-    cacheDrop(mb.id, id);
+    cacheDrop(mb, id);
   },
   byFolder(ids) { const g = new Map(); for (const id of ids) { const { path, uid } = unId(id); g.set(path, [...(g.get(path) || []), uid]); } return g; },
   async move(mb, ids, dest) {
     for (const [path, uids] of IM.byFolder(ids)) { if (path === dest) continue; await inFolder(mb, path, cl => cl.messageMove(uids.join(","), dest, { uid: true })); }
-    ids.forEach(id => cacheDrop(mb.id, id));
+    ids.forEach(id => cacheDrop(mb, id));
   },
   async remove(mb, ids) {
     const trash = await IM.roleFolder(mb, "deleted");
@@ -420,8 +435,13 @@ const IM = {
       if (!trash || path === trash) { permanent = true; await inFolder(mb, path, cl => cl.messageDelete(uids.join(","), { uid: true })); }
       else await inFolder(mb, path, cl => cl.messageMove(uids.join(","), trash, { uid: true }));
     }
-    ids.forEach(id => cacheDrop(mb.id, id));
+    ids.forEach(id => cacheDrop(mb, id));
     return { permanent };
+  },
+  // a replaced or sent draft is erased, not moved to Deleted (draft text can be privileged)
+  async erase(mb, ids) {
+    for (const [path, uids] of IM.byFolder(ids)) await inFolder(mb, path, cl => cl.messageDelete(uids.join(","), { uid: true }));
+    ids.forEach(id => cacheDrop(mb, id));
   },
   async send(mb, opt, user) {
     const MailComposer = require("nodemailer/lib/mail-composer");
@@ -437,7 +457,7 @@ const IM = {
     const refs = orig && opt.mode !== "forward" ? [...(orig.references || []), orig.messageId].filter(Boolean) : undefined;
     // re-saving or sending a draft keeps the files already attached to it
     if (opt.draftId) { const d = await IM.get(mb, opt.draftId, { markRead: false }).catch(() => null);
-      if (d) quoted.atts.push(...(d._atts || []).filter(a => a.content && !a.inline).map(a => ({ filename: a.name, content: a.content, contentType: a.type }))); }
+      if (d) quoted.atts.push(...(d._atts || []).filter(a => a.content && (!a.inline || a.cid)).map(a => ({ filename: a.name, content: a.content, contentType: a.type, ...(a.inline && a.cid ? { cid: a.cid } : {}) }))); }
     const msg = {
       from: { name: user.name || "", address: c.user }, to: fmt(opt.to), cc: fmt(opt.cc), bcc: fmt(opt.bcc), subject: opt.subject,
       html: emailDoc(opt.html + quoted.html), text: htmlText(opt.html + quoted.html).replace(/\n{3,}/g, "\n\n").trim(),
@@ -450,7 +470,7 @@ const IM = {
       const drafts = await IM.roleFolder(mb, "drafts");
       if (!drafts) throw fail("This mailbox has no Drafts folder.", { status: 400 });
       const cl = await imapConn(mb); await cl.append(drafts, await build(true), ["\\Draft", "\\Seen"]);
-      if (opt.draftId) await IM.remove(mb, [opt.draftId]).catch(() => {});
+      if (opt.draftId) await IM.erase(mb, [opt.draftId]).catch(() => {});
       return { draft: true };
     }
     await smtpSend(mb, c, msg);
@@ -459,8 +479,8 @@ const IM = {
       const sent = await IM.roleFolder(mb, "sent").catch(() => null);
       if (sent) { try { const cl = await imapConn(mb); await cl.append(sent, await build(true), ["\\Seen"]); } catch (e) { console.warn("[mailx] couldn't save to Sent:", e.message); } }
     }
-    if (orig) { const { path, uid } = unId(opt.ref); inFolder(mb, path, cl => cl.messageFlagsAdd(String(uid), [opt.mode === "forward" ? "$Forwarded" : "\\Answered"], { uid: true })).catch(() => {}); cacheDrop(mb.id, opt.ref); }
-    if (opt.draftId) await IM.remove(mb, [opt.draftId]).catch(() => {});
+    if (orig) { const { path, uid } = unId(opt.ref); inFolder(mb, path, cl => cl.messageFlagsAdd(String(uid), [opt.mode === "forward" ? "$Forwarded" : "\\Answered"], { uid: true })).catch(() => {}); cacheDrop(mb, opt.ref); }
+    if (opt.draftId) await IM.erase(mb, [opt.draftId]).catch(() => {});
     return { sent: true };
   }
 };
@@ -491,7 +511,8 @@ async function smtpSend(mb, c, msg) {
   const nodemailer = require("nodemailer");
   let last;
   for (const s of smtpFor(c)) {
-    const t = nodemailer.createTransport({ host: s.host, port: s.port, secure: s.tls === false ? false : s.port === 465, ...(s.tls === false ? { ignoreTLS: true } : {}),
+    // 465 = TLS from the start; anything else must upgrade with STARTTLS before the password is sent (local tests set tls:false)
+    const t = nodemailer.createTransport({ host: s.host, port: s.port, secure: s.tls === false ? false : s.port === 465, ...(s.tls === false ? { ignoreTLS: true } : s.port !== 465 ? { requireTLS: true } : {}),
       auth: { user: c.user, pass: c.pass }, connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 60000 });
     try {
       await t.sendMail(msg);
@@ -525,6 +546,9 @@ function strip($) {
   });
 }
 const linkify = s => s.replace(/\bhttps?:\/\/[^\s<>"']+/g, u => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`);
+const APP_HOST = (() => { try { return new URL(process.env.APP_URL || "https://tx-case-desk.onrender.com").host.toLowerCase(); } catch { return "tx-case-desk.onrender.com"; } })();
+const outside = u => { try { const x = new URL(String(u).trim()); return /^https?:$/.test(x.protocol) && x.host.toLowerCase() !== APP_HOST; } catch { return false; } };
+const cssUrls = css => String(css).replace(/url\(\s*(['"]?)([^'")]*)\1\s*\)/gi, (m0, q, u) => /^data:image\//i.test(u.trim()) || outside(u) ? m0 : "url(about:invalid)");
 function renderSafe(m, inline, images) {
   let body;
   if (m.html) {
@@ -533,7 +557,11 @@ function renderSafe(m, inline, images) {
     $("img").each((_, el) => { const s = String(el.attribs.src || "");
       if (/^cid:/i.test(s)) { const k = s.slice(4).replace(/^<|>$/g, "").toLowerCase(); if (inline[k]) $(el).attr("src", inline[k]); else $(el).removeAttr("src"); }
       else if (!images && /^\s*https?:/i.test(s)) $(el).removeAttr("src").removeAttr("srcset").attr("data-blocked", "1");   // pictures from the web stay off until asked (no tracking pixels)
+      else if (s && !/^data:image\//i.test(s) && !outside(s)) $(el).removeAttr("src").removeAttr("srcset");      // nothing loads from the app itself
     });
+    $("[background]").each((_, el) => { if (!outside(el.attribs.background)) $(el).removeAttr("background"); });
+    $("[style]").each((_, el) => $(el).attr("style", cssUrls(el.attribs.style)));
+    $("style").each((_, el) => $(el).text(cssUrls($(el).text())));
     $("a[href]").attr("target", "_blank").attr("rel", "noopener noreferrer");
     body = ($("head style").toString() || "") + ($("body").html() ?? $.root().html());
   } else body = `<div class="pt">${linkify(esc(m.text || ""))}</div>`;
@@ -556,7 +584,37 @@ function people(list) {
   return (Array.isArray(list) ? list : []).slice(0, 100).map(a => ({ name: String(a?.name || "").replace(/[\r\n<>"]/g, "").trim().slice(0, 120), email: String(a?.email || "").trim().toLowerCase() }))
     .filter(a => { if (!EMAIL.test(a.email)) throw fail(`"${a.email}" isn't an email address.`, { status: 400 }); return true; });
 }
-function cleanHtml(h) { const $ = cheerio.load(String(h || ""), null, false); strip($); return $.html(); }
+// Strict allow-list for HTML that goes back into the app page (editing a draft) or out in an email you write:
+// simple formatting only, no styles, no pictures, links only to web/mail addresses. Everything else is
+// unwrapped (its text kept) or, for dangerous elements, removed with its content.
+const SAFE_TAGS = new Set(["p", "br", "div", "span", "b", "strong", "i", "em", "u", "s", "strike", "ul", "ol", "li", "a", "blockquote",
+  "h1", "h2", "h3", "h4", "h5", "h6", "table", "thead", "tbody", "tfoot", "tr", "td", "th", "hr", "pre", "code", "sup", "sub", "small"]);
+const DROP_TAGS = new Set(["script", "style", "svg", "math", "iframe", "frame", "frameset", "object", "embed", "applet", "template", "noscript",
+  "textarea", "title", "head", "meta", "link", "base", "form", "input", "button", "select", "option", "xmp", "noembed", "noframes",
+  "plaintext", "video", "audio", "canvas", "img", "picture", "source", "map", "area", "dialog", "portal"]);
+function safeHtml(h) {
+  const $ = cheerio.load(String(h || ""), null, false);
+  const walk = node => {
+    for (const el of [...(node.children || [])]) {
+      if (el.type === "text") continue;
+      if (el.type !== "tag") { $(el).remove(); continue; }            // comments, CDATA, scripts, styles
+      const name = String(el.name || "").toLowerCase();
+      if (DROP_TAGS.has(name) || name.includes(":")) { $(el).remove(); continue; }
+      walk(el);
+      if (!SAFE_TAGS.has(name)) { $(el).replaceWith($(el).contents()); continue; }
+      for (const a of Object.keys(el.attribs || {})) {
+        const v = String(el.attribs[a] || "");
+        const keep = (name === "a" && a === "href" && /^(https?:|mailto:)/i.test(v.replace(/[\u0000-\u0020\u007f-\u009f]/g, "")))
+          || ((name === "td" || name === "th") && (a === "colspan" || a === "rowspan") && /^\d{1,2}$/.test(v));
+        if (!keep) $(el).removeAttr(a);
+      }
+      if (name === "a") $(el).attr("rel", "noopener noreferrer");
+    }
+  };
+  walk($.root()[0]);
+  return $.html();
+}
+const cleanHtml = safeHtml;
 
 function mount(app, { requireAuth, wrap, audit }) {
   const R = express.Router();
@@ -584,7 +642,7 @@ function mount(app, { requireAuth, wrap, audit }) {
     const m = await adapter(mb).get(mb, id, { markRead: req.query.peek !== "1" });
     const { html, text, _atts, inlineAtts, references, ...out } = m;
     out.remote = !!(html && REMOTE_IMG.test(html));
-    if (req.query.body === "1") out.body = html ? (() => { const $ = cheerio.load(html); strip($); return $("body").html() ?? ""; })() : esc(text || "").replace(/\n/g, "<br>");
+    if (req.query.body === "1") out.body = html ? safeHtml((() => { const $ = cheerio.load(html); return $("body").html() ?? ""; })()) : esc(text || "").replace(/\n/g, "<br>");
     res.json(out);
   }));
   R.get("/view", h(async (req, res) => {
@@ -625,12 +683,14 @@ function mount(app, { requireAuth, wrap, audit }) {
   R.post("/upload", express.raw({ type: () => true, limit: "25mb" }), h(async (req, res) => {
     sweepUploads();
     if (!req.body || !req.body.length) return res.status(400).json({ error: "Empty file." });
-    let mine = 0; for (const v of uploads.values()) if (v.userId === req.user.id) mine += v.data.length;
+    let mine = 0, all = 0; for (const v of uploads.values()) { all += v.data.length; if (v.userId === req.user.id) mine += v.data.length; }
     if (mine + req.body.length > 40 * 1024 * 1024) return res.status(400).json({ error: "Too many attachments waiting — send or discard your draft first." });
+    if (all + req.body.length > 200 * 1024 * 1024) return res.status(503).json({ error: "The server is busy with other attachments — try again in a few minutes." });
     const token = crypto.randomBytes(16).toString("hex");
-    const name = String(decodeURIComponent(req.get("X-File-Name") || "file")).replace(/[\r\n"\\/]/g, "_").slice(0, 180) || "file";
+    let raw = String(req.get("X-File-Name") || "file"); try { raw = decodeURIComponent(raw); } catch { /* not encoded — use as is */ }
+    const name = raw.replace(/[\r\n"\\/]/g, "_").slice(0, 180) || "file";
     const type = String(req.get("X-File-Type") || "application/octet-stream").replace(/[^\w.+\/-]/g, "").slice(0, 100) || "application/octet-stream";
-    uploads.set(token, { userId: req.user.id, name, type, data: Buffer.from(req.body), exp: Date.now() + 3600e3 });
+    uploads.set(token, { userId: req.user.id, name, type, data: req.body, exp: Date.now() + 3600e3 });
     res.json({ token, name, size: req.body.length });
   }));
   R.post("/send", h(async (req, res) => {

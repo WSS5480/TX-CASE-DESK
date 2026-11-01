@@ -16,6 +16,21 @@ const LIMITS = { min: [5, +process.env.CL_MINUTE_MS || 60e3], hour: [50, 3600e3]
 const used = [];                       // timestamps of live lookups (newest last)
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let blockedUntil = 0;                  // set from CourtListener's Retry-After
+// The counts are also kept in the database, so a restart (the free server sleeps and wakes) doesn't reset the daily limit.
+let loaded = null;
+function load() {
+  if (!loaded) loaded = (async () => {
+    try {
+      await q("DELETE FROM cl_calls WHERE at < now() - interval '2 days'");
+      const r = await q("SELECT (extract(epoch FROM at) * 1000)::bigint AS t FROM cl_calls WHERE at > now() - interval '1 day' ORDER BY at");
+      const have = new Set(used); r.rows.map(x => +x.t).filter(t => !have.has(t)).forEach(t => used.push(t)); used.sort((a, b) => a - b);
+      const b = (await q("SELECT v FROM cl_state WHERE k='blocked_until'")).rows[0]; if (b) blockedUntil = Math.max(blockedUntil, +b.v);
+    } catch (e) { loaded = null; console.warn("[courtlistener] couldn't load saved lookup counts:", e.message); }
+  })();
+  return loaded;
+}
+const remember = t => q("INSERT INTO cl_calls(at) VALUES(to_timestamp($1 / 1000.0))", [t]).catch(() => {});
+const rememberBlock = () => q("INSERT INTO cl_state(k, v) VALUES('blocked_until', $1) ON CONFLICT (k) DO UPDATE SET v=EXCLUDED.v", [blockedUntil]).catch(() => {});
 function budget() {
   const now = Date.now(); while (used.length && now - used[0] > LIMITS.day[1]) used.shift();
   const n = w => used.filter(t => now - t < LIMITS[w][1]).length;
@@ -23,6 +38,7 @@ function budget() {
 }
 const whenText = ms => { const m = Math.ceil(ms / 60e3); return m <= 1 ? "in about a minute" : m < 60 ? `in about ${m} minutes` : `in about ${Math.ceil(m / 60)} hour${m > 60 ? "s" : ""}`; };
 async function slot({ background = false } = {}) {
+  await load();
   for (;;) {
     const now = Date.now(), b = budget();
     if (blockedUntil > now) { if (blockedUntil - now <= 90e3 && !background) { await sleep(blockedUntil - now + 500); continue; }
@@ -31,7 +47,7 @@ async function slot({ background = false } = {}) {
     if (b.day <= reserve) { const t = used[used.length - LIMITS.day[0] + reserve] || now; throw new CLError(`Today's free case-law lookups are used up (125 a day). More open up ${whenText(t + LIMITS.day[1] - now)}. Results already looked up still show.`, 429); }
     if (b.hour <= (background ? 10 : 0)) { const inHour = used.filter(x => now - x < LIMITS.hour[1]); throw new CLError(`This hour's free case-law lookups are used up (50 an hour). More open up ${whenText(inHour[0] + LIMITS.hour[1] - now)}. Results already looked up still show.`, 429); }
     if (b.minute <= 0) { const inMin = used.filter(x => now - x < LIMITS.min[1]); await sleep(inMin[0] + LIMITS.min[1] - now + 250); continue; }
-    used.push(now); return;
+    used.push(now); remember(now); return;
   }
 }
 
@@ -46,7 +62,7 @@ async function clFetch(path, { auth = false, background = false } = {}) {
   catch (e) { throw new CLError("Can't reach the case-law source right now. Try again shortly.", 503); }
   if (res.status === 429) {
     const ra = +(res.headers.get("retry-after") || 0);
-    blockedUntil = Date.now() + (ra > 0 ? ra * 1000 : 60e3);
+    blockedUntil = Date.now() + (ra > 0 ? ra * 1000 : 60e3); rememberBlock();
     console.warn(`[courtlistener] 429 — retry after ${ra || 60}s; used last minute/hour/day: ${5 - budget().minute}/${50 - budget().hour}/${125 - budget().day}`);
     if (!background && ra > 0 && ra <= 90) { await sleep(ra * 1000 + 500); return clFetch(path, { auth, background }); }
     throw new CLError(`The free case-law source asked us to wait. Try again ${whenText(blockedUntil - Date.now())}. Results already looked up still show.`, 429);
@@ -159,4 +175,4 @@ async function isCached({ query, court, after, before, page }) {
   return !!(rows[0] && Date.now() - new Date(rows[0].at) < SEARCH_TTL_HOURS * 3600e3);
 }
 
-module.exports = { search, opinion, citator, TX_COURTS, CLError, budget, isCached };
+module.exports = { search, opinion, citator, TX_COURTS, CLError, budget: async () => { await load(); return budget(); }, isCached };

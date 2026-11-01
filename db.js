@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS opinions (
   absolute_url TEXT,
   fetched_at TIMESTAMPTZ DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS cl_calls (at TIMESTAMPTZ NOT NULL DEFAULT now());   -- CourtListener lookups (free limits: 5/min, 50/hr, 125/day), kept across restarts
+CREATE INDEX IF NOT EXISTS cl_calls_at ON cl_calls(at);
+CREATE TABLE IF NOT EXISTS cl_state (k TEXT PRIMARY KEY, v BIGINT);
 CREATE TABLE IF NOT EXISTS api_cache (
   key TEXT PRIMARY KEY,
   body JSONB NOT NULL,
@@ -186,6 +189,9 @@ ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS scope_req TEXT;   -- scopes asked
 ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS scope_got TEXT;   -- scopes Microsoft granted (full mail needs Mail.ReadWrite + Mail.Send)
 -- Shared court inbox: one firm address that receives court emails (efile@firm.com). Admins or chosen staff assign what can't be matched.
 ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS shared_firm INT REFERENCES firms(id) ON DELETE CASCADE;   -- set = this is the firm's shared court inbox
+-- ROLLBACK NOTE: code from before Nov 1, 2026 needs the old constraint back. Run this first, then deploy the old code:
+--   DELETE FROM mailboxes WHERE shared_firm IS NOT NULL;
+--   ALTER TABLE mailboxes ADD CONSTRAINT mailboxes_user_id_provider_key UNIQUE (user_id, provider);
 ALTER TABLE mailboxes DROP CONSTRAINT IF EXISTS mailboxes_user_id_provider_key;
 CREATE UNIQUE INDEX IF NOT EXISTS mailboxes_personal ON mailboxes(user_id, provider) WHERE shared_firm IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS mailboxes_shared ON mailboxes(shared_firm) WHERE shared_firm IS NOT NULL;
@@ -323,6 +329,7 @@ CREATE TABLE IF NOT EXISTS contacts (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS contacts_firm ON contacts(firm_id, lower(name));
+ALTER TABLE contacts ADD COLUMN IF NOT EXISTS created_by INT;   -- who added it; contacts on no case are seen by them (and whole-firm roles)
 CREATE TABLE IF NOT EXISTS case_contacts (
   case_id INT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
   contact_id INT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,

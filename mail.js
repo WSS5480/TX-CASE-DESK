@@ -13,8 +13,9 @@ const PROVIDERS = {
     id: () => (process.env.MS_CLIENT_ID || "").trim(), secret: () => (process.env.MS_CLIENT_SECRET || "").trim(),
     auth: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
     token: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-    // full mail (read, organize, send) + calendar, so the app works like Outlook; older connections keep the read-only scope until they reconnect
-    scope: "openid email offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite"
+    // Connecting for court emails asks only to read mail (works even where IT limits what apps may request).
+    // Full mail in the app (organize, send) + calendar is a separate, explicit "Turn on full mail" step (FULL_MS_SCOPE).
+    scope: "openid email offline_access User.Read Mail.Read"
   },
   google: {
     name: "Gmail / Google Workspace",
@@ -32,6 +33,7 @@ const domainOf = a => String(a || "").split("@")[1]?.toLowerCase() || "";
 const GMAIL_QUERY = "from:(efiletexas.gov OR tylertech.com OR tylertech.cloud OR tylerhost.net OR txcourts.gov OR tx.us OR clerk)";
 const redirect = p => `${APP}/api/mail/callback/${p}`;
 const MS_OLD_SCOPE = "openid email offline_access User.Read Mail.Read";   // what mailboxes connected before Nov 2026 approved
+const FULL_MS_SCOPE = "openid email offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite";
 const configured = () => Object.fromEntries(Object.entries(PROVIDERS).map(([k, v]) => [k, !!(v.id() && v.secret())]));
 const NAMES = { ...Object.fromEntries(Object.entries(PROVIDERS).map(([k, v]) => [k, v.name])), imap: "Email (password sign-in)" };
 
@@ -62,9 +64,10 @@ async function startUrl(provider, user, opts = {}) {
   const P = PROVIDERS[provider];
   const keys = provider === "microsoft" ? await msKeys(user.firm_id) : { id: P.id(), source: "app" };
   const state = crypto.randomBytes(16).toString("hex");
-  states.set(state, { userId: user.id, firmId: user.firm_id, provider, keySource: keys.source, shared: !!opts.shared, exp: Date.now() + 10 * 60e3 });
+  const scope = provider === "microsoft" && opts.full ? FULL_MS_SCOPE : P.scope;
+  states.set(state, { userId: user.id, firmId: user.firm_id, provider, keySource: keys.source, shared: !!opts.shared, scope, exp: Date.now() + 10 * 60e3 });
   for (const [k, v] of states) if (v.exp < Date.now()) states.delete(k);
-  const p = new URLSearchParams({ client_id: keys.id, response_type: "code", redirect_uri: redirect(provider), scope: P.scope, state });
+  const p = new URLSearchParams({ client_id: keys.id, response_type: "code", redirect_uri: redirect(provider), scope, state });
   if (provider === "google") { p.set("access_type", "offline"); p.set("prompt", "consent"); p.set("include_granted_scopes", "true"); }
   if (provider === "microsoft") p.set("prompt", "select_account");
   return `${provider === "microsoft" ? msAuth(keys.tenant, "authorize") : P.auth}?${p}`;
@@ -94,11 +97,11 @@ async function finish(provider, code, state) {
   const { rows } = st.shared ? await q(`INSERT INTO mailboxes(user_id, provider, email, enc_refresh, enc_access, access_expires, status, last_error, key_source, scope_req, scope_got, shared_firm)
     VALUES($1,$2,$3,$4,$5,now() + ($6 || ' seconds')::interval,'ok',NULL,$7,$8,$9,$10)
     ON CONFLICT(shared_firm) WHERE shared_firm IS NOT NULL DO UPDATE SET user_id=$1, provider=$2, email=$3, enc_refresh=$4, enc_access=$5, access_expires=EXCLUDED.access_expires, status='ok', last_error=NULL, key_source=$7, last_seen=NULL, stats=NULL, scope_req=$8, scope_got=$9
-    RETURNING id`, [st.userId, provider, email, box.seal(t.refresh_token), box.seal(t.access_token), String((t.expires_in || 3600) - 120), keys ? keys.source : "app", PROVIDERS[provider].scope, t.scope || null, st.firmId])
+    RETURNING id`, [st.userId, provider, email, box.seal(t.refresh_token), box.seal(t.access_token), String((t.expires_in || 3600) - 120), keys ? keys.source : "app", st.scope || PROVIDERS[provider].scope, t.scope || null, st.firmId])
   : await q(`INSERT INTO mailboxes(user_id, provider, email, enc_refresh, enc_access, access_expires, status, last_error, key_source, scope_req, scope_got)
     VALUES($1,$2,$3,$4,$5,now() + ($6 || ' seconds')::interval,'ok',NULL,$7,$8,$9)
     ON CONFLICT(user_id, provider) WHERE shared_firm IS NULL DO UPDATE SET email=$3, enc_refresh=$4, enc_access=$5, access_expires=EXCLUDED.access_expires, status='ok', last_error=NULL, key_source=$7, last_seen=NULL, stats=NULL, scope_req=$8, scope_got=$9
-    RETURNING id`, [st.userId, provider, email, box.seal(t.refresh_token), box.seal(t.access_token), String((t.expires_in || 3600) - 120), keys ? keys.source : "app", PROVIDERS[provider].scope, t.scope || null]);
+    RETURNING id`, [st.userId, provider, email, box.seal(t.refresh_token), box.seal(t.access_token), String((t.expires_in || 3600) - 120), keys ? keys.source : "app", st.scope || PROVIDERS[provider].scope, t.scope || null]);
   await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [st.userId, { provider, email, ...(st.shared ? { shared: true } : {}) }]);
   syncMailbox(rows[0].id, { days: 30 }).catch(() => {}); // first pull: last 30 days
   return { userId: st.userId, email, shared: st.shared };

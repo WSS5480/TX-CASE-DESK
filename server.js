@@ -29,6 +29,7 @@ app.set("trust proxy", 1);
 app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", "data:"] } } }));
 app.use("/api/ingest", express.json({ limit: "80mb" }));
 app.use("/api/inbound", express.json({ limit: "30mb" })); // Postmark inbound email webhook // bulk case-law loader (gzip JSON batches)
+app.use("/api/mailx/send", express.json({ limit: "12mb" }));   // an email body can be larger than other requests
 app.use(express.json({ limit: "2mb" }));
 app.use(session({
   store: new PgSession({ pool, createTableIfMissing: true }),
@@ -313,7 +314,7 @@ app.put("/api/me/profile", requireAuth, wrap(async (req, res) => {
 }));
 app.get("/api/firm/users", requireAuth, requireAdmin, wrap(async (req, res) => {
   const { rows } = await q(`SELECT id,email,name,bar_number,role,counties,totp_enabled,active,last_login,access,works_with,trust_access,title,phone,must_change_pw,court_handler,
-    to_char(licensed_on,'YYYY-MM-DD') AS licensed_on, bar_card_at, (SELECT count(*)::int FROM mailboxes m WHERE m.user_id=users.id) AS mailboxes FROM users WHERE firm_id=$1 ORDER BY name`, [req.user.firm_id]);
+    to_char(licensed_on,'YYYY-MM-DD') AS licensed_on, bar_card_at, (SELECT count(*)::int FROM mailboxes m WHERE m.user_id=users.id AND m.shared_firm IS NULL) AS mailboxes FROM users WHERE firm_id=$1 ORDER BY name`, [req.user.firm_id]);
   res.json({ users: rows });
 }));
 const ROLES = ["admin", "partner", "manager", "attorney", "paralegal"], ACCESS = ["own", "team", "firm"];
@@ -437,9 +438,9 @@ function startLawJob(req, { issues, county, onDone }) {
   return (async () => {
     const plan = await analysis.plannedLookups(issues);
     if (!plan.total) throw Object.assign(new Error("Add the issues first (e.g. slip and fall, constructive notice, grocery store)."), { status: 400 });
-    const b = cl.budget();
-    if (plan.live > b.day) throw Object.assign(new Error(`This ranking needs ${plan.live} lookups from the free case-law source and only ${Math.max(0, b.day)} are left today (125 a day). Try again tomorrow, or rank fewer issues.`), { status: 429 });
-    if (plan.live > b.hour) throw Object.assign(new Error(`This ranking needs ${plan.live} lookups and only ${Math.max(0, b.hour)} are left this hour (50 an hour). Try again later this hour.`), { status: 429 });
+    const b = await cl.budget();
+    if (plan.live > b.day) throw Object.assign(new Error(`This ranking needs up to ${plan.live} lookups from the free case-law source and only ${Math.max(0, b.day)} are left today (125 a day). Try again tomorrow, or rank fewer issues.`), { status: 429 });
+    if (plan.live > b.hour) throw Object.assign(new Error(`This ranking needs up to ${plan.live} lookups and only ${Math.max(0, b.hour)} are left this hour (50 an hour). Try again later this hour.`), { status: 429 });
     for (const [k, j] of lawJobs) if (Date.now() - j.at > 3600e3) lawJobs.delete(k);
     const id = crypto.randomBytes(8).toString("hex");
     const job = { userId: req.user.id, status: "running", done: 0, total: plan.total, live: plan.live, at: Date.now() };
@@ -627,7 +628,7 @@ app.delete("/api/firm/mail", requireAuth, requireAdmin, wrap(async (req, res) =>
 app.get("/api/mail/connect/:provider", requireAuth, wrap(async (req, res) => {
   const p = req.params.provider;
   if (!mail.PROVIDERS[p] || !(await mail.configuredFor(req.user.firm_id))[p]) return res.redirect("/?mailerror=" + encodeURIComponent("That email provider isn't switched on yet."));
-  res.redirect(await mail.startUrl(p, req.user));
+  res.redirect(await mail.startUrl(p, req.user, { full: req.query.full === "1" }));
 }));
 // Password sign-in (IMAP) for Titan / GoDaddy / Zoho and other hosts
 app.post("/api/mail/imap", requireAuth, wrap(async (req, res) => {
@@ -690,7 +691,7 @@ async function courtInboxInfo(firmId) {
   if (mb && mail.running.has(mb.id)) mb.status = "syncing";
   const fm = (await q("SELECT provider, domain, status FROM firm_mail WHERE firm_id=$1", [firmId])).rows[0] || null;
   const queue = (await q("SELECT count(*)::int n FROM inbound_emails WHERE firm_id=$1 AND shared AND user_id IS NULL AND dismissed_at IS NULL", [firmId])).rows[0].n;
-  const routed = (await q("SELECT count(*)::int n FROM inbound_emails WHERE firm_id=$1 AND shared AND user_id IS NOT NULL AND received_at > now() - interval '30 days'", [firmId])).rows[0].n;
+  const routed = (await q("SELECT count(*)::int n FROM inbound_emails WHERE firm_id=$1 AND shared AND user_id IS NOT NULL AND dismissed_at IS NULL AND received_at > now() - interval '30 days'", [firmId])).rows[0].n;
   const fwd = f.court_token ? inbound.addressFor(f.court_token) : null;
   return { mode: f.court_mode || "each", mailbox: mb, court_email: f.court_email || null, court_stats: f.court_stats || null, firm_mail: fm,
     forward: fwd, forward_on: !!inbound.addressFor("x"), queue, routed30: routed,
@@ -740,7 +741,8 @@ app.post("/api/firm/court-inbox/sync", requireAuth, requireAdmin, wrap(async (re
   if (mb) mail.syncMailbox(mb.id).catch(() => {});
   const f = (await q("SELECT court_email FROM firms WHERE id=$1", [req.user.firm_id])).rows[0];
   if (f?.court_email) mail.syncFirm(req.user.firm_id).catch(() => {});
-  res.json({ started: !!(mb || f?.court_email) });
+  const mode = ((await q("SELECT court_mode FROM firms WHERE id=$1", [req.user.firm_id])).rows[0] || {}).court_mode;
+  res.json({ started: mode !== "each" && !!(mb || f?.court_email) });
 }));
 app.delete("/api/firm/court-inbox/mailbox", requireAuth, requireAdmin, wrap(async (req, res) => {
   await q("DELETE FROM mailboxes WHERE shared_firm=$1", [req.user.firm_id]); await audit(req, "court_inbox_disconnected"); res.json({ ok: true });
@@ -751,7 +753,7 @@ const needHandler = (req, res, next) => courtHandler(req.user) ? next() : res.st
 app.get("/api/court-queue", requireAuth, needHandler, wrap(async (req, res) => {
   const { rows } = await q(`SELECT id, from_addr, subject, body, kind, causes, parsed, received_at FROM inbound_emails
     WHERE firm_id=$1 AND shared AND user_id IS NULL AND dismissed_at IS NULL ORDER BY received_at DESC LIMIT 100`, [req.user.firm_id]);
-  const cm = await caseMap(req.user.firm_id, [...new Set(rows.flatMap(r => r.causes || []))]);
+  const cm = await caseMap(req.user.firm_id, [...new Set(rows.flatMap(r => r.causes || []))], req.user);
   const people = (await q("SELECT id, name, role FROM users WHERE firm_id=$1 AND active AND role IN ('admin','partner','manager','attorney') ORDER BY name", [req.user.firm_id])).rows;
   res.json({ people, emails: rows.map(r => { const sm = inbound.summarize(r, cm); const p = r.parsed || {};
     return { id: r.id, from_addr: r.from_addr, subject: r.subject, received_at: r.received_at, type: sm.type, dates: sm.dates, cases: sm.cases,
@@ -760,16 +762,31 @@ app.get("/api/court-queue", requireAuth, needHandler, wrap(async (req, res) => {
 }));
 app.post("/api/court-queue/:id/assign", requireAuth, needHandler, wrap(async (req, res) => {
   const fid = req.user.firm_id, b = req.body || {};
-  const e = (await q("SELECT * FROM inbound_emails WHERE id=$1 AND firm_id=$2 AND shared", [+req.params.id, fid])).rows[0];
-  if (!e) return res.status(404).json({ error: "Not found" });
+  // only notices still waiting can be assigned; one already delivered to an attorney is theirs
+  const e = (await q("SELECT * FROM inbound_emails WHERE id=$1 AND firm_id=$2 AND shared AND user_id IS NULL AND dismissed_at IS NULL", [+req.params.id, fid])).rows[0];
+  if (!e) { const was = (await q("SELECT 1 FROM inbound_emails WHERE id=$1 AND firm_id=$2 AND shared", [+req.params.id, fid])).rowCount;
+    return res.status(was ? 409 : 404).json({ error: was ? "That notice was already assigned or removed." : "Not found" }); }
   let owner = null, caseId = null, created = false;
   if (b.case_id || b.link_cause) {
-    const c = b.case_id ? (await q("SELECT id, user_id, cause_no FROM cases WHERE id=$1 AND firm_id=$2", [+b.case_id, fid])).rows[0]
-      : (await q("SELECT id, user_id, cause_no FROM cases WHERE firm_id=$1 AND upper(cause_no)=$2 ORDER BY id LIMIT 1", [fid, String(b.link_cause).trim().toUpperCase()])).rows[0];
-    if (!c) return res.status(404).json({ error: b.link_cause ? "No case with that cause # in the app — pick \"A new case — add it\" instead." : "Case not found" });
+    const sel = "SELECT c.id, c.user_id, c.cause_no, c.county, u.name AS owner_name, coalesce(u.active, false) AS owner_active, u.role AS owner_role FROM cases c LEFT JOIN users u ON u.id=c.user_id";
+    let c;
+    if (b.case_id) c = (await q(`${sel} WHERE c.id=$1 AND c.firm_id=$2`, [+b.case_id, fid])).rows[0];
+    else {
+      // the same cause # can exist in two counties: use the county picked on the form; ask for it when it's needed
+      const all = (await q(`${sel} WHERE c.firm_id=$1 AND upper(c.cause_no)=$2 ORDER BY c.id`, [fid, String(b.link_cause || "").trim().toUpperCase()])).rows;
+      // county only matters when the cause # is in more than one county (then: the form's county, else the one on the notice)
+      const co = new Set(all.map(x => String(x.county || "").toLowerCase())).size > 1 ? (b.county || (e.parsed || {}).county || "") : "";
+      const inCo = co ? all.filter(x => String(x.county || "").toLowerCase() === String(co).toLowerCase()) : all;
+      if (!all.length || (co && !inCo.length)) return res.status(404).json({ error: `No case with that cause #${co ? " in " + co + " County" : ""} in the app — pick "A new case — add it" instead.` });
+      if (new Set(inCo.map(x => x.county)).size > 1) return res.status(400).json({ error: `That cause # is in more than one county (${[...new Set(inCo.map(x => x.county))].join(", ")}). Pick the county.` });
+      c = inCo[0];
+    }
+    if (!c) return res.status(404).json({ error: "Case not found" });
+    if (!c.owner_active) return res.status(400).json({ error: `That case's attorney${c.owner_name ? " (" + c.owner_name + ")" : ""} no longer has an active account. Send it to an attorney instead, and reassign the case in Cases.` });
+    if (!["admin", "partner", "manager", "attorney"].includes(c.owner_role)) return res.status(400).json({ error: `That case is led by ${c.owner_name || "someone"}, who isn't an attorney. Send it to an attorney instead, or change the case's lead attorney in Cases.` });
     owner = c.user_id; caseId = c.id;
   } else {
-    const a = (await q("SELECT id FROM users WHERE id=$1 AND firm_id=$2 AND active", [+b.attorney || 0, fid])).rows[0];
+    const a = (await q("SELECT id FROM users WHERE id=$1 AND firm_id=$2 AND active AND role IN ('admin','partner','manager','attorney')", [+b.attorney || 0, fid])).rows[0];
     if (!a) return res.status(400).json({ error: "Pick the attorney." });
     owner = a.id;
     if (b.create) {
@@ -779,12 +796,15 @@ app.post("/api/court-queue/:id/assign", requireAuth, needHandler, wrap(async (re
         VALUES($1,$2,$3,$4,$5,$6,'Active',$7,'email',true,true) ON CONFLICT DO NOTHING RETURNING id, user_id, cause_no, county`,
         [fid, owner, county, cause, String(b.create.court || "").slice(0, 200) || null, String(b.create.style || "").slice(0, 300) || null, String(b.create.next_setting || "").slice(0, 300) || null]);
       if (ins.rows[0]) { caseId = ins.rows[0].id; created = true; practice.onCaseCreated({ ...ins.rows[0], firm_id: fid }, owner).catch(() => {}); }
-      else { const ex = (await q("SELECT id, user_id FROM cases WHERE firm_id=$1 AND county=$2 AND upper(cause_no)=$3", [fid, county, cause])).rows[0]; if (ex) { caseId = ex.id; owner = ex.user_id; } }
+      else { const ex = (await q("SELECT c.id, c.user_id, coalesce(u.active, false) AND u.role IN ('admin','partner','manager','attorney') AS owner_ok FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE c.firm_id=$1 AND c.county=$2 AND upper(c.cause_no)=$3", [fid, county, cause])).rows[0];
+        if (ex) { caseId = ex.id; if (ex.owner_ok) owner = ex.user_id; } }   // the case already exists: it goes to that case's attorney (if an active attorney)
     }
   }
   if (caseId) await q("UPDATE cases SET filing_alert=$2, filing_alert_at=now(), updated_at=now() WHERE id=$1", [caseId, `${created ? "New case added from court email: " : ""}${e.subject || "Court update"}`.slice(0, 600)]);
-  await q(`UPDATE inbound_emails SET user_id=$2, routed='manual', assigned_by=$3, assigned_at=now(), read_at=NULL,
-    matched_case_ids = CASE WHEN $4::int IS NULL THEN matched_case_ids ELSE array(SELECT DISTINCT unnest(coalesce(matched_case_ids,'{}') || ARRAY[$4::int])) END WHERE id=$1`, [e.id, owner, req.user.id, caseId]);
+  const done = await q(`UPDATE inbound_emails SET user_id=$2, routed='manual', assigned_by=$3, assigned_at=now(), read_at=NULL,
+    matched_case_ids = CASE WHEN $4::int IS NULL THEN matched_case_ids ELSE array(SELECT DISTINCT unnest(coalesce(matched_case_ids,'{}') || ARRAY[$4::int])) END
+    WHERE id=$1 AND user_id IS NULL AND dismissed_at IS NULL`, [e.id, owner, req.user.id, caseId]);
+  if (!done.rowCount) return res.status(409).json({ error: "Someone else just assigned or removed that notice." });
   await audit(req, "court_notice_assigned", { email: e.id, to: owner, case: caseId, created });
   res.json({ ok: true, owner, case_id: caseId, created });
 }));
@@ -803,29 +823,37 @@ app.post("/api/inbound/postmark", wrap(async (req, res) => {
 }));
 app.get("/api/email-alerts", requireAuth, wrap(async (req, res) => {
   const token = await inbound.tokenFor(req.user.id);
-  const { rows } = await q("SELECT id, from_addr, subject, kind, causes, matched_case_ids, confirm_code, received_at FROM inbound_emails WHERE user_id=$1 ORDER BY received_at DESC LIMIT 30", [req.user.id]);
+  const { rows } = await q("SELECT id, from_addr, subject, kind, causes, matched_case_ids, confirm_code, received_at FROM inbound_emails WHERE user_id=$1 AND dismissed_at IS NULL ORDER BY received_at DESC LIMIT 30", [req.user.id]);
   const confirm = rows.find(r => r.kind === "forward_confirm" && r.confirm_code);
   const known = rows.length ? (await q("SELECT upper(cause_no) c FROM cases WHERE firm_id=$1", [req.user.firm_id])).rows.map(r => r.c) : [];
   res.json({ address: inbound.addressFor(token), configured: !!inbound.addressFor(token), confirm: confirm ? { code: confirm.confirm_code, at: confirm.received_at } : null,
     emails: rows.filter(r => r.kind !== "forward_confirm").map(r => ({ ...r, unmatched: (r.causes || []).filter(c => !known.includes(c)) })) });
 }));
 app.get("/api/email-alerts/:id", requireAuth, wrap(async (req, res) => {
-  const { rows } = await q(`SELECT id, from_addr, subject, body, html, kind, causes, received_at, user_id, shared FROM inbound_emails WHERE id=$1 AND (user_id=$2 OR ($4 AND shared AND firm_id=$3 AND user_id IS NULL))`,
-    [+req.params.id, req.user.id, req.user.firm_id, courtHandler(req.user)]);
+  // the person it went to, an assigner (unassigned shared notices), or anyone who can see a case the email is about
+  const p = [+req.params.id, req.user.id, req.user.firm_id, courtHandler(req.user)];
+  // "about a case" = matched to it when it arrived, or same cause # in the same county (a cause # alone can repeat across counties)
+  const onCase = `(dismissed_at IS NULL AND EXISTS (SELECT 1 FROM cases c WHERE c.firm_id=$3 AND (c.id = ANY(e.matched_case_ids) OR (upper(c.cause_no) = ANY(e.causes) AND lower(e.parsed->>'county') = lower(c.county))) AND ${access.caseCond(req.user, "c", p)}))`;
+  const { rows } = await q(`SELECT id, from_addr, subject, body, html, kind, causes, matched_case_ids, parsed, received_at, user_id, shared FROM inbound_emails e WHERE id=$1 AND firm_id=$3 AND (user_id=$2 OR ($4 AND shared AND user_id IS NULL) OR ${onCase})`, p);
   if (!rows[0]) return res.status(404).json({ error: "Not found" });
   if (rows[0].user_id === req.user.id) await q("UPDATE inbound_emails SET read_at=now() WHERE id=$1 AND read_at IS NULL", [rows[0].id]);
-  const cm = await caseMap(req.user.firm_id, rows[0].causes || []);
+  const cm = await caseMap(req.user.firm_id, rows[0].causes || [], req.user, rows[0].matched_case_ids || [], (rows[0].parsed || {}).county);
+  delete rows[0].matched_case_ids; delete rows[0].parsed;
   res.json({ email: rows[0], summary: inbound.summarize(rows[0], cm) });
 }));
-async function caseMap(firmId, causes) {
+// cause # → case. The same cause # can exist in two counties: the case the email was matched to wins, then the county it names.
+async function caseMap(firmId, causes, viewer, prefer = [], county = null) {
   if (!causes.length) return {};
-  const { rows } = await q("SELECT id, upper(cause_no) c, style, county FROM cases WHERE firm_id=$1 AND upper(cause_no) = ANY($2)", [firmId, causes]);
+  const p = [firmId, causes], only = viewer ? " AND " + access.caseCond(viewer, "cases", p) : "";   // only cases this person may see
+  const { rows } = await q(`SELECT id, upper(cause_no) c, style, county FROM cases WHERE firm_id=$1 AND upper(cause_no) = ANY($2)${only}`, p);
+  const lc = x => String(x || "").toLowerCase(), score = r => (prefer.includes(r.id) ? 2 : 0) + (county && lc(r.county) === lc(county) ? 1 : 0);
+  rows.sort((a, b) => score(a) - score(b));   // best match last, so it is the one kept
   return Object.fromEntries(rows.map(r => [r.c, { id: r.id, style: r.style, county: r.county }]));
 }
 // Inbox: every email received for this attorney, newest first, each with a short summary.
 app.get("/api/inbox", requireAuth, wrap(async (req, res) => {
-  const { rows } = await q("SELECT id, from_addr, subject, body, kind, causes, read_at, received_at FROM inbound_emails WHERE user_id=$1 ORDER BY received_at DESC LIMIT 200", [req.user.id]);
-  const cm = await caseMap(req.user.firm_id, [...new Set(rows.flatMap(r => r.causes || []))]);
+  const { rows } = await q("SELECT id, from_addr, subject, body, kind, causes, read_at, received_at FROM inbound_emails WHERE user_id=$1 AND dismissed_at IS NULL ORDER BY received_at DESC LIMIT 200", [req.user.id]);
+  const cm = await caseMap(req.user.firm_id, [...new Set(rows.flatMap(r => r.causes || []))], req.user);
   res.json({ unread: rows.filter(r => !r.read_at).length, emails: rows.map(r => {
     const sm = inbound.summarize(r, cm);
     return { id: r.id, from_addr: r.from_addr, subject: r.subject, received_at: r.received_at, read: !!r.read_at, type: sm.type, dates: sm.dates, cases: sm.cases, preview: (sm.lines[0] || String(r.body || "").replace(/\s+/g, " ").slice(0, 140)) };
@@ -856,7 +884,7 @@ app.post("/api/law/analyze", requireAuth, rateLimit({ windowMs: 60e3, max: 3, me
   try { const r = await startLawJob(req, { issues, county }); await audit(req, "law_ranked", { county, issues: issues.slice(0, 120), lookups: r.live }); res.json({ ...r, issues }); }
   catch (e) { res.status(e.status || 502).json({ error: e.message }); }
 }));
-app.get("/api/law/budget", requireAuth, wrap(async (req, res) => res.json({ ...cl.budget(), local: await lawdb.available() })));
+app.get("/api/law/budget", requireAuth, wrap(async (req, res) => res.json({ ...(await cl.budget()), local: await lawdb.available() })));
 app.get("/api/law/opinion/:cid", requireAuth, lawLimiter, wrap(async (req, res) => {
   const cid = +req.params.cid; if (!cid) return res.status(400).json({ error: "Bad id" });
   const op = (await lawdb.available() && await lawdb.opinion(cid)) || await cl.opinion(cid);

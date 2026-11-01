@@ -32,6 +32,7 @@ svg{flex:none}
 /* ---------- never wider than the screen (phone or desktop) ---------- */
 body{overflow-wrap:break-word}
 main *,.sheet *,.cmp *{min-width:0}
+main button,main .btn,main .tag,main .seg,.sheet button,.sheet .btn,.cmp button,.cmp .btn{min-width:auto;overflow-wrap:normal}
 .wrap{overflow-x:clip}
 td,th,.optext,.chip,.tag{overflow-wrap:anywhere}
 pre{white-space:pre-wrap;overflow-wrap:anywhere}
@@ -196,6 +197,9 @@ details>summary{cursor:pointer;font-weight:600;min-height:28px;display:list-item
 .it .t{width:70px;flex:none;}.it .t.wide{width:96px}.it .t{font-variant-numeric:tabular-nums;font-weight:600;font-size:14px}
 .it .t small{display:block;font-weight:500;color:var(--mute);font-size:12px}
 .it .b{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+@media (max-width:420px){   /* narrow phones: the status moves under the title instead of squeezing it to one word per line */
+  .it{flex-wrap:wrap}.it .b{flex:1 1 150px;min-width:150px}
+}
 .it .h{font-weight:600}
 .it .m{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13px;color:var(--mute)}
 /* case screen */
@@ -234,9 +238,9 @@ details>summary{cursor:pointer;font-weight:600;min-height:28px;display:list-item
 details.opt{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0}
 details.opt>summary{cursor:pointer;font-weight:600}
 .brk{overflow-wrap:anywhere;min-width:0}
-button.lk{background:none;border:0;padding:0;color:var(--acc);text-decoration:underline;text-underline-offset:2px;cursor:pointer;font:inherit}
+button.lk{background:none;border:0;padding:0;color:var(--acc);text-decoration:underline;text-underline-offset:2px;cursor:pointer;font:inherit;text-align:left}
 .chk{display:flex;flex-wrap:wrap}
-.auth{display:flex;gap:10px;align-items:flex-start;margin:10px 0}.auck{margin:2px 0 0;min-height:0}
+.auth{display:flex;gap:10px;align-items:flex-start;margin:10px 0}.auck{margin:2px 0 0;min-height:0;flex:none;min-width:24px}
 .banner{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;background:var(--warn-t);border:1px solid #ecd9ad;border-radius:12px;padding:10px 14px;margin:0 0 14px}
 .banner>span{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 /* dashboard */
@@ -286,6 +290,7 @@ button.lk{background:none;border:0;padding:0;color:var(--acc);text-decoration:un
 .k-h{background:#e6eaf2;color:#17223b}.k-d{background:#f6eceb;color:#7a2e2e}.k-m{background:#e1efec;color:#1b5a52}.k-o{background:#eeece8;color:#3a4356}
 .calbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;margin:0 0 10px}
 .calnav{flex-wrap:nowrap;gap:4px}.calt{font-size:24px;margin-left:6px;white-space:nowrap}
+@media (max-width:999px){ .calnav{flex-wrap:wrap;row-gap:6px}.calt{white-space:normal;flex:1 1 100%;margin:2px 0 0} }   /* phones: the full date on its own line */
 .typef{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
 .tf{display:inline-flex;align-items:center;gap:8px;min-height:34px;padding:0 12px;border-radius:17px;border:1px solid var(--field);background:#fff;color:var(--ink2);font-size:13px;cursor:pointer}
 .tf[aria-pressed=false]{opacity:.55;text-decoration:line-through}
@@ -402,11 +407,11 @@ body.mailmode #ver{display:none}
 .msrch input{flex:1;min-width:0;border:0;background:transparent;min-height:0;height:34px;padding:0;box-shadow:none!important}
 .msrch:focus-within{border-color:var(--navy);background:#fff}
 .mlist{flex:1;min-height:0;overflow-y:auto}
-.mrow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;width:100%;text-align:left;border:0;border-bottom:1px solid var(--line2);border-left:3px solid transparent;background:#fff;padding:10px 14px 10px 11px;cursor:pointer;color:var(--ink);font-size:14px}
-.mrow:hover{background:#faf9f6}.mrow.on{background:var(--navy-t)}
-.mrow.u{border-left-color:var(--acc)}.mrow.u .mfrom,.mrow.u .msub{font-weight:700}
+.mlrow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;width:100%;text-align:left;border:0;border-bottom:1px solid var(--line2);border-left:3px solid transparent;background:#fff;padding:10px 14px 10px 11px;cursor:pointer;color:var(--ink);font-size:14px}
+.mlrow:hover{background:#faf9f6}.mlrow.on{background:var(--navy-t)}
+.mlrow.u{border-left-color:var(--acc)}.mlrow.u .mfrom,.mlrow.u .msub{font-weight:700}
 .mfrom,.msub,.mprev{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mdate{font-size:12px;color:var(--mute);white-space:nowrap}.mrow.u .mdate{color:var(--acc);font-weight:600}
+.mdate{font-size:12px;color:var(--mute);white-space:nowrap}.mlrow.u .mdate{color:var(--acc);font-weight:600}
 .msub{font-size:13.5px}.mico{display:flex;align-items:center;gap:4px;justify-content:flex-end;color:var(--mute)}.mico .tag{font-size:11px;padding:1px 6px}
 .mflag{color:var(--bad)}
 .mprev{grid-column:1/-1;font-size:13px;color:var(--mute)}
@@ -423,14 +428,16 @@ body.mailmode #ver{display:none}
 .rsp{flex:1}
 .rback{display:none;margin:10px 14px 0;align-self:flex-start}.rbar .rback{margin:0}
 .rsub{margin:16px 18px 10px;font-size:21px;line-height:1.3;overflow-wrap:anywhere}
-.rhead{display:flex;gap:12px;align-items:flex-start;padding:0 18px 12px;min-width:0}
-.rwho{flex:1;min-width:0;font-size:14px;overflow-wrap:anywhere}.rwho .mute{font-size:13px;margin-top:2px}
+.rhead{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:flex-start;padding:0 18px 12px;min-width:0}
+.rwho{flex:1 1 220px;min-width:0;font-size:14px;overflow-wrap:anywhere}.rwho .mute{font-size:13px;margin-top:2px}
 .rdt{font-size:13px;white-space:nowrap}
 .rtags,.rimg{margin:0 18px 10px;font-size:13px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .rimg{background:var(--chip);border-radius:8px;padding:8px 10px;color:var(--ink2)}
+.rimg{flex-wrap:nowrap}.rimg>span{flex:1;min-width:0}.rimg>svg{flex:none}
 .ratt{display:flex;flex-wrap:wrap;gap:8px;margin:0 18px 12px}
 .achip{display:inline-flex;align-items:center;gap:8px;max-width:100%;min-width:0;border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:13px;background:#fff}
 .achip .an{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px}
+.achip>:not(.an){flex:none;white-space:nowrap}   /* "Download", "234 KB" never split */
 .rframe{width:100%;border:0;border-top:1px solid var(--line2);min-height:240px;display:block;background:#fff}
 .rpad{padding:0 18px}
 .mvl{display:flex;flex-direction:column;gap:2px}
@@ -451,20 +458,21 @@ body.mailmode #ver{display:none}
 .ed{flex:1;min-height:180px;padding:12px 16px;outline:none;font-size:15px;line-height:1.5;overflow-wrap:anywhere}
 .ed .sig{color:var(--ink2)}
 .cnote{margin:0 16px 8px;font-size:13px}
-.atts{display:flex;flex-wrap:wrap;gap:6px;padding:0 14px 10px}
+.catts{display:flex;flex-wrap:wrap;gap:6px;padding:0 14px 10px}
 .cmpf{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 14px calc(10px + var(--safe));border-top:1px solid var(--line)}
 .cmpf .err{flex-basis:100%;margin:0}
-.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 @media (max-width:999px){
   body.mailmode main{padding:0 0 calc(var(--tabs) + 24px + var(--safe))}
   .mx{display:block;height:auto}
   .mxf{display:none}
   .mxl{border:0;overflow:visible}.mlist{overflow:visible}
-  .mxr{display:none}
+  .mxr{display:none;overflow:visible}   /* the page scrolls on phones, so the toolbar sticks under the header, not 58px into the pane */
   .mx.reading .mxl{display:none}.mx.reading .mxr{display:block}
   .rback{display:inline-flex}
   .rbar{top:58px;padding:8px 10px;gap:4px}.rbar .btn span{display:none}.rbar .btn{padding:0 10px}
-  .mpb{display:flex;gap:8px;align-items:center;padding:12px 14px 0}.mpb select{flex:1;min-width:0}
+  .mpb{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 14px 0}.mpb select{flex:1 1 150px;min-width:0}
+  .mpb .mconn{margin:0}
+  .rbar{gap:2px}
   .mlh{border-bottom:0}
   .rsub{margin:16px 14px 8px;font-size:19px}.rbar .rback{padding:0 10px}.rbar .rback{font-size:0;gap:0}.rbar .rback svg{width:18px;height:18px}.rhead,.rtags,.rimg,.ratt{margin-left:14px;margin-right:14px;padding-left:0;padding-right:0}.rpad{padding:0 14px}
   .rdt{display:none}
