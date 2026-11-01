@@ -567,20 +567,36 @@ function analysisPanel(c) {
    <label for="iss" style="margin-top:10px">Issues (comma-separated)</label><input id="iss" value="${esc(c.issues || "")}" placeholder="slip and fall, constructive notice, grocery store">
    <div class="row" style="margin-top:10px"><button class="btn" id="run">Run analysis</button>
    <label class="ck" style="margin:0"><input type="checkbox" id="lw" ${c.law_watch ? "checked" : ""}>Watch for new case law (daily)</label></div>
-   <p class="mute" style="margin-bottom:0">Takes about a minute. Uses public Texas opinions only — no AI.</p></div><div id="ar"></div>`;
+   <p class="mute" style="margin-bottom:0">Takes a few minutes on the free case-law source. Uses public Texas opinions only — no AI.</p></div><div id="ar"></div>`;
 }
 async function wireAnalysis(c) {
   $("#lw").onchange = async e => { if (e.target.checked && !$("#iss").value.trim()) { e.target.checked = false; return toast("Enter issues first"); }
     try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { law_watch: e.target.checked, issues: $("#iss").value } }); c.law_watch = e.target.checked; c.issues = $("#iss").value; toast(e.target.checked ? "Watching for new case law" : "Stopped"); } catch (err) { fail(err); } };
   $("#run").onclick = async () => {
     if (!$("#iss").value.trim()) { toast("Enter the case's issues first"); $("#iss").focus(); return; }
-    const btn = $("#run"); btn.disabled = true; btn.textContent = "Analyzing…";
-    $("#ar").innerHTML = `<div class="card mute">Searching Texas opinions and counting outcomes…</div>`;
-    try { const r = await api(`/api/cases/${c.id}/analyze`, { method: "POST", body: { issues: $("#iss").value } }); c.issues = r.issues; renderAnalysis(r.result, r.created_at); }
-    catch (e) { $("#ar").innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
-    btn.disabled = false; btn.textContent = "Run again";
+    c.issues = $("#iss").value;
+    await runRanking(`/api/cases/${c.id}/analyze`, { issues: $("#iss").value }, $("#run"), true);
   };
   try { const a = (await api(`/api/cases/${c.id}/analysis`)).analysis; if (a && $("#ar")) { renderAnalysis(a.result, a.created_at); $("#run").textContent = "Run again"; } } catch (e) {}
+}
+// Rankings run in the background (the free case-law source allows 5 lookups a minute); show progress until done.
+async function runRanking(url, body, btn, savesToCase) {
+  const ar = $("#ar"); btn.disabled = true; const label = btn.textContent; btn.textContent = "Ranking…";
+  const show = h => { if ($("#ar")) $("#ar").innerHTML = h; };
+  const prog = (d, t, live) => show(`<div class="card"><b>Ranking cases… ${d} of ${t} lookups</b><div class="meter" aria-hidden="true" style="margin:10px 0 6px"><span style="width:${t ? Math.round(d / t * 100) : 0}%"></span></div>
+    <p class="mute" style="margin:0">${live ? `The free case-law source allows 5 lookups a minute, so this takes about ${Math.max(1, Math.ceil((t - d) / 5))} minute${Math.ceil((t - d) / 5) === 1 ? "" : "s"}. ${savesToCase ? "You can leave this page; the result is saved to the case." : "Keep this page open until it finishes."}` : "Using saved lookups — almost done."}</p></div>`);
+  let r;
+  try { r = await api(url, { method: "POST", body }); }
+  catch (e) { show(`<div class="card err">${esc(e.message)}</div>`); btn.disabled = false; btn.textContent = label; return null; }
+  prog(0, r.total, r.live);
+  for (;;) {
+    await new Promise(ok => setTimeout(ok, 2500));
+    let j; try { j = await api(`/api/law/jobs/${r.job}`); } catch (e) { show(`<div class="card err">${esc(e.message)}</div>`); break; }
+    if (j.status === "done") { if ($("#ar")) renderAnalysis(j.result, j.created_at); btn.disabled = false; btn.textContent = "Run again"; return j; }
+    if (j.status === "error") { show(`<div class="card err">${esc(j.error)}</div>`); break; }
+    prog(j.done, j.total, j.live);
+  }
+  btn.disabled = false; btn.textContent = label; return null;
 }
 async function analysisView(c) {
   window.scrollTo(0, 0);
@@ -627,15 +643,14 @@ function lawView(autoSearch) {
    <div class="card"><h2>Best cases for an argument</h2><p class="mute" style="margin-top:0">Ranks the ways forward on your issues by how often Texas appeals courts upheld them, and the authorities to cite: Texas Supreme Court first, then the county's court of appeals, newest and most cited.</p>
    <form id="rkF"><div class="grid"><div class="full"><label for="rkI">Issues (separate with commas)</label><input id="rkI" name="issues" value="${esc(law.issues)}" placeholder="slip and fall, constructive notice, grocery store"></div>
    <div><label for="rkC">County of the case</label><select id="rkC" name="rkCounty"><option value="">Any county</option>${[...new Set([...(me.counties || []), ...META.counties])].map(c => `<option ${law.rkCounty === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></div></div>
-   <div class="row" style="margin-top:10px"><button class="btn" id="rkGo">Rank cases</button><span class="mute">Takes about a minute. Public Texas opinions only — no AI.</span></div></form></div>
+   <div class="row" style="margin-top:10px"><button class="btn" id="rkGo">Rank cases</button><span class="mute">Takes a few minutes on the free case-law source. Public Texas opinions only — no AI.</span></div></form></div>
    <div id="ar"></div><div id="res"></div>`;
   $("#lf").onsubmit = e => { e.preventDefault(); Object.assign(law, Object.fromEntries(new FormData(e.target))); if (!law.issues && law.q) { law.issues = law.q.replace(/"|\b(AND|OR)\b/g, ",").split(",").map(s => s.trim()).filter(Boolean).join(", "); $("#rkI").value = law.issues; } runSearch(); };
   $("#rkF").onsubmit = async e => { e.preventDefault(); law.issues = $("#rkI").value.trim(); law.rkCounty = $("#rkC").value;
     if (!law.issues) { toast("Enter the issues first"); $("#rkI").focus(); return; }
-    const btn = $("#rkGo"); btn.disabled = true; btn.textContent = "Ranking…"; $("#ar").innerHTML = `<div class="card mute">Searching Texas opinions and counting outcomes…</div>`;
-    try { const r = await api("/api/law/analyze", { method: "POST", body: { issues: law.issues, county: law.rkCounty } }); law.rank = r; renderAnalysis(r.result, r.created_at); $("#ar").scrollIntoView({ behavior: "smooth", block: "start" }); }
-    catch (x) { $("#ar").innerHTML = `<div class="card err">${esc(x.message)}</div>`; }
-    btn.disabled = false; btn.textContent = "Rank again"; };
+    $("#ar").scrollIntoView({ behavior: "smooth", block: "start" });
+    const j = await runRanking("/api/law/analyze", { issues: law.issues, county: law.rkCounty }, $("#rkGo"));
+    if (j) law.rank = { result: j.result, created_at: j.created_at }; };
   if (law.rank) renderAnalysis(law.rank.result, law.rank.created_at);
   if (law.results) renderResults(); else if (autoSearch && law.q) runSearch();
 }

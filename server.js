@@ -430,18 +430,44 @@ app.post("/api/cases/:id/ack", requireAuth, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 // Case-law analysis (rule-based, no AI)
+// Case-law rankings run in the background: the free CourtListener source allows 5 lookups a minute, so a
+// ranking can take a few minutes. The page polls /api/law/jobs/:id for progress and the result.
+const lawJobs = new Map();   // id -> { userId, status, done, total, live, result, error, at, onDone }
+function startLawJob(req, { issues, county, onDone }) {
+  return (async () => {
+    const plan = await analysis.plannedLookups(issues);
+    if (!plan.total) throw Object.assign(new Error("Add the issues first (e.g. slip and fall, constructive notice, grocery store)."), { status: 400 });
+    const b = cl.budget();
+    if (plan.live > b.day) throw Object.assign(new Error(`This ranking needs ${plan.live} lookups from the free case-law source and only ${Math.max(0, b.day)} are left today (125 a day). Try again tomorrow, or rank fewer issues.`), { status: 429 });
+    if (plan.live > b.hour) throw Object.assign(new Error(`This ranking needs ${plan.live} lookups and only ${Math.max(0, b.hour)} are left this hour (50 an hour). Try again later this hour.`), { status: 429 });
+    for (const [k, j] of lawJobs) if (Date.now() - j.at > 3600e3) lawJobs.delete(k);
+    const id = crypto.randomBytes(8).toString("hex");
+    const job = { userId: req.user.id, status: "running", done: 0, total: plan.total, live: plan.live, at: Date.now() };
+    lawJobs.set(id, job);
+    analysis.analyze({ issues, county, appeals: county ? APPEALS[county] : null, onProgress: n => { job.done = Math.min(n, job.total); } })
+      .then(async result => { job.result = result; job.created_at = new Date().toISOString(); if (onDone) await onDone(result).catch(e => console.error("[law] save failed", e.message)); job.status = "done"; })
+      .catch(e => { job.status = "error"; job.error = e.message; job.code = e.status || 502; });
+    return { job: id, total: plan.total, live: plan.live, est_seconds: Math.max(5, Math.ceil(Math.max(0, plan.live - Math.max(0, b.minute)) / 5) * 60) };
+  })();
+}
+app.get("/api/law/jobs/:id", requireAuth, wrap(async (req, res) => {
+  const j = lawJobs.get(String(req.params.id));
+  if (!j || j.userId !== req.user.id) return res.status(404).json({ error: "That ranking isn't running anymore — run it again." });
+  res.json({ status: j.status, done: j.done, total: j.total, live: j.live, error: j.error || null, result: j.status === "done" ? j.result : undefined, created_at: j.created_at || null });
+}));
 app.post("/api/cases/:id/analyze", requireAuth, rateLimit({ windowMs: 60e3, max: 3, message: { error: "One analysis at a time — try again in a minute." } }), wrap(async (req, res) => {
   const { rows } = await q("SELECT * FROM cases WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]);
   const c = rows[0]; if (!c) return res.status(404).json({ error: "Not found" });
   const issues = typeof req.body?.issues === "string" ? req.body.issues.trim().slice(0, 1000) : c.issues;
   if (issues !== c.issues) await q("UPDATE cases SET issues=$2 WHERE id=$1", [c.id, issues]);
-  let result;
-  try { result = await analysis.analyze({ issues, county: c.county, appeals: APPEALS[c.county] }); }
-  catch (e) { return res.status(e.status || 502).json({ error: e.message }); }
-  const ins = await q("INSERT INTO analyses(case_id,user_id,issues,result) VALUES($1,$2,$3,$4) RETURNING id, created_at", [c.id, req.user.id, issues, result]);
-  await q("UPDATE cases SET law_checked_at=now() WHERE id=$1", [c.id]);
-  await audit(req, "case_analyzed", { case_id: c.id });
-  res.json({ id: ins.rows[0].id, created_at: ins.rows[0].created_at, issues, result });
+  try {
+    const r = await startLawJob(req, { issues, county: c.county, onDone: async result => {
+      await q("INSERT INTO analyses(case_id,user_id,issues,result) VALUES($1,$2,$3,$4)", [c.id, req.user.id, issues, result]);
+      await q("UPDATE cases SET law_checked_at=now() WHERE id=$1", [c.id]);
+    } });
+    await audit(req, "case_analyzed", { case_id: c.id, lookups: r.live });
+    res.json({ ...r, issues });
+  } catch (e) { res.status(e.status || 502).json({ error: e.message }); }
 }));
 app.get("/api/cases/:id/analysis", requireAuth, wrap(async (req, res) => {
   const { rows } = await q("SELECT a.id, a.issues, a.result, a.created_at FROM analyses a JOIN cases c ON c.id=a.case_id WHERE a.case_id=$1 AND c.firm_id=$2 ORDER BY a.created_at DESC LIMIT 1", [+req.params.id, req.user.firm_id]);
@@ -827,12 +853,10 @@ app.get("/api/law/search", requireAuth, lawLimiter, wrap(async (req, res) => {
 app.post("/api/law/analyze", requireAuth, rateLimit({ windowMs: 60e3, max: 3, message: { error: "One ranking at a time — try again in a minute." } }), wrap(async (req, res) => {
   const issues = String(req.body?.issues || "").trim().slice(0, 1000);
   const county = COUNTIES.includes(req.body?.county) ? req.body.county : null;
-  let result;
-  try { result = await analysis.analyze({ issues, county, appeals: county ? APPEALS[county] : null }); }
-  catch (e) { return res.status(e.status || 502).json({ error: e.message }); }
-  await audit(req, "law_ranked", { county, issues: issues.slice(0, 120) });
-  res.json({ created_at: new Date().toISOString(), issues, result });
+  try { const r = await startLawJob(req, { issues, county }); await audit(req, "law_ranked", { county, issues: issues.slice(0, 120), lookups: r.live }); res.json({ ...r, issues }); }
+  catch (e) { res.status(e.status || 502).json({ error: e.message }); }
 }));
+app.get("/api/law/budget", requireAuth, wrap(async (req, res) => res.json({ ...cl.budget(), local: await lawdb.available() })));
 app.get("/api/law/opinion/:cid", requireAuth, lawLimiter, wrap(async (req, res) => {
   const cid = +req.params.cid; if (!cid) return res.status(400).json({ error: "Bad id" });
   const op = (await lawdb.available() && await lawdb.opinion(cid)) || await cl.opinion(cid);

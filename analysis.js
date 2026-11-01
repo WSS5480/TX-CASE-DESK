@@ -34,24 +34,35 @@ function clQuery(spec) {
 const merge = (...specs) => ({ all: specs.flatMap(s => s.all || []), any: specs.flatMap(s => s.any || []), none: specs.flatMap(s => s.none || []) });
 
 // ----- backend adapters -----
-function backend(local) {
+function backend(local, tick) {
   if (local) return {
-    name: "Texas case-law database (loaded from CourtListener bulk files)",
-    search: (spec, f) => lawdb.search(spec, f, 20),
-    count: (spec, f) => lawdb.count(spec, f)
+    name: "Texas case-law database (loaded from CourtListener bulk files)", local: true,
+    search: async (spec, f) => { const r = await lawdb.search(spec, f, 20); tick(); return r; },
+    count: async (spec, f) => { const r = await lawdb.count(spec, f); tick(); return r; }
   };
   return {
-    name: "CourtListener live search (limited daily lookups)",
-    search: async (spec, f) => cl.search({ query: clQuery(spec), after: f.after }),
-    count: async (spec, f) => (await cl.search({ query: clQuery(spec), after: f.after })).count || 0
+    name: "CourtListener live search (free tier: 5 lookups a minute, 125 a day)", local: false,
+    search: async (spec, f) => { const r = await cl.search({ query: clQuery(spec), after: f.after }); tick(); return r; },
+    count: async (spec, f) => { const r = (await cl.search({ query: clQuery(spec), after: f.after })).count || 0; tick(); return r; }
   };
 }
+// how many lookups a ranking needs that aren't already saved (each live one counts against CourtListener's free limits)
+async function plannedLookups(issues) {
+  const ph = phrases(issues); if (!ph.length) return { total: 0, live: 0 };
+  if (await lawdb.available()) return { total: 1 + PATHS.length * 2 + 2 + 3, live: 0 };
+  const since10 = yearsAgo(10), issueSpec = { all: ph };
+  const qs = [clQuery(issueSpec)];
+  for (const p of PATHS) { const base = merge(issueSpec, p.spec); qs.push(clQuery(merge(base, { any: [AFFIRM], none: [REVERSE] })), clQuery(merge(base, { any: [REVERSE] }))); }
+  let live = 0; for (const qq of qs) if (!(await cl.isCached({ query: qq, after: since10 }))) live++;
+  return { total: qs.length, live };
+}
 
-async function analyze({ issues, county, appeals }) {
+async function analyze({ issues, county, appeals, onProgress }) {
   const ph = phrases(issues);
   if (!ph.length) throw Object.assign(new Error("Add the case's issues first (e.g. slip and fall, constructive notice, grocery store)."), { status: 400 });
   const local = await lawdb.available();
-  const B = backend(local);
+  let done = 0; const tick = () => { done++; if (onProgress) onProgress(done); };
+  const B = backend(local, tick);
   const coas = coasFor(appeals);
   const binding = local && coas.length ? { coas } : null;
   const since10 = yearsAgo(10), since5 = yearsAgo(5), since3 = yearsAgo(3);
@@ -104,7 +115,7 @@ async function analyze({ issues, county, appeals }) {
   // Trend for the top path: last 3 years vs the 7 before (statewide).
   let trend = null;
   const top = paths.find(p => p.enough);
-  if (top) {
+  if (top && B.local) {
     const up = merge(top.spec, { any: [AFFIRM], none: [REVERSE] }), rv = merge(top.spec, { any: [REVERSE] });
     const rU = await B.count(up, { after: since3 }), rR = await B.count(rv, { after: since3 });
     const recentN = rU + rR, recentRate = recentN ? Math.round((rU / recentN) * 100) : null;
@@ -115,7 +126,7 @@ async function analyze({ issues, county, appeals }) {
 
   // Example cases for the top 3 paths (binding courts first when available).
   for (const p of paths.slice(0, 3)) {
-    if (!p.n) { p.examples = []; continue; }
+    if (!p.n || !B.local) { p.examples = []; continue; }
     let r = binding ? await B.search(p.spec, { after: since5, binding }) : null;
     if (!r || !(r.results || []).length) r = await B.search(p.spec, { after: since5 });
     p.examples = (r.results || []).slice(0, 3).map(o => ({ cluster_id: o.cluster_id, case_name: o.case_name, citation: o.citation, court: o.court, date_filed: o.date_filed }));
@@ -130,14 +141,14 @@ async function analyze({ issues, county, appeals }) {
 }
 
 // Case-law watch: new opinions on these issues since a date (1 live lookup per watched case per day).
-async function newSince(issues, sinceIso) {
+async function newSince(issues, sinceIso) {   // runs in the background (daily watch): it leaves room for people using the app
   const ph = phrases(issues);
   if (!ph.length) return { count: 0, results: [] };
   // Live source first (catches brand-new opinions before the monthly database refresh); local DB if the live lookup fails.
   let r;
-  try { r = await cl.search({ query: clQuery({ all: ph }), after: sinceIso.slice(0, 10) }); }
+  try { r = await cl.search({ query: clQuery({ all: ph }), after: sinceIso.slice(0, 10), background: true }); }
   catch (e) { if (!(await lawdb.available())) throw e; r = await lawdb.search({ all: ph }, { after: sinceIso.slice(0, 10) }, 10); }
   return { count: r.count || 0, results: (r.results || []).filter(o => o.date_filed && o.date_filed >= sinceIso.slice(0, 10)).slice(0, 5) };
 }
 
-module.exports = { analyze, newSince, PATHS, phrases, clQuery };
+module.exports = { analyze, newSince, PATHS, phrases, clQuery, plannedLookups };
