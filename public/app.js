@@ -22,7 +22,7 @@ const law = { q: "", court: "", after: "", county: "", results: null, open: null
 
 // ---------------- auth screens ----------------
 function authView(mode = "login", msg = "") {
-  $("#nav").hidden = true; $("#who").textContent = "";
+  shellOff();
   const signup = mode === "signup";
   $("#app").innerHTML = `<div class="narrow card"><h2>${signup ? "Create firm account" : "Attorney sign in"}</h2>
    <form id="f">
@@ -69,30 +69,161 @@ function changePwView(forced) {
 }
 
 // ---------------- shell ----------------
+const ICON = {
+  today: '<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4M9 14.5l2 2 4-4"/>',
+  cases: '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M3 12.5h18"/>',
+  calendar: '<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/>',
+  inbox: '<path d="M3 13l2.5-7.5A1.5 1.5 0 0 1 6.9 4.5h10.2a1.5 1.5 0 0 1 1.4 1L21 13v5.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/><path d="M3 13h5l1.5 2.5h5L16 13h5"/>',
+  clients: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.3-5.5 6.5-5.5s5.9 1.9 6.5 5.5M16 4.8a3.5 3.5 0 0 1 0 6.4M18 14.8c2 .7 3.2 2.4 3.5 5.2"/>',
+  tasks: '<rect x="3.5" y="3.5" width="17" height="17" rx="2.5"/><path d="M8 12l3 3 5-6"/>',
+  billing: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/>',
+  trust: '<path d="M12 3l7 3v5.5c0 4.5-3 7.8-7 9.5-4-1.7-7-5-7-9.5V6z"/>',
+  law: '<path d="M12 4v16M7 20h10M4 7h16M6 7l-3 6.5a3 3 0 0 0 6 0zM18 7l-3 6.5a3 3 0 0 0 6 0z"/>',
+  saved: '<path d="M6 3.5h12v17l-6-4-6 4z"/>',
+  counties: '<path d="M12 21s-6.5-6.2-6.5-11a6.5 6.5 0 0 1 13 0c0 4.8-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/>',
+  court: '<path d="M3 9.5L12 4l9 5.5M5 10v8M9.5 10v8M14.5 10v8M19 10v8M3 20.5h18"/>',
+  firm: '<path d="M4 6h9M18 6h2M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15.5" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',
+  account: '<circle cx="12" cy="8.5" r="3.8"/><path d="M4.5 20c1-3.8 4-5.5 7.5-5.5s6.5 1.7 7.5 5.5"/>',
+  more: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  file: '<path d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  close: '<path d="M6 6l12 12M18 6L6 18"/>',
+  check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+  mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3.5 6.5l8.5 6.5 8.5-6.5"/>',
+  back: '<path d="M15 6l-6 6 6 6"/>',
+  chev: '<path d="M9 6l6 6-6 6"/>',
+  text: '<path d="M4 5h16v11H9l-5 4z"/>'
+};
+const ic = (k, s = 18, w = 1.75) => `<svg aria-hidden="true" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round">${ICON[k] || ""}</svg>`;
+const initials = n => String(n || "").split(/\s+/).filter(Boolean).slice(0, 2).map(x => x[0].toUpperCase()).join("") || "?";
+function navGroups() {
+  const g = [["Practice", [["today", "Today"], ["cases", "Cases"], ["calendar", "Calendar"], ["inbox", "Court mail"], ["clients", "Clients"], ["tasks", "Tasks"]]]];
+  if (me.role !== "paralegal") g.push(["Money", [["billing", "Billing"], ["trust", "Trust"]]]);
+  g.push(["Research", [["law", "Case law"], ["saved", "Saved"]]]);
+  const set = [["counties", "My counties"], ["court", "Court updates"]]; if (me.role === "admin") set.push(["firm", "Firm settings"]);
+  g.push(["Setup", set]);
+  return g;
+}
+const PRIMARY = [["today", "Today"], ["cases", "Cases"], ["calendar", "Calendar"], ["inbox", "Court mail"]];
+function titleOf(k) { if (k === "account") return "Account"; for (const [, items] of navGroups()) for (const [kk, v] of items) if (kk === k) return v; return "TX Case Desk"; }
+function shellOff() {
+  document.body.classList.add("out"); ["#side", "#tabs", "#fab", "#srch", "#tact"].forEach(s => $(s).hidden = true);
+  document.body.classList.remove("timing"); closeSheet();
+  $("#ttl").innerHTML = `<span class="mark" aria-hidden="true">TX</span><span class="tname">TX Case Desk</span>`;
+}
+function shellOn() {
+  document.body.classList.remove("out"); ["#side", "#tabs", "#fab", "#srch", "#tact"].forEach(s => $(s).hidden = false);
+  $("#avBtn").textContent = initials(me.name);
+}
 function start() {
   if (me.must_change_pw) return changePwView(true);
   api("/api/inbox").then(r => { if (r.unread !== inboxUnread) { inboxUnread = r.unread; renderNav(); } }).catch(() => {});
-  $("#who").textContent = `${me.name}${me.bar_number ? " · Bar #" + me.bar_number : ""}`;
-  if (!me.counties.length && (tab === "cases" || tab === "today")) { tab = "counties"; moreOpen = true; }
-  renderNav(); show();
+  if (!me.counties.length && (tab === "cases" || tab === "today")) tab = "counties";
+  shellOn(); renderNav(); renderTimer(); show();
 }
 function renderNav() {
-  const main = [["today", "Today"], ["cases", "Cases"], ["calendar", "Calendar"], ["inbox", "Inbox" + (inboxUnread ? ` (${inboxUnread})` : "")], ["clients", "Clients"], ["tasks", "Tasks"]];
-  if (me.role !== "paralegal") main.push(["billing", "Billing"]);
-  const more = [["law", "Case Law"], ["saved", "Saved"]];
-  if (me.role !== "paralegal") more.push(["trust", "Trust"]);
-  more.push(["counties", "My Counties"], ["court", "Court Updates"]);
-  if (me.role === "admin") more.push(["firm", "Firm Settings"]);
-  more.push(["account", "Account"]);
-  const inMore = more.some(([k]) => k === tab);
-  const b = ([k, v]) => `<button data-t="${k}" class="${tab === k ? "on" : ""}">${v}</button>`;
-  const n = $("#nav"); n.hidden = false;
-  n.innerHTML = main.map(b).join("") + `<button data-more="1" class="${inMore ? "on" : ""}">More ${moreOpen || inMore ? "▴" : "▾"}</button>` +
-    (moreOpen || inMore ? `<div style="flex-basis:100%;display:flex;gap:4px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:4px;margin-top:2px">${more.map(b).join("")}</div>` : "");
-  n.querySelectorAll("button[data-t]").forEach(x => x.onclick = () => { tab = x.dataset.t; moreOpen = more.some(([k]) => k === tab); renderNav(); show(); });
-  n.querySelector("[data-more]").onclick = () => { moreOpen = !moreOpen; renderNav(); };
+  if (!me) return;
+  const badge = k => k === "inbox" && inboxUnread ? `<span class="badge">${inboxUnread}</span>` : "";
+  const item = ([k, v]) => `<a href="#${k}" data-t="${k}" class="ni${tab === k ? " on" : ""}"${tab === k ? ' aria-current="page"' : ""}>${ic(k)}<span>${v}</span>${badge(k)}</a>`;
+  const role = me.role === "admin" ? "Attorney · Admin" : me.role === "paralegal" ? "Paralegal" : "Attorney";
+  $("#side").innerHTML = `<div class="brand"><span class="mark" aria-hidden="true">TX</span><span><b>TX Case Desk</b><small>${esc(me.firm_name || "")}</small></span></div>
+    <nav aria-label="Main" style="display:flex;flex-direction:column;gap:18px">${navGroups().map(([h, items]) => `<div class="ng"><div class="nh">${h}</div>${items.map(item).join("")}</div>`).join("")}</nav>
+    <a href="#account" data-t="account" class="me${tab === "account" ? " on" : ""}"><span class="av">${esc(initials(me.name))}</span><span><b>${esc(me.name)}</b><small>${role}${me.bar_number ? " · Bar #" + esc(me.bar_number) : ""}</small></span></a>`;
+  const inMore = !PRIMARY.some(([k]) => k === tab);
+  $("#tabs").innerHTML = PRIMARY.map(([k, v]) => `<a href="#${k}" data-t="${k}" class="tb${tab === k ? " on" : ""}"${tab === k ? ' aria-current="page"' : ""}><span class="ti">${ic(k, 22, tab === k ? 2 : 1.75)}${k === "inbox" && inboxUnread ? `<span class="bdg">${inboxUnread}</span>` : ""}</span>${v}</a>`).join("")
+    + `<button type="button" class="tb${inMore ? " on" : ""}" id="moreBtn"><span class="ti">${ic("more", 22)}</span>More</button>`;
+  document.body.dataset.tab = tab;
+  $("#ttl").innerHTML = tab === "today" ? `<span class="mark" aria-hidden="true">TX</span><span class="tname">TX Case Desk</span>` : `<span class="tname">${esc(titleOf(tab))}</span>`;
+  $$("#side [data-t], #tabs [data-t]").forEach(a => a.onclick = e => { e.preventDefault(); nav(a.dataset.t); });
+  $("#moreBtn").onclick = moreSheet;
 }
-function show() { subView = false; clearTimeout(courtPoll); const v = VIEWS[tab] || ({ inbox: inboxView, cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab] || casesView; v(); window.scrollTo(0, 0); }
+function nav(k) { tab = k; closeSheet(); closeSearch(); renderNav(); return show(); }
+function show() { subView = false; clearTimeout(courtPoll); const v = VIEWS[tab] || ({ inbox: inboxView, cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab] || casesView; const r = v(); window.scrollTo(0, 0); return r; }
+
+// sheet: menus on desktop, bottom sheet on phones
+function openSheet(title, html, wire) {
+  const sh = $("#sheet");
+  sh.innerHTML = `<div class="sh"><h2>${esc(title)}</h2><button type="button" class="iconb" id="shX" aria-label="Close">${ic("close", 20, 2)}</button></div>${html}`;
+  sh.hidden = false; $("#scrim").hidden = false;
+  $("#shX").onclick = closeSheet; $("#scrim").onclick = closeSheet;
+  if (wire) wire(sh);
+  const f = sh.querySelector("input,select,textarea,.sbtn"); if (f && window.matchMedia("(min-width:1000px)").matches) f.focus();
+}
+function closeSheet() { const sh = $("#sheet"); if (sh) { sh.hidden = true; sh.innerHTML = ""; } const s = $("#scrim"); if (s) s.hidden = true; }
+function moreSheet() {
+  const items = navGroups().flatMap(([, it]) => it).filter(([k]) => !PRIMARY.some(([p]) => p === k)).concat([["account", "Account"]]);
+  openSheet("More", `<div class="sgrid">${items.map(([k, v]) => `<button type="button" class="sbtn${tab === k ? " on" : ""}" data-go="${k}">${ic(k, 20)}<span>${v}</span></button>`).join("")}</div>`,
+    sh => sh.querySelectorAll("[data-go]").forEach(b => b.onclick = () => nav(b.dataset.go)));
+}
+// quick add: opens the right screen with its add form ready
+const QUICK = [["case", "New case", "cases", "#addBox", "cases"], ["client", "New client", "clients", "#ctF", "clients"], ["task", "Task", "tasks", "#tkF", "tasks"],
+  ["event", "Hearing or meeting", "calendar", "#evF", "calendar"], ["deadline", "Texas deadline", "calendar", "#dlBox", "law"], ["time", "Log time", "billing", "#teF", "clock"]];
+function quickSheet() {
+  const items = QUICK.filter(q => q[0] !== "time" || me.role !== "paralegal");
+  openSheet("Add new", `<div class="sgrid">${items.map(([k, v, , , i]) => `<button type="button" class="sbtn" data-qa="${k}">${ic(i, 20)}<span>${v}</span></button>`).join("")}</div>`,
+    sh => sh.querySelectorAll("[data-qa]").forEach(b => b.onclick = () => quickAdd(b.dataset.qa)));
+}
+async function quickAdd(k) {
+  const q = QUICK.find(x => x[0] === k); if (!q) return;
+  await nav(q[2]);
+  const el = $(q[3]); const d = el && (el.tagName === "DETAILS" ? el : el.closest("details"));
+  if (d) { d.open = true; d.scrollIntoView({ behavior: "smooth", block: "start" }); setTimeout(() => { const i = d.querySelector("input:not([type=hidden]):not([type=checkbox]),select,textarea"); if (i) i.focus({ preventScroll: true }); }, 350); }
+}
+// running timer (kept on this device; same storage the Today and Billing screens use)
+const TM = { get() { try { return JSON.parse(localStorage.getItem("tcd_timer") || "null"); } catch { return null; } }, set(v) { try { v ? localStorage.setItem("tcd_timer", JSON.stringify(v)) : localStorage.removeItem("tcd_timer"); } catch {} renderTimer(); } };
+const hms = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`; };
+let tmTick = null;
+function renderTimer() {
+  const t = me && TM.get(), pill = $("#tpill"), bar = $("#tbar");
+  if (!t) { pill.hidden = true; bar.innerHTML = ""; document.body.classList.remove("timing"); clearInterval(tmTick); tmTick = null; return; }
+  const el = hms(Date.now() - t.start);
+  pill.hidden = false; pill.innerHTML = `<span class="dot" aria-hidden="true"></span><span class="tel">${el}</span>`; pill.title = "Timer: " + (t.label || "No case"); pill.setAttribute("aria-label", `Timer running ${el}, ${t.label || "no case"}. Stop timer`);
+  bar.innerHTML = `<span class="dot" aria-hidden="true"></span><button type="button" class="tt" id="tbOpen"><b class="tel">${el}</b><small>${esc(t.label || "No case")}</small></button><button type="button" class="btn sm navy" id="tbStop" style="min-height:44px">Stop</button>`;
+  document.body.classList.add("timing");
+  pill.onclick = stopSheet; $("#tbStop").onclick = stopSheet; $("#tbOpen").onclick = stopSheet;
+  if (!tmTick) tmTick = setInterval(() => { const x = TM.get(); if (!x) return renderTimer(); $$(".tel").forEach(n => n.textContent = hms(Date.now() - x.start)); }, 1000);
+}
+window.renderTimer = renderTimer;
+function stopSheet() {
+  const t = TM.get(); if (!t) return;
+  const mins = Math.max(1, Math.round((Date.now() - t.start) / 60000));
+  openSheet("Stop timer", `<div><div class="stat">${Math.floor(mins / 60)}h ${mins % 60}m</div><div class="mute">${esc(t.label || "No case")}</div></div>
+    <form id="stF"><label for="stD">What did you work on?</label><input id="stD" name="description" placeholder="Prep for hearing"><div class="err"></div>
+    <div class="row" style="margin-top:8px"><button class="btn" style="flex:1">Stop and save</button><button type="button" class="btn ghost" id="stDis">Discard</button></div></form>`, sh => {
+    sh.querySelector("#stF").onsubmit = async e => { e.preventDefault(); const m = Math.max(1, Math.round((Date.now() - t.start) / 60000));
+      try { await api("/api/time", { method: "POST", body: { case_id: t.case_id, minutes: m, description: e.target.description.value } }); TM.set(null); closeSheet(); toast(`Saved ${m} minutes`); if (["today", "billing"].includes(tab) && !subView) show(); }
+      catch (x) { e.target.querySelector(".err").textContent = x.message; } };
+    const dis = sh.querySelector("#stDis"); dis.onclick = () => { if (!dis.dataset.sure) { dis.dataset.sure = 1; dis.textContent = "Tap again to discard"; return; } TM.set(null); closeSheet(); if (["today", "billing"].includes(tab) && !subView) show(); };
+  });
+}
+// search cases and people from the top bar
+let qT = null, qCases = null, qAt = 0;
+function openSearch() { $("#top").classList.add("searching"); $("#q").focus(); }
+function closeSearch() { const t = $("#top"); if (!t) return; t.classList.remove("searching"); $("#qres").hidden = true; }
+async function topSearch(v) {
+  const box = $("#qres"); if (v.length < 2) { box.hidden = true; return; }
+  try { if (!qCases || Date.now() - qAt > 60e3) { qCases = (await api("/api/cases?view=firm")).cases; qAt = Date.now(); } } catch { qCases = qCases || []; }
+  const lv = v.toLowerCase();
+  const cs = qCases.filter(c => `${c.cause_no} ${c.style || ""} ${c.court || ""} ${c.county || ""}`.toLowerCase().includes(lv)).slice(0, 6);
+  let ct = []; try { ct = (await api("/api/contacts?q=" + encodeURIComponent(v))).contacts.slice(0, 4); } catch {}
+  if ($("#q").value.trim() !== v) return;
+  box.innerHTML = (cs.length ? `<div class="qh">Cases</div>` + cs.map(c => `<button type="button" class="qi" data-qc="${c.id}"><b>${esc(c.style || c.cause_no)}</b><small>${esc(c.cause_no)}${c.court ? " · " + esc(c.court) : ""} · ${esc(c.county)}</small></button>`).join("") : "")
+    + (ct.length ? `<div class="qh">People</div>` + ct.map(p => `<button type="button" class="qi" data-qp="${p.id}"><b>${esc(p.name)}</b><small>${esc(p.kind)}${p.company ? " · " + esc(p.company) : ""}</small></button>`).join("") : "")
+    || `<div class="qe">No cases or people match “${esc(v)}”.</div>`;
+  box.hidden = false;
+  box.querySelectorAll("[data-qc]").forEach(b => b.onclick = () => { $("#q").value = ""; closeSearch(); if (tab !== "cases") { tab = "cases"; renderNav(); } window.caseHub && caseHub(+b.dataset.qc); });
+  box.querySelectorAll("[data-qp]").forEach(b => b.onclick = () => { $("#q").value = ""; closeSearch(); if (tab !== "clients") { tab = "clients"; renderNav(); } window.contactView && contactView(+b.dataset.qp); });
+}
+$("#q").oninput = e => { clearTimeout(qT); const v = e.target.value.trim(); qT = setTimeout(() => topSearch(v), 200); };
+$("#q").onkeydown = e => { if (e.key === "Enter") { const f = $("#qres [data-qc], #qres [data-qp]"); if (f) f.click(); } };
+$("#qBtn").onclick = openSearch; $("#qClose").onclick = () => { $("#q").value = ""; closeSearch(); };
+$("#newBtn").onclick = quickSheet; $("#fab").onclick = quickSheet; $("#avBtn").onclick = () => nav("account");
+document.addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k" && me && !document.body.classList.contains("out")) { e.preventDefault(); openSearch(); }
+  if (e.key === "Escape") { closeSheet(); closeSearch(); }
+});
+document.addEventListener("click", e => { if (!e.target.closest("#srch") && !e.target.closest("#qBtn")) { $("#qres").hidden = true; } });
 
 // ---------------- inbox (court emails) ----------------
 const TYPE_TAG = { "Hearing / setting": "y", "New filing": "g", "Order / judgment": "r", "Case notice": "n", "Account activation": "n", "Email": "n" };
@@ -104,9 +235,9 @@ document.addEventListener("click", async e => { const b = e.target.closest("[dat
 function imapForm(mb, open) {
   const lab = mb && mb.other && mb.other.label ? mb.other.label : "your email host";
   const titan = /titan|godaddy/i.test(lab);
-  return `<details class="imapBox" ${open ? "open" : ""} style="margin:8px 0"><summary style="cursor:pointer;font-weight:600">🔑 Connect with your email password${open ? "" : " (GoDaddy, Titan, Zoho, others)"}</summary>
+  return `<details class="imapBox" ${open ? "open" : ""} style="margin:8px 0"><summary style="cursor:pointer;font-weight:600">Connect with your email password${open ? "" : " (GoDaddy, Titan, Zoho, others)"}</summary>
     <p class="mute" style="margin:6px 0">For email that isn't Outlook or Gmail${mb && mb.other && mb.other.label ? ` — yours is hosted by <b>${esc(lab)}</b>` : ""}. Your password is encrypted and used only to read court emails.</p>
-    ${titan ? `<p style="margin:6px 0;font-size:14px"><b>Titan / GoDaddy first:</b> sign in to <a class="link" href="https://app.titan.email" target="_blank" rel="noopener">app.titan.email</a> → ⚙ Settings → turn <b>Third-party email access ON</b> and <b>Two-step login OFF</b> (Titan blocks other apps while two-step is on).</p>` : ""}
+    ${titan ? `<p style="margin:6px 0;font-size:14px"><b>Titan / GoDaddy first:</b> sign in to <a class="link" href="https://app.titan.email" target="_blank" rel="noopener">app.titan.email</a> → Settings → turn <b>Third-party email access ON</b> and <b>Two-step login OFF</b> (Titan blocks other apps while two-step is on).</p>` : ""}
     <form class="imapF"><label>Email address</label><input name="email" type="email" autocomplete="email" value="${esc(me.email || "")}" required>
     <label>Email password</label><input name="password" type="password" autocomplete="current-password" required>
     <details style="margin:6px 0"><summary class="mute" style="cursor:pointer;font-size:13px">Advanced: mail server</summary><label>Incoming (IMAP) server — leave blank to detect</label><input name="host" placeholder="imap.example.com"></details>
@@ -129,7 +260,7 @@ async function inboxView(quiet) {
     ? `<div class="card"><span class="tag g">Connected</span> <b>${esc(conn.email || mb.names[conn.provider])}</b> <span class="mute">· court emails are checked every hour</span>
        ${conn.stats && conn.stats.scanned != null ? `<div class="mute" style="font-size:13px;margin-top:4px">Last check ${new Date(conn.stats.at).toLocaleString()}: looked at ${conn.stats.scanned} emails, found ${conn.stats.court} from courts${conn.stats.created ? `, added ${conn.stats.created} cases` : ""}.</div>` : ""}
        ${conn.stats && conn.stats.note ? `<p class="err" style="margin:6px 0 0">${esc(conn.stats.note)}</p>${conn.provider !== "imap" ? imapForm(mb, true) : ""}` : ""}</div>`
-    : `<div class="card"><h2 style="margin-top:0">📬 Connect your email</h2><p style="margin-top:0">Sign in once with the email you get court notices at. We read only court emails and build and update your cases from them.</p>
+    : `<div class="card"><h2 style="margin-top:0">Connect your email</h2><p style="margin-top:0">Sign in once with the email you get court notices at. We read only court emails and build and update your cases from them.</p>
        ${mb.other && !mb.other.provider && mb.other.label ? `<p style="margin:0 0 6px"><b>Your email is hosted by ${esc(mb.other.label)}</b> — use the password sign-in below (the Outlook button won't see that mail).</p>` : ""}
        ${mb.configured.microsoft ? `<a class="btn ${mb.other && !mb.other.provider ? "ghost" : ""}" href="/api/mail/connect/microsoft" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Outlook / Microsoft 365</a>` : `<p class="mute" style="margin:6px 0">Outlook / Microsoft 365 sign-in isn't switched on yet.</p>`}
        ${mb.configured.google ? `<a class="btn" href="/api/mail/connect/google" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Gmail</a>` : ""}
@@ -142,7 +273,7 @@ async function inboxView(quiet) {
      <h3 style="margin-top:6px">${esc(m.subject || "(no subject)")}</h3>
      <div class="mute">${esc(m.from_addr)}</div>
      ${m.cases.length ? `<div style="margin-top:4px">${m.cases.map(c => `<span class="chip">${esc(c.cause_no)}${c.case ? " · " + esc(c.case.style || "") : " · not in your cases"}</span>`).join("")}</div>` : ""}
-     ${m.dates.length ? `<div class="mute" style="margin-top:4px">📅 ${m.dates.map(esc).join(" · ")}</div>` : ""}
+     ${m.dates.length ? `<div class="mute" style="margin-top:4px">${m.dates.map(esc).join(" · ")}</div>` : ""}
      <div style="font-size:14px;margin-top:4px">${esc(m.preview)}</div></div>`).join("") || `<div class="card mute">No emails yet. Set up your address under <a class="link" id="goCU">Court Updates</a>.</div>`}`;
   wireImap(() => setTimeout(() => inboxView(), 2500));
   if ($("#readAll")) $("#readAll").onclick = async () => { await api("/api/inbox/read-all", { method: "POST" }); inboxView(); };
@@ -159,7 +290,7 @@ async function emailView(id) {
    <div class="card" style="margin-top:10px"><div class="row"><span class="tag ${TYPE_TAG[sm.type] || "n"}">${esc(sm.type)}</span><span class="mute" style="margin-left:auto">${new Date(m.received_at).toLocaleString()}</span></div>
    <h2 style="margin-top:8px">${esc(m.subject || "(no subject)")}</h2><div class="mute">From: ${esc(m.from_addr)}</div></div>
    <div class="card"><h3>Summary</h3>
-     ${sm.action ? `<p style="margin:6px 0"><b>👉 ${esc(sm.action)}</b></p>` : ""}
+     ${sm.action ? `<p style="margin:6px 0"><b>${esc(sm.action)}</b></p>` : ""}
      ${sm.cases.length ? `<div style="margin:6px 0"><b>Cases:</b> ${sm.cases.map(c => c.case ? `<a class="link" data-case="${c.case.id}">${esc(c.cause_no)} · ${esc(c.case.style || "")}</a>` : `${esc(c.cause_no)} <span class="mute">(not in your cases)</span>`).join(", ")}</div>` : ""}
      ${sm.dates.length ? `<div style="margin:6px 0"><b>Dates:</b> ${sm.dates.map(esc).join(" · ")}</div>` : ""}
      ${sm.lines.length ? `<ul style="padding-left:18px;margin:6px 0">${sm.lines.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : `<p class="mute">No key lines found — see the exact email below.</p>`}
@@ -189,7 +320,7 @@ async function courtView() {
   $("#app").innerHTML = `<div class="card"><h2>Court logins</h2>
    <p class="mute">Your cases are pulled from each county portal under <b>your</b> login and <b>your</b> bar # (${esc(me.bar_number || "not set")}) — only for counties you picked. Pulls run when you sign in, nightly, and when you tap Sync now. Passwords are encrypted and never shown again.</p>
    ${d.bar_ok ? "" : `<p class="err">Your account needs an 8-digit bar # before cases can be pulled.</p>`}</div>
-   <div class="card"><h2>📬 Connect your email</h2>
+   <div class="card"><h2>Connect your email</h2>
    <p style="margin-top:0">You already get court emails — eFileTexas service notices, clerk notices, hearing settings. Connect your email once and TX Case Desk reads <b>only those court emails</b>, adds new cases, and updates your existing ones automatically.</p>
    ${det.domain ? `<p class="mute" style="margin:0 0 6px">Your email <b>${esc(det.domain)}</b> is hosted by <b>${esc(det.host || "unknown")}</b>.${det.provider ? " Use the button below." : " Use <b>Connect with your email password</b> below."}</p>` : ""}
    ${order.map((p, i) => { const m = mb.mailboxes.find(x => x.provider === p);
@@ -210,7 +341,7 @@ async function courtView() {
        ${m.status === "reconnect" ? imapForm(mb, true) : ""}</div>`; })()}
    <p class="mute" style="margin-bottom:0;font-size:13px">Read-only. Only emails from courts, clerks, eFileTexas and re:SearchTX are read; everything else is ignored and never stored. Checked every hour. Disconnect anytime.</p></div>
    <details class="card"><summary>Other ways (re:SearchTX alerts / forwarding)</summary>
-   <div class="card" style="margin-top:10px"><h2>📨 Court updates (re:SearchTX)</h2>
+   <div class="card" style="margin-top:10px"><h2>Court updates (re:SearchTX)</h2>
    ${!ea.configured ? `<p class="mute">Court updates aren't switched on for this app yet.</p>` : `
    <p style="margin-top:0">Get filing and hearing updates on your cases automatically — no email settings to change.</p>
    ${ea.emails.some(m => /re:?search|tylertech/i.test(m.from_addr + m.subject)) ? `<p><span class="tag g">Connected</span> <span class="mute">re:SearchTX is sending to this app.</span></p>` : `<p><span class="tag n">Not connected yet</span></p>`}
@@ -288,7 +419,7 @@ async function casesView() {
   const cs = data.cases;
   if (me.role === "admin" && !firmUsers) { try { firmUsers = (await api("/api/firm/users")).users; } catch (e) { firmUsers = []; } }
   app.innerHTML = `
-  ${data.alerts ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4"><b>⚠ ${data.alerts} case alert${data.alerts === 1 ? "" : "s"}</b> (court dates, court emails, new case law). <a class="link" id="seeAlerts">Show them</a></div>` : ""}
+  ${data.alerts ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4"><b>${data.alerts} case alert${data.alerts === 1 ? "" : "s"}</b> (court dates, court emails, new case law). <a class="link" id="seeAlerts">Show them</a></div>` : ""}
   ${!me.counties.length ? `<div class="card"><b>Pick your counties first.</b> <span class="mute">You only see and add cases in counties you practice in.</span></div>` : ""}
   <div class="card"><div class="mute">Your counties</div><div style="font-weight:600">${esc(me.counties.join(", ") || "None selected")}</div>
    <div class="mute" style="margin-top:4px">Auto-pull: connect under <a class="link" id="goCourt">Court Logins</a> (live: ${esc(Object.entries(META.connectors).filter(([, v]) => v.status !== "blocked").map(([k]) => k).join(", ") || "none right now — use re:SearchTX alerts")}). Other counties: add cases below or import a CSV.</div></div>
@@ -297,7 +428,7 @@ async function casesView() {
    ${me.role === "admin" ? `<div><label>Attorney</label><select id="af2"><option value="">All attorneys</option>${(firmUsers || []).filter(u => u.role !== "paralegal").map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("")}</select></div>` : ""}
    <div><label>County</label><select id="cf"><option value="">All my counties</option>${me.counties.map(c => `<option>${esc(c)}</option>`).join("")}</select></div>
    <div><label>Case type</label><select id="tf"><option value="">All types</option>${TYPES.map(t => `<option>${t}</option>`).join("")}</select></div></div></div>
-  <div class="row" style="margin:0 0 12px"><button class="btn sm ghost" id="watchAll">☑ Watch court dates on all ${caseF.attorney && firmUsers ? esc((firmUsers.find(u => u.id === +caseF.attorney) || {}).name || "") + "'s" : "my"} cases</button></div>
+  <div class="row" style="margin:0 0 12px"><button class="btn sm ghost" id="watchAll">Watch court dates on all ${caseF.attorney && firmUsers ? esc((firmUsers.find(u => u.id === +caseF.attorney) || {}).name || "") + "'s" : "my"} cases</button></div>
   <details class="card" id="addBox"><summary>+ Add a case</summary><br>${caseForm()}</details>
   <details class="card"><summary>Import CSV</summary><p class="mute">Header row with: county, cause_no, court, style, case_type, filed_date (YYYY-MM-DD), status, next_setting, notes</p>
    <input type="file" id="csvFile" accept=".csv,text/csv"><br><br><textarea id="csv" placeholder="county,cause_no,court,style,case_type,filed_date,status,next_setting"></textarea>
@@ -341,9 +472,9 @@ function caseCard(c) {
    <h3 style="margin-top:6px">${esc(c.style || c.cause_no)}</h3>
    <div class="kv"><div><b>Cause #</b>${esc(c.cause_no)}</div><div><b>Type</b>${esc(c.case_type || "—")}</div><div><b>Filed</b>${c.filed_date ? String(c.filed_date).slice(0, 10) : "—"}</div>
    <div><b>Next</b>${esc(c.next_setting || "—")}</div><div><b>Appeals to</b>${esc(META.appeals[c.county] || "—")}</div><div><b>Attorney</b>${esc(c.attorney || "—")}</div></div>
-   ${c.date_alert ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4;margin:10px 0 0;padding:10px"><b>⚠ Court date changed</b><div>${esc(c.date_alert)}</div><div class="mute">${c.date_alert_at ? new Date(c.date_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="ack" style="margin-top:6px">Got it</button></div>` : ""}
-   ${c.filing_alert ? `<div class="card" style="background:#e3f4ea;border-color:#bfe3cd;margin:10px 0 0;padding:10px"><b>📨 Court email</b><div style="font-size:14px">${esc(c.filing_alert)}</div><div class="mute">${c.filing_alert_at ? new Date(c.filing_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="fileack" style="margin-top:6px">Got it</button></div>` : ""}
-   ${c.law_alert ? `<div class="card" style="background:#e8eefc;border-color:#c9d6f5;margin:10px 0 0;padding:10px"><b>📚 New case law</b><div style="font-size:14px">${esc(c.law_alert)}</div><button class="btn sm" data-a="lawack" style="margin-top:6px">Got it</button></div>` : ""}
+   ${c.date_alert ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4;margin:10px 0 0;padding:10px"><b>Court date changed</b><div>${esc(c.date_alert)}</div><div class="mute">${c.date_alert_at ? new Date(c.date_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="ack" style="margin-top:6px">Got it</button></div>` : ""}
+   ${c.filing_alert ? `<div class="card" style="background:#e3f4ea;border-color:#bfe3cd;margin:10px 0 0;padding:10px"><b>Court email</b><div style="font-size:14px">${esc(c.filing_alert)}</div><div class="mute">${c.filing_alert_at ? new Date(c.filing_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="fileack" style="margin-top:6px">Got it</button></div>` : ""}
+   ${c.law_alert ? `<div class="card" style="background:#e8eefc;border-color:#c9d6f5;margin:10px 0 0;padding:10px"><b>New case law</b><div style="font-size:14px">${esc(c.law_alert)}</div><button class="btn sm" data-a="lawack" style="margin-top:6px">Got it</button></div>` : ""}
    ${c.issues ? `<p class="mute" style="margin:8px 0 0">Issues: ${esc(c.issues)}</p>` : ""}
    ${c.notes ? `<p class="mute" style="margin:8px 0 0">${esc(c.notes)}</p>` : ""}
    ${c.source === "county_sync" ? `<p class="mute" style="margin:6px 0 0">↻ Pulled from county portal${c.last_synced ? " · " + new Date(c.last_synced).toLocaleString() : ""}</p>` : ""}
@@ -474,7 +605,7 @@ async function opinionView(cid) {
   if (!op.opinion_id) { $("#flag").innerHTML = ""; $("#cit .mute").textContent = "Not available."; return; }
   try {
     const c = await api(`/api/law/citator/${op.opinion_id}?cluster=${cid}`);
-    $("#flag").innerHTML = c.flag === "caution" ? `<span class="tag y">⚠ Caution – ${c.negative_count} citing opinion(s) use negative-treatment language. Review.</span>`
+    $("#flag").innerHTML = c.flag === "caution" ? `<span class="tag y">Caution – ${c.negative_count} citing opinion(s) use negative-treatment language. Review.</span>`
       : c.flag === "cited" ? `<span class="tag g">Cited by ${c.cited_by} – no negative-treatment language found</span>` : `<span class="tag n">No citing opinions found</span>`;
     $("#cit").innerHTML = `<h3>Citing references (${c.cited_by})</h3>` + (c.citing.map(x => `<div style="margin:8px 0">${x.negative ? `<span class="tag y">review</span> ` : ""}<a class="link" data-c="${x.cluster_id}">${esc(x.case_name)}</a> <span class="mute">${esc(x.citation)} · ${esc(x.court)} · ${esc(x.date_filed || "")}</span></div>`).join("") || `<p class="mute">None found.</p>`);
     $$("#cit [data-c]").forEach(a => a.onclick = () => { law.open = +a.dataset.c; opinionView(law.open); window.scrollTo(0, 0); });
@@ -516,7 +647,7 @@ async function firmView() {
   let us; try { us = (await api("/api/firm/users")).users; } catch (e) { return fail(e); }
   let fm = null; try { fm = await api("/api/firm/mail"); } catch (e) {}
   let mk = null; try { mk = await api("/api/firm/ms-keys"); } catch (e) {}
-  const mkCard = !mk ? "" : `<div class="card"><h2>🔐 Your firm's Microsoft connection</h2>
+  const mkCard = !mk ? "" : `<div class="card"><h2>Your firm's Microsoft connection</h2>
    ${mk.own ? `<p><span class="tag g">Using your firm's own keys</span></p>
      <div class="kv"><div><b>Application (client) ID</b>${esc(mk.client_id)}</div><div><b>Directory (tenant) ID</b>${esc(mk.tenant)}</div><div><b>Secret</b>${esc(mk.hint || "saved")} (hidden)</div><div><b>Saved</b>${mk.at ? new Date(mk.at).toLocaleString() : ""}${mk.by ? " by " + esc(mk.by) : ""}</div></div>
      <p class="mute" style="font-size:13px">Attorneys who connected before these keys were saved should tap <b>Reconnect</b> if their email shows an error. Secrets expire — put a reminder on your calendar for the date you picked in Azure.</p>
@@ -541,7 +672,7 @@ async function firmView() {
      <label>Client secret — Value</label><input name="secret" type="password" autocomplete="off" required>
      <div class="err" id="mkErr"></div><button class="btn" style="width:100%;padding:12px">Save &amp; test with Microsoft</button>
      <p class="mute" style="font-size:13px;margin:6px 0 0">We test the keys with Microsoft before saving. The secret is encrypted and never shown again.</p></form></details></div>`;
-  const fmCard = !fm ? "" : `<div class="card"><h2>📬 Firm email — connect everyone at once</h2>
+  const fmCard = !fm ? "" : `<div class="card"><h2>Firm email — connect everyone at once</h2>
    ${fm.firm ? `<div class="row"><span class="tag ${fm.firm.status === "ok" ? "g" : "r"}">${fm.firm.status === "ok" ? "Connected" : fm.firm.status === "reconnect" ? "Approve again" : "Error"}</span><b>${esc(fm.firm.provider === "microsoft" ? "Microsoft 365" : "Google Workspace")}</b> · @${esc(fm.firm.domain)}</div>
      <div class="mute" style="margin-top:4px">${fm.firm.last_sync ? "Last checked " + new Date(fm.firm.last_sync).toLocaleString() : "First check running…"}${fm.firm.stats ? ` · ${fm.firm.stats.people} attorneys · ${fm.firm.stats.added} new court emails · ${fm.firm.stats.created} cases added` : ""}</div>
      ${fm.firm.last_error ? `<p class="err">${esc(fm.firm.last_error)}</p>` : ""}

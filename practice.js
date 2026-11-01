@@ -90,7 +90,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     if (caseId) { p.push(caseId); w += ` AND e.case_id=$${p.length}`; }
     if (county) { p.push(county); w += ` AND c.county=$${p.length}`; }
     const ev = (await q(`SELECT e.*, c.cause_no, c.style, c.county, c.court, u.name AS who FROM events e LEFT JOIN cases c ON c.id=e.case_id LEFT JOIN users u ON u.id=COALESCE(e.user_id, c.user_id) WHERE ${w} ORDER BY e.on_date, e.at_time NULLS FIRST`, p)).rows
-      .map(e => ({ id: e.id, src: "event", kind: e.kind, title: e.title, date: ds(e.on_date), time: e.at_time, done: e.done, cite: e.cite, notes: e.notes, location: e.location, who: e.who,
+      .map(e => ({ id: e.id, src: "event", kind: e.kind, title: e.title, date: ds(e.on_date), time: e.at_time, done: e.done, cite: e.cite, rule: e.rule, confirmed: !!e.confirmed_at, notes: e.notes, location: e.location, who: e.who,
         case: e.case_id ? { id: e.case_id, cause_no: e.cause_no, style: e.style, county: e.county } : null }));
     const cp = [firmId]; let cw = "c.firm_id=$1 AND c.next_setting IS NOT NULL AND c.next_setting <> ''";
     if (userId) { cp.push(userId); cw += ` AND c.user_id=$${cp.length}`; }
@@ -113,7 +113,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const e = cleanEvent(req.body || {});
     if (!e.title || !e.on_date) return res.status(400).json({ error: "Title and date are required." });
     if (req.body.case_id && !(await caseOf(req, req.body.case_id))) return res.status(404).json({ error: "Case not found" });
-    const { rows } = await q(`INSERT INTO events(firm_id, case_id, user_id, kind, title, on_date, at_time, location, notes, created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+    const { rows } = await q(`INSERT INTO events(firm_id, case_id, user_id, kind, title, on_date, at_time, location, notes, created_by, confirmed_at, confirmed_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$10) RETURNING *`,
       [req.user.firm_id, +req.body.case_id || null, +req.body.user_id || req.user.id, e.kind, e.title, e.on_date, e.at_time, e.location, e.notes, req.user.id]);
     res.json({ event: rows[0] });
   }));
@@ -122,8 +122,10 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const e = cleanEvent({ kind: b.kind || "event", ...b });
     for (const k of ["title", "on_date", "at_time", "location", "notes"]) if (b[k] !== undefined && (k !== "on_date" || e.on_date) && (k !== "title" || e.title)) { p.push(e[k]); sets.push(`${k}=$${p.length}`); }
     if (b.done !== undefined) { p.push(!!b.done); sets.push(`done=$${p.length}`); }
+    if (b.confirm !== undefined) { if (b.confirm) { p.push(req.user.id); sets.push(`confirmed_at=now(), confirmed_by=$${p.length}`); } else sets.push("confirmed_at=NULL, confirmed_by=NULL"); }
     if (!sets.length) return res.json({ ok: true });
     const { rowCount } = await q(`UPDATE events SET ${sets.join(",")} WHERE id=$1 AND firm_id=$2`, p);
+    if (b.confirm && rowCount) await audit(req, "deadline_confirmed", { event: +req.params.id });
     res.json({ ok: rowCount > 0 });
   }));
   R.delete("/events/:id", requireAuth, wrap(async (req, res) => { await q("DELETE FROM events WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true }); }));
@@ -339,7 +341,9 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
       q(`SELECT count(*)::int n FROM cases c WHERE ${cw} AND (c.date_alert IS NOT NULL OR c.filing_alert IS NOT NULL OR c.law_alert IS NOT NULL)`, cp)
     ]);
     const upcoming = (await calendarItems(firm, { from: t, to: addDays(t, 14), userId, county })).filter(i => !i.done);
-    res.json({ today: t, open: open.rows[0].n, alerts: alerts.rows[0].n, byCounty: byCounty.rows, byCourt: byCourt.rows, upcoming,
+    const overdueDl = (await calendarItems(firm, { from: addDays(t, -60), to: addDays(t, -1), userId, county })).filter(i => !i.done && i.kind === "deadline" && i.src === "event");
+    const hoursToday = (await q("SELECT coalesce(sum(minutes),0)::int m FROM time_entries WHERE firm_id=$1 AND user_id=$2 AND on_date=$3", [firm, req.user.id, t])).rows[0].m;
+    res.json({ today: t, open: open.rows[0].n, alerts: alerts.rows[0].n, byCounty: byCounty.rows, byCourt: byCourt.rows, upcoming, overdueDl, hoursToday: Math.round(hoursToday / 6) / 10,
       tasksDue: tasksDue.rows, overdue: overdue.rows[0].n, hours: Math.round(hours.rows[0].m / 6) / 10, unbilled: money(unbilled.rows[0].v),
       outstanding: money(outstanding.rows[0].v), outstandingCount: outstanding.rows[0].n, collected: money(collected.rows[0].v), trust: money(trust.rows[0].v) });
   }));
