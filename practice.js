@@ -279,7 +279,9 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     if (!c) return res.status(404).send("Case not found");
     const contacts = (await q("SELECT ct.*, cc.role FROM case_contacts cc JOIN contacts ct ON ct.id=cc.contact_id WHERE cc.case_id=$1", [c.id])).rows;
     const events = await calendarItems(req.user.firm_id, { from: today(), to: addDays(today(), 1500), caseId: c.id });
-    const signer = { name: req.user.name, bar: req.user.bar_number, email: req.user.email, firm: req.user.firm_name };
+    const f = (await q("SELECT name, address, phone, fax, website, logo, logo_mime, logo_w, logo_h FROM firms WHERE id=$1", [req.user.firm_id])).rows[0] || {};
+    const signer = { name: req.user.name, bar: req.user.bar_number, email: req.user.doc_email || req.user.email, firm: f.name || req.user.firm_name, title: req.user.title, phone: req.user.phone,
+      address: f.address, firmPhone: f.phone, fax: f.fax, website: f.website, logo: f.logo ? { data: f.logo, type: f.logo_mime === "image/png" ? "png" : "jpg", w: f.logo_w, h: f.logo_h } : null };
     let out; try { out = await templates.render(req.params.key, { c, contacts, events, signer, opts: req.query }); } catch (e) { return res.status(400).send(e.message); }
     res.set({ "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "Content-Disposition": `attachment; filename="${out.filename}"` }).send(out.buffer);
   }));
@@ -414,7 +416,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     res.json({ invoice: (await q("SELECT * FROM invoices WHERE id=$1", [inv.id])).rows[0] });
   }));
   async function invoiceFull(firmId, id) {
-    const inv = (await q(`SELECT i.*, c.cause_no, c.style, c.county, c.court, ct.name AS client, ct.email AS client_email, ct.address AS client_address, f.name AS firm_name, f.card_fee_pct, f.card_fee_fixed, (f.stripe_enc IS NOT NULL) AS card_on
+    const inv = (await q(`SELECT i.*, c.cause_no, c.style, c.county, c.court, ct.name AS client, ct.email AS client_email, ct.address AS client_address, f.name AS firm_name, f.address AS firm_address, f.phone AS firm_phone, f.firm_email, f.website AS firm_website, f.logo_token, f.card_fee_pct, f.card_fee_fixed, (f.stripe_enc IS NOT NULL) AS card_on
       FROM invoices i JOIN firms f ON f.id=i.firm_id LEFT JOIN cases c ON c.id=i.case_id LEFT JOIN contacts ct ON ct.id=i.contact_id WHERE i.id=$1 AND i.firm_id=$2`, [id, firmId])).rows[0];
     if (!inv) return null;
     inv.lines = (await q("SELECT * FROM invoice_lines WHERE invoice_id=$1 ORDER BY id", [id])).rows;
@@ -542,7 +544,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     res.json({ url: t ? `${APP()}/portal/${t}` : null });
   }));
   app.get("/portal/:token", wrap(async (req, res) => {
-    const ct = (await q("SELECT ct.*, f.name AS firm_name FROM contacts ct JOIN firms f ON f.id=ct.firm_id WHERE ct.portal_token=$1", [String(req.params.token)])).rows[0];
+    const ct = (await q("SELECT ct.*, f.name AS firm_name, f.address AS firm_address, f.phone AS firm_phone, f.firm_email, f.website AS firm_website, f.logo_token FROM contacts ct JOIN firms f ON f.id=ct.firm_id WHERE ct.portal_token=$1", [String(req.params.token)])).rows[0];
     if (!ct) return res.status(404).send("This link is no longer active. Contact your attorney for a new one.");
     const cases = (await q("SELECT c.* FROM case_contacts cc JOIN cases c ON c.id=cc.case_id WHERE cc.contact_id=$1 AND cc.role='client' ORDER BY c.id DESC", [ct.id])).rows;
     const blocks = [];
@@ -558,7 +560,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const invs = (await q("SELECT number, total, paid, pay_token, due, status FROM invoices WHERE contact_id=$1 AND status IN ('sent','paid') ORDER BY id DESC LIMIT 20", [ct.id])).rows;
     const inv = invs.length ? `<div class="card"><h2>Invoices</h2>${invs.map(i => `<p>#${esc(i.number)} — ${usd(i.total)} · ${Number(i.total) - Number(i.paid) > 0 ? `balance ${usd(Number(i.total) - Number(i.paid))} · <a href="/pay/${esc(i.pay_token)}">View and pay</a>` : "Paid"}</p>`).join("")}</div>` : "";
     res.set({ "Content-Type": "text/html; charset=utf-8", "X-Robots-Tag": "noindex", "Cache-Control": "no-store" }).send(page(`${ct.firm_name} — client page`,
-      `<h1>Hello, ${esc(ct.name.split(" ")[0])}</h1><p class="mute">Your case updates from ${esc(ct.firm_name)}. Questions? Contact your attorney directly.</p>${blocks.join("") || `<div class="card">No active cases to show yet.</div>`}${inv}`));
+      `${brandHead({ name: ct.firm_name, address: ct.firm_address, phone: ct.firm_phone, email: ct.firm_email, website: ct.firm_website, logo_token: ct.logo_token })}<h1>Hello, ${esc(ct.name.split(" ")[0])}</h1><p class="mute">Your case updates from ${esc(ct.firm_name)}. Questions? Contact your attorney directly.</p>${blocks.join("") || `<div class="card">No active cases to show yet.</div>`}${inv}`));
   }));
   app.get("/portal/:token/doc/:id", wrap(async (req, res) => {
     const d = (await q(`SELECT d.* FROM documents d JOIN case_contacts cc ON cc.case_id=d.case_id AND cc.role='client' JOIN contacts ct ON ct.id=cc.contact_id WHERE ct.portal_token=$1 AND d.id=$2 AND d.shared`, [String(req.params.token), +req.params.id])).rows[0];
@@ -638,13 +640,20 @@ function page(title, body) {
 <style>body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f4f0;color:#1d2433}main{max-width:760px;margin:0 auto;padding:16px}
 h1{font-family:Georgia,serif;font-size:22px}h2{font-size:17px;margin:4px 0 8px}.card{background:#fff;border:1px solid #e4e2db;border-radius:12px;padding:14px;margin:0 0 12px}.mute{color:#667085;font-size:13px}
 .line{display:flex;justify-content:space-between;gap:12px;border-top:1px solid #eee;padding:8px 0}.line span:last-child{white-space:nowrap}.tot{font-weight:700;font-size:17px}
+.brand{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:8px 0 14px;margin-bottom:12px;border-bottom:1px solid #e4e2db}.brand img{max-height:56px;max-width:220px;object-fit:contain}.brand .bn{font-family:Georgia,serif;font-size:19px;font-weight:600}
 .btn{display:inline-block;border:0;background:#7a2e2e;color:#fff;padding:12px 18px;border-radius:8px;font-size:15px;text-decoration:none;cursor:pointer}a{color:#7a2e2e}.ok{background:#e3f4ea;border-color:#bfe3cd}
 @media print{.noprint{display:none}body{background:#fff}.card{border:0}}</style></head><body><main>${body}</main></body></html>`;
+}
+// firm header for invoices and the client page (logo + name + contact line)
+function brandHead(f) {
+  const contact = [String(f.address || "").split(/\n+/).map(s => s.trim()).filter(Boolean).join(", "), f.phone, f.email, f.website].filter(Boolean);
+  return `<header class="brand">${f.logo_token ? `<img src="/brand/${esc(f.logo_token)}" alt="${esc(f.name)}">` : ""}<div><div class="bn">${esc(f.name)}</div>${contact.length ? `<div class="mute">${contact.map(esc).join(" · ")}</div>` : ""}</div></header>`;
 }
 function invoiceHtml(inv, { pay, print, note } = {}) {
   const d = ds;
   return page(`Invoice #${inv.number} — ${inv.firm_name}`, `${note ? `<div class="card ok">${esc(note)}</div>` : ""}
-  <div class="card"><div class="mute">${esc(inv.firm_name)}</div><h1 style="margin:4px 0">Invoice #${esc(inv.number)}</h1>
+  ${brandHead({ name: inv.firm_name, address: inv.firm_address, phone: inv.firm_phone, email: inv.firm_email, website: inv.firm_website, logo_token: inv.logo_token })}
+  <div class="card"><h1 style="margin:0 0 4px">Invoice #${esc(inv.number)}</h1>
    <div class="mute">Issued ${d(inv.issued)}${inv.due ? ` · Due ${d(inv.due)}` : ""} · ${esc(inv.status)}</div>
    ${inv.client ? `<p><b>Bill to:</b> ${esc(inv.client)}${inv.client_address ? `<br><span class="mute">${esc(inv.client_address)}</span>` : ""}</p>` : ""}
    ${inv.cause_no ? `<p class="mute">Matter: ${esc(inv.style || "")} · ${esc(inv.county || "")} County · Cause ${esc(inv.cause_no)}</p>` : ""}</div>

@@ -237,6 +237,19 @@ ALTER TABLE firms ADD COLUMN IF NOT EXISTS invoice_seq INT DEFAULT 1000;
 ALTER TABLE firms ADD COLUMN IF NOT EXISTS setup_help_at TIMESTAMPTZ;      -- firm asked for developer-assisted Microsoft setup (one-time fee)
 ALTER TABLE firms ADD COLUMN IF NOT EXISTS setup_help_note TEXT;
 ALTER TABLE firms ADD COLUMN IF NOT EXISTS setup_help_done BOOLEAN DEFAULT false;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS address TEXT;                -- firm profile: shown on drafts, invoices and the client page
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS fax TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS website TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS firm_email TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS logo BYTEA;                  -- PNG or JPG, up to 1 MB
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS logo_mime TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS logo_w INT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS logo_h INT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS logo_token TEXT UNIQUE;      -- random; the logo is served at /brand/<token>
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;                  -- attorney profile: shown in signature blocks
+ALTER TABLE users ADD COLUMN IF NOT EXISTS title TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS doc_email TEXT;
 CREATE TABLE IF NOT EXISTS events (
   id SERIAL PRIMARY KEY,
   firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,

@@ -127,14 +127,16 @@ function renderNav() {
   const badge = k => k === "inbox" && inboxUnread ? `<span class="badge">${inboxUnread}</span>` : "";
   const item = ([k, v]) => `<a href="#${k}" data-t="${k}" class="ni${tab === k ? " on" : ""}"${tab === k ? ' aria-current="page"' : ""}>${ic(k)}<span>${v}</span>${badge(k)}</a>`;
   const role = me.role === "admin" ? "Attorney · Admin" : me.role === "paralegal" ? "Paralegal" : "Attorney";
-  $("#side").innerHTML = `<div class="brand"><span class="mark" aria-hidden="true">TX</span><span><b>TX Case Desk</b><small>${esc(me.firm_name || "")}</small></span></div>
+  $("#side").innerHTML = (me.firm_logo ? `<div class="brand withlogo"><span class="blogo"><img src="${esc(me.firm_logo)}" alt=""></span><span class="bt"><b>${esc(me.firm_name || "")}</b><small>TX Case Desk</small></span></div>`
+    : `<div class="brand"><span class="mark" aria-hidden="true">TX</span><span><b>TX Case Desk</b><small>${esc(me.firm_name || "")}</small></span></div>`) + `
     <nav aria-label="Main" style="display:flex;flex-direction:column;gap:18px">${navGroups().map(([h, items]) => `<div class="ng"><div class="nh">${h}</div>${items.map(item).join("")}</div>`).join("")}</nav>
     <a href="#account" data-t="account" class="me${tab === "account" ? " on" : ""}"><span class="av">${esc(initials(me.name))}</span><span><b>${esc(me.name)}</b><small>${role}${me.bar_number ? " · Bar #" + esc(me.bar_number) : ""}</small></span></a>`;
   const inMore = !PRIMARY.some(([k]) => k === tab);
   $("#tabs").innerHTML = PRIMARY.map(([k, v]) => `<a href="#${k}" data-t="${k}" class="tb${tab === k ? " on" : ""}"${tab === k ? ' aria-current="page"' : ""}><span class="ti">${ic(k, 22, tab === k ? 2 : 1.75)}${k === "inbox" && inboxUnread ? `<span class="bdg">${inboxUnread}</span>` : ""}</span>${v}</a>`).join("")
     + `<button type="button" class="tb${inMore ? " on" : ""}" id="moreBtn"><span class="ti">${ic("more", 22)}</span>More</button>`;
   document.body.dataset.tab = tab;
-  $("#ttl").innerHTML = tab === "today" ? `<span class="mark" aria-hidden="true">TX</span><span class="tname">TX Case Desk</span>` : `<span class="tname">${esc(titleOf(tab))}</span>`;
+  $("#ttl").innerHTML = tab !== "today" ? `<span class="tname">${esc(titleOf(tab))}</span>`
+    : me.firm_logo ? `<img class="tlogo" src="${esc(me.firm_logo)}" alt="${esc(me.firm_name || "Firm")} logo">` : `<span class="mark" aria-hidden="true">TX</span><span class="tname">TX Case Desk</span>`;
   $$("#side [data-t], #tabs [data-t]").forEach(a => a.onclick = e => { e.preventDefault(); nav(a.dataset.t); });
   $("#moreBtn").onclick = moreSheet;
 }
@@ -647,7 +649,8 @@ async function firmView() {
   let us; try { us = (await api("/api/firm/users")).users; } catch (e) { return fail(e); }
   let fm = null; try { fm = await api("/api/firm/mail"); } catch (e) {}
   let mk = null; try { mk = await api("/api/firm/ms-keys"); } catch (e) {}
-  const mkCard = !mk ? "" : `<div class="card"><h2>Your firm's Microsoft connection</h2>
+  let fp = null; try { fp = (await api("/api/firm/profile")).profile; } catch (e) { fp = { name: me.firm_name }; }
+  const mkCard = !mk ? "" : `<div class="card" data-fs="email"><h2>Your firm's Microsoft connection</h2>
    ${mk.own ? `<p><span class="tag g">Using your firm's own keys</span></p>
      <div class="kv"><div><b>Application (client) ID</b>${esc(mk.client_id)}</div><div><b>Directory (tenant) ID</b>${esc(mk.tenant)}</div><div><b>Secret</b>${esc(mk.hint || "saved")} (hidden)</div><div><b>Saved</b>${mk.at ? new Date(mk.at).toLocaleString() : ""}${mk.by ? " by " + esc(mk.by) : ""}</div></div>
      <p class="mute" style="font-size:13px">Attorneys who connected before these keys were saved should tap <b>Reconnect</b> if their email shows an error. Secrets expire — put a reminder on your calendar for the date you picked in Azure.</p>
@@ -672,7 +675,7 @@ async function firmView() {
      <label>Client secret — Value</label><input name="secret" type="password" autocomplete="off" required>
      <div class="err" id="mkErr"></div><button class="btn" style="width:100%;padding:12px">Save &amp; test with Microsoft</button>
      <p class="mute" style="font-size:13px;margin:6px 0 0">We test the keys with Microsoft before saving. The secret is encrypted and never shown again.</p></form></details></div>`;
-  const fmCard = !fm ? "" : `<div class="card"><h2>Firm email — connect everyone at once</h2>
+  const fmCard = !fm ? "" : `<div class="card" data-fs="email"><h2>Firm email — connect everyone at once</h2>
    ${fm.firm ? `<div class="row"><span class="tag ${fm.firm.status === "ok" ? "g" : "r"}">${fm.firm.status === "ok" ? "Connected" : fm.firm.status === "reconnect" ? "Approve again" : "Error"}</span><b>${esc(fm.firm.provider === "microsoft" ? "Microsoft 365" : "Google Workspace")}</b> · @${esc(fm.firm.domain)}</div>
      <div class="mute" style="margin-top:4px">${fm.firm.last_sync ? "Last checked " + new Date(fm.firm.last_sync).toLocaleString() : "First check running…"}${fm.firm.stats ? ` · ${fm.firm.stats.people} attorneys · ${fm.firm.stats.added} new court emails · ${fm.firm.stats.created} cases added` : ""}</div>
      ${fm.firm.last_error ? `<p class="err">${esc(fm.firm.last_error)}</p>` : ""}
@@ -687,14 +690,17 @@ async function firmView() {
        <li>Client ID:<div class="secret">${esc(fm.google_sa_client_id)}</div></li><li>OAuth scope:<div class="secret">https://www.googleapis.com/auth/gmail.readonly</div></li><li>Tap <b>Authorize</b>, then come back and tap the button below.</li></ol>
        <button class="btn" id="fmG" style="width:100%;padding:14px">I've authorized it — turn on for the whole firm</button><div class="err" id="fmGerr"></div>` : `<button class="btn ghost" disabled style="width:100%;padding:14px">Google Workspace firm connect — coming soon</button>`}`
    : `<p class="mute">Your firm's email (@${esc(fm.detect.domain)}) is hosted by ${esc(fm.detect.host)}. Firm-wide connect works with Microsoft 365 and Google Workspace. Each attorney can connect their own email in a minute with <b>Connect with your email password</b> (Inbox or Court Updates).</p>`}</div>`;
-  $("#app").innerHTML = fmCard + mkCard + `<div class="card"><h2>${esc(me.firm_name)} – seats</h2>${us.map(u => `<div style="border-top:1px solid var(--line);padding:10px 0" data-u="${u.id}">
+  $("#app").innerHTML = secTabs(FS_SECS, fsSec, "fs") + profileCard(fp) + fmCard + mkCard + `<div class="card" data-fs="people"><h2>${esc(me.firm_name)} – seats</h2>${us.map(u => `<div style="border-top:1px solid var(--line);padding:10px 0" data-u="${u.id}">
     <b>${esc(u.name)}</b> <span class="tag ${u.active ? "g" : "r"}">${u.active ? u.role : "disabled"}</span> ${u.totp_enabled ? "" : `<span class="tag y">2FA not set</span>`}
     <div class="mute">${esc(u.email)}${u.bar_number ? " · Bar #" + esc(u.bar_number) : ""}</div><div class="mute">Counties: ${esc((u.counties || []).join(", ") || "none")} · Last login: ${u.last_login ? new Date(u.last_login).toLocaleString() : "never"}</div>
     ${u.id !== me.id ? `<div class="row" style="margin-top:6px"><button class="btn sm ghost" data-a="reset">Reset password & 2FA</button><button class="btn sm ${u.active ? "danger" : "ghost"}" data-a="toggle">${u.active ? "Disable" : "Enable"}</button></div>` : ""}</div>`).join("")}</div>
-   <div class="card"><h2>Add a seat</h2><form id="af"><div class="grid"><div><label>Name</label><input name="name" required></div><div><label>Email</label><input name="email" type="email" required></div>
+   <div class="card" data-fs="people"><h2>Add a seat</h2><p class="mute" style="margin-top:0">Each person gets their own sign-in. You set them up here; they get a temporary password, then set their own password and two-factor at first sign-in.</p><form id="af"><div class="grid"><div><label>Name</label><input name="name" required></div><div><label>Email</label><input name="email" type="email" required></div>
    <div><label>Bar # (attorneys)</label><input name="bar" inputmode="numeric"></div><div><label>Role</label><select name="role"><option value="attorney">Attorney</option><option value="paralegal">Paralegal</option><option value="admin">Firm admin</option></select></div></div>
    <div class="err" id="aerr"></div><button class="btn">Add seat</button></form><div id="temp"></div></div><div id="firmExtras"></div>`;
-  if (window.renderFirmExtras) renderFirmExtras(us);
+  const setFs = k => { fsSec = k; $$("#app [data-fs]").forEach(s => s.hidden = s.dataset.fs !== k); $$("[data-fs-go]").forEach(b => b.dataset.fsGo === k ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")); $("#fsSel").value = k; };
+  $$("[data-fs-go]").forEach(b => b.onclick = () => setFs(b.dataset.fsGo)); $("#fsSel").onchange = e => setFs(e.target.value);
+  setFs(fsSec); wireProfileCard(fp);
+  Promise.resolve(window.renderFirmExtras && renderFirmExtras(us)).then(() => setFs(fsSec));
   const showTemp = (who, pw) => $("#temp").innerHTML = `<div class="card" style="background:#fff4d6;margin-top:10px"><b>Temporary password for ${esc(who)}:</b><div class="secret" style="margin-top:6px">${esc(pw)}</div><p class="mute">Shown once. Give it to them privately — they'll set their own password and 2FA at first sign-in.</p></div>`;
   if ($("#mkF")) $("#mkF").onsubmit = async e => {
     e.preventDefault(); const f = e.target, btn = f.querySelector("button.btn"); $("#mkErr").textContent = ""; btn.disabled = true; btn.textContent = "Testing with Microsoft…";
@@ -731,12 +737,72 @@ function subLine(sub) {
 }
 
 // ---------------- account ----------------
+// ---------------- firm settings: sections + firm profile + logo ----------------
+const FS_SECS = [["profile", "Firm profile"], ["people", "People & sign-ins"], ["email", "Email & Microsoft"], ["money", "Payments & rates"], ["court", "Court days & checklists"], ["data", "Export"]];
+let fsSec = "profile";
+function secTabs(secs, cur, attr) {
+  return `<nav class="secnav" aria-label="Sections">${secs.map(([k, v]) => `<button type="button" data-${attr}-go="${k}"${cur === k ? ' aria-current="page"' : ""}>${v}</button>`).join("")}</nav>
+    <div class="secsel"><label for="${attr}Sel">Section</label><select id="${attr}Sel">${secs.map(([k, v]) => `<option value="${k}"${cur === k ? " selected" : ""}>${v}</option>`).join("")}</select></div>`;
+}
+function profileCard(f) {
+  return `<div class="card" data-fs="profile"><h2>Firm profile</h2><p class="mute" style="margin-top:0">Shown in the app and on Word drafts, letters, invoices and the client page.</p>
+    <div class="logorow"><div class="logoprev">${f.logo ? `<img src="${esc(f.logo)}" alt="${esc(f.name)} logo">` : `<span class="mute">No logo yet</span>`}</div>
+      <div style="display:flex;flex-direction:column;gap:8px"><div class="row"><button type="button" class="btn ghost" id="logoBtn">${f.logo ? "Replace logo" : "Upload logo"}</button>${f.logo ? `<button type="button" class="btn ghost" id="logoDel">Remove</button>` : ""}</div>
+        <input type="file" id="logoUp" accept="image/png,image/jpeg" hidden><span class="mute">PNG or JPG, up to 1 MB. A wide logo on a white or clear background looks best.</span><div class="err" id="logoErr"></div></div></div>
+    <form id="fpF" style="margin-top:14px"><div class="grid">
+      <div class="full"><label for="fpName">Firm name</label><input id="fpName" name="name" required value="${esc(f.name || "")}"></div>
+      <div class="full"><label for="fpAddr">Office address</label><textarea id="fpAddr" name="address" rows="3" style="min-height:84px" placeholder="123 Main St, Suite 200&#10;McAllen, TX 78501">${esc(f.address || "")}</textarea></div>
+      <div><label for="fpPh">Main phone</label><input id="fpPh" name="phone" type="tel" value="${esc(f.phone || "")}"></div>
+      <div><label for="fpFax">Fax</label><input id="fpFax" name="fax" type="tel" value="${esc(f.fax || "")}"></div>
+      <div><label for="fpEm">Firm email</label><input id="fpEm" name="email" type="email" value="${esc(f.email || "")}"></div>
+      <div><label for="fpWeb">Website</label><input id="fpWeb" name="website" value="${esc(f.website || "")}" placeholder="www.yourfirm.com"></div></div>
+      <div class="err"></div><button class="btn">Save firm profile</button></form></div>`;
+}
+function wireProfileCard() {
+  $("#fpF").onsubmit = async e => { e.preventDefault(); const f = e.target;
+    try { const r = await api("/api/firm/profile", { method: "PUT", body: Object.fromEntries(new FormData(f)) }); me.firm_name = r.profile.name; renderNav(); toast("Firm profile saved"); }
+    catch (x) { f.querySelector(".err").textContent = x.message; } };
+  $("#logoBtn").onclick = () => $("#logoUp").click();
+  $("#logoUp").onchange = async e => { const file = e.target.files[0]; if (!file) return; $("#logoErr").textContent = "";
+    if (!/^image\/(png|jpeg)$/.test(file.type)) { $("#logoErr").textContent = "Use a PNG or JPG image."; return; }
+    if (file.size > 1024 * 1024) { $("#logoErr").textContent = "That image is over 1 MB. Save a smaller copy and try again."; return; }
+    const res = await fetch("/api/firm/logo", { method: "PUT", headers: { "X-Requested-With": "tcd", "Content-Type": file.type }, body: file, credentials: "same-origin" });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) { $("#logoErr").textContent = j.error || "Upload failed"; return; }
+    me.firm_logo = j.logo; renderNav(); toast("Logo saved"); firmView(); };
+  if ($("#logoDel")) $("#logoDel").onclick = async () => { const b = $("#logoDel"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to remove"; return; }
+    await api("/api/firm/logo", { method: "DELETE" }); me.firm_logo = null; renderNav(); toast("Logo removed"); firmView(); };
+}
+
+// ---------------- account: my profile ----------------
+function sigLines(u, f) {
+  return [f.name && f.name.toUpperCase(), ...String(f.address || "").split(/\n+/).map(s => s.trim()).filter(Boolean), f.phone && "Telephone: " + f.phone, f.fax && "Facsimile: " + f.fax, "",
+    "By: /s/ " + (u.name || ""), u.name, u.title, "State Bar No. " + (u.bar_number || "________"), u.phone && u.phone !== f.phone && "Direct: " + u.phone, u.doc_email || me.email].filter(x => x !== undefined && x !== null && x !== false);
+}
 function accountView() {
-  $("#app").innerHTML = `<div class="card"><h2>Account</h2><div class="kv"><div><b>Name</b>${esc(me.name)}</div><div><b>Email</b>${esc(me.email)}</div><div><b>Bar #</b>${esc(me.bar_number || "—")}</div>
-   <div><b>Firm</b>${esc(me.firm_name)}</div><div><b>Role</b>${esc(me.role)}</div><div><b>2FA</b>${me.totp_enabled ? "On" : "Off"}</div></div>
+  const role = me.role === "admin" ? "Firm admin" : me.role === "manager" ? "Manager" : me.role === "paralegal" ? "Paralegal" : "Attorney";
+  $("#app").innerHTML = `<div class="card"><h2>My profile</h2><p class="mute" style="margin-top:0">Used in your signature block on Word drafts and letters.</p>
+    <form id="mpF"><div class="grid">
+      <div><label for="mpN">Full name</label><input id="mpN" name="name" required value="${esc(me.name)}"></div>
+      ${me.role !== "paralegal" ? `<div><label for="mpB">Texas Bar # (8 digits)</label><input id="mpB" name="bar_number" inputmode="numeric" maxlength="8" value="${esc(me.bar_number || "")}"></div>` : ""}
+      <div><label for="mpT">Title</label><input id="mpT" name="title" value="${esc(me.title || "")}" placeholder="${me.role === "paralegal" ? "Paralegal" : "Attorney at Law"}"></div>
+      <div><label for="mpP">Direct phone</label><input id="mpP" name="phone" type="tel" value="${esc(me.phone || "")}"></div>
+      <div class="full"><label for="mpE">Email on documents</label><input id="mpE" name="doc_email" type="email" value="${esc(me.doc_email || "")}" placeholder="${esc(me.email)}"><span class="mute">Leave blank to use your sign-in email.</span></div></div>
+      <div class="err"></div><button class="btn">Save my profile</button></form>
+    ${me.role !== "paralegal" ? `<details style="margin-top:14px"><summary>Signature block preview</summary><div class="sigprev" id="sigPrev"></div></details>` : ""}</div>
+   <div class="card"><h2>Sign-in and security</h2><div class="kv"><div><b>Sign-in email</b>${esc(me.email)}</div><div><b>Firm</b>${esc(me.firm_name)}</div><div><b>Role</b>${role}</div><div><b>Two-factor</b>${me.totp_enabled ? "On" : "Off"}</div></div>
+   <p class="mute">Your firm admin creates and manages sign-ins.</p>
    <div class="row" style="margin-top:12px"><button class="btn ghost" id="pw">Change password</button><button class="btn danger" id="out">Sign out</button></div></div>
    <div class="card"><h3>Subscription</h3><div id="subInfo" class="mute">Loading…</div>
-   <label style="margin-top:10px">Have a free-time code?</label><div class="row"><input id="sc" placeholder="TXC-30D-…" style="flex:1"><button class="btn sm" id="scGo">Apply</button></div><div class="err" id="scErr"></div></div>`;
+   <label for="sc" style="margin-top:10px">Have a free-time code?</label><div class="row"><input id="sc" placeholder="TXC-30D-…" style="flex:1"><button class="btn sm" id="scGo">Apply</button></div><div class="err" id="scErr"></div></div>`;
+  let firm = { name: me.firm_name };
+  const prev = () => { const el = $("#sigPrev"); if (!el) return; const f = $("#mpF"); const u = { name: f.name.value, bar_number: f.bar_number ? f.bar_number.value : "", title: f.title.value, phone: f.phone.value, doc_email: f.doc_email.value };
+    el.innerHTML = sigLines(u, firm).map(l => l ? `<div>${esc(l)}</div>` : "<br>").join(""); };
+  api("/api/firm/profile").then(r => { firm = r.profile; prev(); }).catch(() => prev());
+  $("#mpF").oninput = prev;
+  $("#mpF").onsubmit = async e => { e.preventDefault(); const f = e.target;
+    try { const r = await api("/api/me/profile", { method: "PUT", body: Object.fromEntries(new FormData(f)) }); me = { ...me, ...r.user }; renderNav(); toast("Profile saved"); f.querySelector(".err").textContent = ""; }
+    catch (x) { f.querySelector(".err").textContent = x.message; } };
   api("/api/subscription").then(r => { $("#subInfo").textContent = r.managed ? subLine(r) : "Active"; }).catch(() => {});
   $("#scGo").onclick = async () => { try { await api("/api/subscription/redeem", { method: "POST", body: { code: $("#sc").value } }); toast("Code applied"); accountView(); } catch (e) { $("#scErr").textContent = e.message; } };
   $("#pw").onclick = () => changePwView(false);

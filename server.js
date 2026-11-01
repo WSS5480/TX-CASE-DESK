@@ -58,10 +58,11 @@ async function audit(req, action, detail = {}) {
 }
 function publicUser(u) {
   return { id: u.id, email: u.email, name: u.name, bar_number: u.bar_number, role: u.role, firm_id: u.firm_id, firm_name: u.firm_name,
-    counties: u.counties || [], totp_enabled: u.totp_enabled, must_change_pw: u.must_change_pw };
+    counties: u.counties || [], totp_enabled: u.totp_enabled, must_change_pw: u.must_change_pw,
+    phone: u.phone || "", title: u.title || "", doc_email: u.doc_email || "", firm_logo: u.logo_token ? `/brand/${u.logo_token}` : null };
 }
 async function loadUser(id) {
-  const { rows } = await q("SELECT u.*, f.name AS firm_name, f.plan, f.plan_expires, f.plan_source, f.plan_checked, f.disabled AS firm_disabled FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
+  const { rows } = await q("SELECT u.*, f.name AS firm_name, f.logo_token, f.plan, f.plan_expires, f.plan_source, f.plan_checked, f.disabled AS firm_disabled FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
   return rows[0];
 }
 const requireAuth = wrap(async (req, res, next) => {
@@ -199,6 +200,64 @@ app.put("/api/me/counties", requireAuth, wrap(async (req, res) => {
 }));
 
 // ---------- firm seats (admin) ----------
+// ---------- firm profile + logo (admin) and each person's own profile ----------
+const pclean = (v, n) => String(v ?? "").replace(/[\u0000-\u001f\u007f]+/g, m => (m.includes("\n") ? "\n" : " ")).trim().slice(0, n);
+const okEmail = e => !e || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+function imageInfo(b) {               // PNG or JPEG only; returns type + pixel size, or null
+  if (!b || b.length < 24) return null;
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return { mime: "image/png", w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+  if (b[0] === 0xff && b[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < b.length) {
+      if (b[i] !== 0xff) { i++; continue; }
+      const m = b[i + 1], len = b.readUInt16BE(i + 2);
+      if ((m >= 0xc0 && m <= 0xc3) || (m >= 0xc5 && m <= 0xc7) || (m >= 0xc9 && m <= 0xcb) || (m >= 0xcd && m <= 0xcf)) return { mime: "image/jpeg", w: b.readUInt16BE(i + 7), h: b.readUInt16BE(i + 5) };
+      i += 2 + len;
+    }
+  }
+  return null;
+}
+app.get("/brand/:token", wrap(async (req, res) => {
+  const r = (await q("SELECT logo, logo_mime FROM firms WHERE logo_token=$1 AND logo IS NOT NULL", [String(req.params.token).slice(0, 64)])).rows[0];
+  if (!r) return res.status(404).send("Not found");
+  res.set({ "Content-Type": r.logo_mime, "Cache-Control": "public, max-age=31536000, immutable", "Content-Security-Policy": "default-src 'none'" }).send(r.logo);
+}));
+const firmProfile = async id => {
+  const f = (await q("SELECT name, address, phone, fax, website, firm_email, logo_token, logo_w, logo_h FROM firms WHERE id=$1", [id])).rows[0];
+  return { name: f.name, address: f.address || "", phone: f.phone || "", fax: f.fax || "", website: f.website || "", email: f.firm_email || "", logo: f.logo_token ? `/brand/${f.logo_token}` : null, logo_w: f.logo_w, logo_h: f.logo_h };
+};
+app.get("/api/firm/profile", requireAuth, wrap(async (req, res) => res.json({ profile: await firmProfile(req.user.firm_id) })));
+app.put("/api/firm/profile", requireAuth, requireAdmin, wrap(async (req, res) => {
+  const b = req.body || {}, name = pclean(b.name, 120), email = pclean(b.email, 120), web = pclean(b.website, 160);
+  if (!name) return res.status(400).json({ error: "Firm name is required." });
+  if (!okEmail(email)) return res.status(400).json({ error: "Check the firm email address." });
+  await q("UPDATE firms SET name=$2, address=$3, phone=$4, fax=$5, website=$6, firm_email=$7 WHERE id=$1",
+    [req.user.firm_id, name, pclean(b.address, 300) || null, pclean(b.phone, 30) || null, pclean(b.fax, 30) || null, web || null, email || null]);
+  await audit(req, "firm_profile_saved", {});
+  res.json({ profile: await firmProfile(req.user.firm_id) });
+}));
+app.put("/api/firm/logo", requireAuth, requireAdmin, express.raw({ type: () => true, limit: "1mb" }), wrap(async (req, res) => {
+  const info = imageInfo(req.body);
+  if (!info || !info.w || !info.h) return res.status(400).json({ error: "Use a PNG or JPG image (1 MB or smaller)." });
+  const token = crypto.randomBytes(16).toString("hex");
+  await q("UPDATE firms SET logo=$2, logo_mime=$3, logo_w=$4, logo_h=$5, logo_token=$6 WHERE id=$1", [req.user.firm_id, req.body, info.mime, info.w, info.h, token]);
+  await audit(req, "firm_logo_saved", { type: info.mime, w: info.w, h: info.h });
+  res.json({ logo: `/brand/${token}` });
+}));
+app.delete("/api/firm/logo", requireAuth, requireAdmin, wrap(async (req, res) => {
+  await q("UPDATE firms SET logo=NULL, logo_mime=NULL, logo_w=NULL, logo_h=NULL, logo_token=NULL WHERE id=$1", [req.user.firm_id]);
+  await audit(req, "firm_logo_removed", {}); res.json({ ok: true });
+}));
+app.put("/api/me/profile", requireAuth, wrap(async (req, res) => {
+  const b = req.body || {}, name = pclean(b.name, 80), bar = pclean(b.bar_number, 8).replace(/\D/g, ""), docEmail = pclean(b.doc_email, 120);
+  if (!name) return res.status(400).json({ error: "Your name is required." });
+  if (req.user.role !== "paralegal" && bar && bar.length !== 8) return res.status(400).json({ error: "Texas bar numbers are 8 digits." });
+  if (!okEmail(docEmail)) return res.status(400).json({ error: "Check the email for documents." });
+  await q("UPDATE users SET name=$2, bar_number=$3, phone=$4, title=$5, doc_email=$6 WHERE id=$1",
+    [req.user.id, name, bar || null, pclean(b.phone, 30) || null, pclean(b.title, 80) || null, docEmail || null]);
+  await audit(req, "profile_saved", {});
+  res.json({ user: publicUser(await loadUser(req.user.id)) });
+}));
 app.get("/api/firm/users", requireAuth, requireAdmin, wrap(async (req, res) => {
   const { rows } = await q("SELECT id,email,name,bar_number,role,counties,totp_enabled,active,last_login FROM users WHERE firm_id=$1 ORDER BY name", [req.user.firm_id]);
   res.json({ users: rows });

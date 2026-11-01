@@ -1,5 +1,5 @@
 // Word (.docx) drafts filled from the case. Every draft is for the attorney to review and edit before filing.
-const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, AlignmentType, WidthType, BorderStyle } = require("docx");
+const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, AlignmentType, WidthType, BorderStyle, ImageRun } = require("docx");
 
 const LIST = [
   { key: "notice_appearance", label: "Notice of appearance of counsel" },
@@ -41,10 +41,32 @@ function caption(c) {
 }
 const title = t => para([run(t.toUpperCase(), { bold: true })], { align: AlignmentType.CENTER, after: 240 });
 const draftNote = () => para([run("DRAFT prepared by TX Case Desk from the case file — review, complete the blanks, and delete this line before filing.", { italics: true, size: 18, color: "888888" })], { after: 200 });
+// firm block from the firm profile: name, address lines, phone / fax
+const lines = s => String(s || "").split(/\n+/).map(x => x.trim()).filter(Boolean);
+// "456 Oak Ave, Edinburg, TX 78539" -> street on one line, city/state/ZIP on the next; typed line breaks win
+const addrLines = a => { const s = String(a || "").trim(); if (/\n/.test(s)) return lines(s); const i = s.indexOf(","); return i > 0 ? [s.slice(0, i).trim(), s.slice(i + 1).trim()].filter(Boolean) : [s]; };
+function firmBlock(s) {
+  return [...(s.firm ? [para([run(s.firm.toUpperCase(), { bold: true })], { after: 0 })] : []), ...lines(s.address).map(l => para(l, { after: 0 })),
+    ...(s.firmPhone ? [para(`Telephone: ${s.firmPhone}`, { after: 0 })] : []), ...(s.fax ? [para(`Facsimile: ${s.fax}`, { after: 0 })] : [])];
+}
 function signature(s, forWho) {
-  return [para("Respectfully submitted,", { after: 120 }), para(s.firm || "", { after: 0 }), blank(),
-    para(`/s/ ${s.name}`, { after: 0 }), para(s.name, { after: 0 }), para(`State Bar No. ${s.bar || "________"}`, { after: 0 }), para(s.email || "", { after: 0 }),
+  return [para("Respectfully submitted,", { after: 120 }), ...firmBlock(s), blank(),
+    para(`By: /s/ ${s.name}`, { after: 0 }), para(s.name, { after: 0 }), ...(s.title ? [para(s.title, { after: 0 })] : []), para(`State Bar No. ${s.bar || "________"}`, { after: 0 }),
+    ...(s.phone && s.phone !== s.firmPhone ? [para(`Direct: ${s.phone}`, { after: 0 })] : []), para(s.email || "", { after: 0 }),
     para(`ATTORNEY FOR ${forWho ? forWho.toUpperCase() : "________"}`, { bold: true, after: 240 })];
+}
+// letterhead for letters: logo (if the firm uploaded one), firm name, address, phone
+function letterhead(s) {
+  const out = [];
+  if (s.logo && s.logo.data && s.logo.w && s.logo.h) {
+    let h = 64, w = Math.round(h * s.logo.w / s.logo.h); if (w > 320) { w = 320; h = Math.round(w * s.logo.h / s.logo.w); }
+    out.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 80 }, children: [new ImageRun({ type: s.logo.type, data: s.logo.data, transformation: { width: w, height: h } })] }));
+  }
+  if (s.firm) out.push(para([run(s.firm.toUpperCase(), { bold: true, size: 26 })], { align: AlignmentType.CENTER, after: 0 }));
+  const contact = [lines(s.address).join(", "), [s.firmPhone && `Tel. ${s.firmPhone}`, s.fax && `Fax ${s.fax}`, s.website].filter(Boolean).join("  ·  ")].filter(Boolean);
+  contact.forEach(l => out.push(para([run(l, { size: 20, color: "444444" })], { align: AlignmentType.CENTER, after: 0 })));
+  if (out.length) out.push(new Paragraph({ spacing: { after: 240 }, border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: "999999", space: 4 } }, children: [] }));
+  return out;
 }
 function certificate(s) {
   return [title("Certificate of Service"),
@@ -76,13 +98,13 @@ async function render(key, { c, contacts, events, signer, opts }) {
   } else if (key === "client_letter") {
     name = "Client Status Letter";
     const upcoming = events.filter(e => e.kind === "hearing" || e.kind === "meeting").slice(0, 4);
-    body = [para(new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "America/Chicago" })), blank(),
-      para(client ? client.name : "________", { after: 0 }), ...(client && client.address ? String(client.address).split(/\n|,\s*(?=[A-Z])/).map(l => para(l.trim(), { after: 0 })) : []), blank(),
+    body = [...letterhead(signer), para(new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "America/Chicago" })), blank(),
+      para(client ? client.name : "________", { after: 0 }), ...(client && client.address ? addrLines(client.address).map(l => para(l, { after: 0 })) : []), blank(),
       para([run(`Re: ${c.style || c.cause_no}, Cause No. ${c.cause_no}, ${c.court ? c.court + ", " : ""}${c.county} County, Texas`, { bold: true })]),
       para(`Dear ${client ? client.name.split(" ")[0] : "________"}:`),
       para(`I am writing to update you on your case. ${c.status ? `The case is currently at this stage: ${c.status}.` : ""}`, { indent: true }),
       para(upcoming.length ? `Upcoming court dates: ${upcoming.map(e => `${e.date}${e.time ? " at " + e.time : ""} — ${e.title}`).join("; ")}. Please plan to be available, and contact me if you have a conflict.` : "There are no court dates set at this time. I will let you know as soon as one is scheduled.", { indent: true }),
-      para("Please call or email me with any questions.", { indent: true }), para("Sincerely,"), blank(), para(signer.name, { after: 0 }), para(signer.firm || "", { after: 0 }), para(signer.email || "", { after: 0 })];
+      para("Please call or email me with any questions.", { indent: true }), para("Sincerely,"), blank(), blank(), para(signer.name, { after: 0 }), ...(signer.title ? [para(signer.title, { after: 0 })] : []), para(signer.firm || "", { after: 0 }), ...(signer.phone || signer.firmPhone ? [para(signer.phone || signer.firmPhone, { after: 0 })] : []), para(signer.email || "", { after: 0 })];
   } else if (key === "case_summary") {
     name = "Case Summary";
     body = [para([run(c.style || c.cause_no, { bold: true, size: 30 })]), para(`Cause No. ${c.cause_no} · ${c.court ? c.court + " · " : ""}${c.county} County, Texas`),
