@@ -364,6 +364,55 @@ function imapForm(mb, open) {
     <details style="margin:6px 0"><summary class="mute" style="cursor:pointer;font-size:13px">Advanced: mail server</summary><label>Incoming (IMAP) server — leave blank to detect</label><input name="host" placeholder="imap.example.com"></details>
     <div class="err imapErr"></div><button class="btn" style="width:100%;padding:12px">Connect email</button></form></details>`;
 }
+// One "Email provider" dropdown for connecting email: pick yours, see only the right way to connect it.
+const EMAIL_PROVS = [
+  { k: "microsoft", n: "Outlook / Microsoft 365", oauth: "microsoft" },
+  { k: "google", n: "Gmail / Google Workspace", oauth: "google", host: "imap.gmail.com", tip: `Without Google sign-in: turn on 2-Step Verification, then create an <b>app password</b> at <a class="link" href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">myaccount.google.com/apppasswords</a> and use it as the password here.` },
+  { k: "yahoo", n: "Yahoo Mail", host: "imap.mail.yahoo.com", tip: `Yahoo needs an <b>app password</b>: <a class="link" href="https://login.yahoo.com/account/security" target="_blank" rel="noopener">Yahoo Account Security</a> → Generate app password. Use that here, not your normal password.` },
+  { k: "aol", n: "AOL Mail", host: "imap.aol.com", tip: `AOL needs an <b>app password</b>: <a class="link" href="https://login.aol.com/account/security" target="_blank" rel="noopener">AOL Account Security</a> → Generate app password. Use that here, not your normal password.` },
+  { k: "icloud", n: "iCloud Mail", host: "imap.mail.me.com", tip: `iCloud needs an <b>app-specific password</b>: <a class="link" href="https://appleid.apple.com" target="_blank" rel="noopener">appleid.apple.com</a> → Sign-In and Security → App-Specific Passwords.` },
+  { k: "titan", n: "Titan (GoDaddy Professional Email)", host: "imap.titan.email", tip: `First sign in to <a class="link" href="https://app.titan.email" target="_blank" rel="noopener">app.titan.email</a> → Settings → turn <b>Third-party email access ON</b> and <b>Two-step login OFF</b> (Titan blocks other apps while two-step is on).` },
+  { k: "godaddy", n: "GoDaddy Workspace email", host: "imap.secureserver.net" },
+  { k: "zoho", n: "Zoho Mail", host: "imap.zoho.com", tip: `In Zoho Mail → Settings → Mail Accounts, turn <b>IMAP access</b> on. If two-factor sign-in is on, use an app-specific password.` },
+  { k: "hostinger", n: "Hostinger", host: "imap.hostinger.com" },
+  { k: "ionos", n: "IONOS (1&1)", host: "imap.ionos.com" },
+  { k: "other", n: "Other email host", host: "" },
+];
+function guessProv(mb) {
+  const em = String(me.email || "").toLowerCase(), lab = (mb && mb.other && mb.other.label) || "", pv = mb && mb.other && mb.other.provider;
+  if (/@aol\.com$/.test(em)) return "aol";
+  if (/@(icloud|me|mac)\.com$/.test(em)) return "icloud";
+  if (pv === "microsoft" || pv === "google") return pv;
+  const hit = [[/titan/i, "titan"], [/godaddy/i, "godaddy"], [/zoho/i, "zoho"], [/yahoo/i, "yahoo"], [/icloud/i, "icloud"], [/hostinger/i, "hostinger"], [/ionos/i, "ionos"]].find(([re]) => re.test(lab));
+  return hit ? hit[1] : lab ? "other" : "";
+}
+function provPanel(mb, k, full) {
+  const P = EMAIL_PROVS.find(x => x.k === k); if (!P) return "";
+  const pwForm = (note) => `${P.tip ? `<p style="margin:6px 0;font-size:14px">${P.tip}</p>` : ""}${note || ""}
+    <form class="imapF"><label>Email address</label><input name="email" type="email" autocomplete="email" value="${esc(me.email || "")}" required>
+    <label>Email password${P.tip && /app/.test(P.tip) ? " (app password)" : ""}</label><input name="password" type="password" autocomplete="current-password" required>
+    ${k === "other" ? `<label>Incoming (IMAP) server — leave blank to detect</label><input name="host" placeholder="imap.example.com">`
+      : `<details style="margin:6px 0"><summary class="mute" style="cursor:pointer;font-size:13px">Advanced: mail server</summary><label>Incoming (IMAP) server</label><input name="host" value="${esc(P.host || "")}"></details>`}
+    <div class="err imapErr"></div><button class="btn" style="width:100%;padding:12px">Connect email</button></form>
+    <p class="mute" style="font-size:13px;margin:6px 0 0">Your password is encrypted and used only to read your email.</p>`;
+  if (P.oauth) {
+    const on = mb && mb.configured && mb.configured[P.oauth];
+    const btn = on ? `<a class="btn" href="/api/mail/connect/${P.oauth}${full && P.oauth === "microsoft" ? "?full=1" : ""}" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with ${P.oauth === "microsoft" ? "Outlook / Microsoft 365" : "Gmail"}</a>` : "";
+    if (P.oauth === "google") return on && !full ? `${btn}<details style="margin:6px 0"><summary class="mute" style="cursor:pointer;font-size:13px">Or use an app password instead</summary>${pwForm()}</details>` : pwForm();
+    return btn || `<p class="mute" style="margin:8px 0">Outlook / Microsoft 365 sign-in isn't switched on yet.</p>`;
+  }
+  return pwForm();
+}
+function emailPicker(mb, opts = {}) {
+  const g = guessProv(mb), det = mb && mb.other && mb.other.label && !mb.other.provider ? mb.other.label : "";
+  return `<div class="provPick" data-full="${opts.full ? 1 : ""}"><label>Your email provider</label>
+    <select class="provSel"><option value="">Choose your email provider…</option>${EMAIL_PROVS.map(p => `<option value="${p.k}" ${p.k === g ? "selected" : ""}>${esc(p.n)}</option>`).join("")}</select>
+    ${det ? `<p class="mute" style="font-size:13px;margin:4px 0 0">We looked up your email: it's hosted by <b>${esc(det)}</b>.</p>` : ""}
+    <div class="provPanel">${g ? provPanel(mb, g, opts.full) : ""}</div></div>`;
+}
+function wirePicker(mb, after) {
+  $$(".provPick").forEach(w => { const sel = w.querySelector(".provSel"); sel.onchange = () => { w.querySelector(".provPanel").innerHTML = provPanel(mb, sel.value, !!w.dataset.full); wireImap(after); }; });
+}
 function wireImap(after) {
   $$(".imapF").forEach(f => f.onsubmit = async e => {
     e.preventDefault(); const btn = f.querySelector("button.btn"), err = f.querySelector(".imapErr"); err.textContent = ""; btn.disabled = true; btn.textContent = "Checking…";
@@ -418,10 +467,7 @@ async function inboxView(quiet) {
        ${conn.stats && conn.stats.scanned != null ? `<div class="mute" style="font-size:13px;margin-top:4px">Last check ${new Date(conn.stats.at).toLocaleString()}: looked at ${conn.stats.scanned} emails, found ${conn.stats.court} from courts${conn.stats.created ? `, added ${conn.stats.created} cases` : ""}.</div>` : ""}
        ${conn.stats && conn.stats.note ? `<p class="err" style="margin:6px 0 0">${esc(conn.stats.note)}</p>${conn.provider !== "imap" ? imapForm(mb, true) : ""}` : ""}</div>`
     : `<div class="card"><h2 style="margin-top:0">Connect your email</h2><p style="margin-top:0">Sign in once with the email you get court notices at. We read only court emails and build and update your cases from them.</p>
-       ${mb.other && !mb.other.provider && mb.other.label ? `<p style="margin:0 0 6px"><b>Your email is hosted by ${esc(mb.other.label)}</b> — use the password sign-in below (the Outlook button won't see that mail).</p>` : ""}
-       ${mb.configured.microsoft ? `<a class="btn ${mb.other && !mb.other.provider ? "ghost" : ""}" href="/api/mail/connect/microsoft" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Outlook / Microsoft 365</a>` : `<p class="mute" style="margin:6px 0">Outlook / Microsoft 365 sign-in isn't switched on yet.</p>`}
-       ${mb.configured.google ? `<a class="btn" href="/api/mail/connect/google" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Sign in with Gmail</a>` : ""}
-       ${imapForm(mb, mb.other && !mb.other.provider)}
+       ${emailPicker(mb)}
        <p class="mute" style="margin-bottom:0;font-size:13px">Read-only. Personal email is ignored and never stored. Disconnect anytime under Court Updates.</p></div>`;
   $("#app").innerHTML = `${queueCards(qd)}${connCard}<div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Inbox</h2>${r.unread ? `<button class="btn sm ghost" id="readAll">Mark all read</button>` : ""}</div>
    <p class="mute" style="margin-bottom:0">Every court email from your connected email. Tap one for the summary and the exact email.</p></div>
@@ -432,7 +478,7 @@ async function inboxView(quiet) {
      ${m.cases.length ? `<div style="margin-top:4px">${m.cases.map(c => `<span class="chip">${esc(c.cause_no)}${c.case ? " · " + esc(c.case.style || "") : " · not in your cases"}</span>`).join("")}</div>` : ""}
      ${m.dates.length ? `<div class="mute" style="margin-top:4px">${m.dates.map(esc).join(" · ")}</div>` : ""}
      <div style="font-size:14px;margin-top:4px">${esc(m.preview)}</div></div>`).join("") || `<div class="card mute">No emails yet. Set up your address under <a class="link" id="goCU">Court Updates</a>.</div>`}`;
-  wireImap(() => setTimeout(() => inboxView(), 2500));
+  wireImap(() => setTimeout(() => inboxView(), 2500)); if (mb) wirePicker(mb, () => setTimeout(() => inboxView(), 2500));
   if (qd) wireQueue(qd, () => inboxView(true));
   if ($("#readAll")) $("#readAll").onclick = async () => { await api("/api/inbox/read-all", { method: "POST" }); inboxView(); };
   if ($("#goCU")) $("#goCU").onclick = () => { tab = "court"; renderNav(); show(); };
@@ -484,23 +530,21 @@ async function courtView() {
    ${d.bar_ok ? "" : `<p class="err">Your account needs an 8-digit bar # before cases can be pulled.</p>`}</div>
    <div class="card"><h2>Connect your email</h2>
    <p style="margin-top:0">You already get court emails — eFileTexas service notices, clerk notices, hearing settings. Connect your email once and TX Case Desk reads <b>only those court emails</b>, adds new cases, and updates your existing ones automatically.</p>
-   ${det.domain ? `<p class="mute" style="margin:0 0 6px">Your email <b>${esc(det.domain)}</b> is hosted by <b>${esc(det.host || "unknown")}</b>.${det.provider ? " Use the button below." : " Use <b>Connect with your email password</b> below."}</p>` : ""}
    ${order.map((p, i) => { const m = mb.mailboxes.find(x => x.provider === p);
-     if (!m && det.provider && p !== det.provider) return i === 1 ? `<p class="mute" style="font-size:13px;margin:4px 0">Use a different email? <a class="link" href="/api/mail/connect/${p}">Connect ${p === "microsoft" ? "Outlook" : "Gmail"} instead</a>${mb.configured[p] ? "" : " (coming soon)"}</p>` : "";
-     if (m) return `<div style="border-top:1px solid var(--line);padding:10px 0"><div class="row"><b>${esc(mb.names[p])}</b>
+     if (!m) return "";
+     return `<div style="border-top:1px solid var(--line);padding:10px 0"><div class="row"><b>${esc(mb.names[p])}</b>
        <span class="tag ${m.status === "ok" ? "g" : m.status === "syncing" ? "y" : "r"}">${m.status === "ok" ? "Connected" : m.status === "syncing" ? "Checking…" : m.status === "reconnect" ? "Reconnect needed" : "Error"}</span></div>
        <div class="mute">${esc(m.email || "")}${m.last_sync ? " · last checked " + new Date(m.last_sync).toLocaleString() : ""}${m.stats ? ` · ${m.stats.added} new court emails, ${m.stats.created} cases added` : ""}</div>
        ${m.last_error ? `<p class="err" style="margin:4px 0">${esc(m.last_error)}</p>` : m.stats && m.stats.note ? `<p class="err" style="margin:4px 0">${esc(m.stats.note)}</p>` : ""}
-       <div class="row" style="margin-top:6px">${m.status === "reconnect" ? `<a class="btn sm" href="/api/mail/connect/${p}" style="text-decoration:none">Reconnect</a>` : `<button class="btn sm" data-msync="${m.id}">Check now</button>`}<button class="btn sm danger" data-mdel="${m.id}">Disconnect</button></div></div>`;
-     return mb.configured[p] ? `<a class="btn" href="/api/mail/connect/${p}" style="display:block;text-align:center;text-decoration:none;margin:8px 0;padding:14px">Connect ${p === "microsoft" ? "Outlook / Microsoft 365" : "Gmail"}</a>`
-       : p === "microsoft" ? `<p class="mute" style="margin:8px 0">Outlook / Microsoft 365 sign-in isn't switched on yet.</p>` : ""; }).join("")}
-   ${(() => { const m = mb.mailboxes.find(x => x.provider === "imap"); if (!m) return imapForm(mb, !det.provider && !!det.domain);
+       <div class="row" style="margin-top:6px">${m.status === "reconnect" ? `<a class="btn sm" href="/api/mail/connect/${p}" style="text-decoration:none">Reconnect</a>` : `<button class="btn sm" data-msync="${m.id}">Check now</button>`}<button class="btn sm danger" data-mdel="${m.id}">Disconnect</button></div></div>`; }).join("")}
+   ${(() => { const m = mb.mailboxes.find(x => x.provider === "imap"); if (!m) return "";
      return `<div style="border-top:1px solid var(--line);padding:10px 0"><div class="row"><b>${esc(mb.names.imap)}</b>
        <span class="tag ${m.status === "ok" ? "g" : m.status === "syncing" ? "y" : "r"}">${m.status === "ok" ? "Connected" : m.status === "syncing" ? "Checking…" : m.status === "reconnect" ? "Password needed" : "Error"}</span></div>
        <div class="mute">${esc(m.email || "")}${m.last_sync ? " · last checked " + new Date(m.last_sync).toLocaleString() : ""}${m.stats && m.stats.scanned != null ? ` · looked at ${m.stats.scanned} emails, ${m.stats.court} from courts, ${m.stats.created} cases added` : ""}</div>
        ${m.last_error ? `<p class="err" style="margin:4px 0">${esc(m.last_error)}</p>` : ""}
        <div class="row" style="margin-top:6px">${m.status === "reconnect" ? "" : `<button class="btn sm" data-msync="${m.id}">Check now</button>`}<button class="btn sm danger" data-mdel="${m.id}">Disconnect</button></div>
        ${m.status === "reconnect" ? imapForm(mb, true) : ""}</div>`; })()}
+   ${mb.mailboxes.length ? `<details style="margin:8px 0"><summary style="cursor:pointer;font-weight:600">Connect a different email</summary>${emailPicker(mb)}</details>` : emailPicker(mb)}
    <p class="mute" style="margin-bottom:0;font-size:13px">Read-only. Only emails from courts, clerks, eFileTexas and re:SearchTX are read; everything else is ignored and never stored. Checked every hour. Disconnect anytime.</p></div>
    <details class="card"><summary>Other ways (re:SearchTX alerts / forwarding)</summary>
    <div class="card" style="margin-top:10px"><h2>Court updates (re:SearchTX)</h2>
@@ -557,7 +601,7 @@ async function courtView() {
   const courtIfOpen = () => { if (tab === "court" && !subView) courtView(); };   // only if they're still on this screen
   $$("[data-msync]").forEach(b => b.onclick = async () => { await api(`/api/mail/${b.dataset.msync}/sync`, { method: "POST" }); toast("Checking your email…"); setTimeout(courtIfOpen, 1500); });
   $$("[data-mdel]").forEach(b => b.onclick = async () => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to disconnect"; return; } await api(`/api/mail/${b.dataset.mdel}`, { method: "DELETE" }); courtView(); });
-  wireImap(() => setTimeout(courtIfOpen, 2500));
+  wireImap(() => setTimeout(courtIfOpen, 2500)); wirePicker(mb, () => setTimeout(courtIfOpen, 2500));
   if (mb.mailboxes.some(m => m.status === "syncing")) courtPoll = setTimeout(() => { if (tab === "court") courtView(); }, 4000);
   if ($("#goInbox")) $("#goInbox").onclick = () => { tab = "inbox"; renderNav(); show(); };
   const cpa = $("#cpAddr"); if (cpa) cpa.onclick = async () => { try { await navigator.clipboard.writeText(ea.address); toast("Address copied"); } catch (e) { toast(ea.address); } };

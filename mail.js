@@ -238,7 +238,8 @@ async function connectImap(user, { email, password, host }, opts = {}) {
   }
   throw lastErr || new Error("Couldn't connect.");
 }
-const SKIP_FOLDER = /\\(Trash|Sent|Drafts)|^(trash|sent|drafts|deleted|outbox)/i;   // Spam/Junk IS read: court notices often land there (court senders only, like everywhere else)
+const SKIP_FOLDER = /\\(Sent|Drafts)|^(sent|drafts|outbox)/i;   // Spam/Junk, Trash and Archive ARE read (court notices get filed or deleted there), but only real court addresses count in them
+const LOOSE_FOLDER = /junk|spam|trash|deleted|\bbin\b|archive/i;
 async function fetchImap(c, since) {
   const { simpleParser } = require("mailparser");
   const cl = imapClient(c);
@@ -251,14 +252,14 @@ async function fetchImap(c, since) {
       try {
         let uids = (await cl.search({ since }, { uid: true })) || [];
         // some servers mishandle SINCE — fall back to the newest 5,000 and filter by date ourselves
-        if (!uids.length && cl.mailbox && cl.mailbox.exists) uids = ((await cl.search({ all: true }, { uid: true })) || []).slice(-5000);
+        if (!uids.length && cl.mailbox && cl.mailbox.exists && !LOOSE_FOLDER.test((b.specialUse || "") + " " + b.path)) uids = ((await cl.search({ all: true }, { uid: true })) || []).slice(-5000);
         if (!uids.length) continue;
         for await (const m of cl.fetch(uids.slice(-20000).join(","), { uid: true, envelope: true, internalDate: true }, { uid: true })) {
           const when = new Date(m.internalDate || m.envelope?.date || Date.now()).toISOString();
           if (new Date(when) < since) continue;
           scanned++; folders[b.path] = (folders[b.path] || 0) + 1; if (!first || when < first) first = when; if (!last || when > last) last = when;
           const from = m.envelope?.from?.[0]?.address || "";
-          const junk = /junk|spam/i.test((b.specialUse || "") + " " + b.path);   // in Spam/Junk only a real court address counts, not a subject that says "court"
+          const junk = LOOSE_FOLDER.test((b.specialUse || "") + " " + b.path);   // in Spam/Trash/Archive only a real court address counts, not a subject that says "court"
           if (junk ? COURT_DOMAIN.test(domainOf(from)) : COURT_SENDER.test(from + " " + (m.envelope?.subject || ""))) hits.push({ box: b.path, uid: m.uid, from, subject: m.envelope?.subject || "", received: when, mid: m.envelope?.messageId || null });
           else if (!junk && FWD_SUBJECT.test(m.envelope?.subject || "")) hits.push({ fwd: true, box: b.path, uid: m.uid, from, subject: m.envelope?.subject || "", received: when, mid: m.envelope?.messageId || null });
           else { const d = domainOf(from); if (NEAR_MISS.test(d)) near[d] = (near[d] || 0) + 1; }
@@ -273,7 +274,14 @@ async function fetchImap(c, since) {
       try {
         const msg = await cl.fetchOne(String(h.uid), { source: true }, { uid: true });
         const parsed = msg && msg.source ? await simpleParser(msg.source) : {};
-        if (h.fwd && !COURT_BODY.test(((parsed.text || "") + " " + (parsed.html || "")).slice(0, 20000))) continue;   // a forward that isn't a court notice: skipped, never stored
+        if (h.fwd) {   // a forward that isn't a court notice: skipped, never stored. "Forward as attachment" puts the notice inside an attached email.
+          let inner = (parsed.text || "") + " " + String(parsed.html || "").replace(/<style[\s\S]*?<\/style>|<[^>]+>/gi, " ");
+          for (const a of (parsed.attachments || []).filter(a => /message\/rfc822|\.eml$/i.test(a.contentType + " " + (a.filename || ""))).slice(0, 3)) {
+            try { const m2 = await simpleParser(a.content); inner += " " + (m2.from ? m2.from.text : "") + " " + (m2.subject || "") + " " + (m2.text || "") + " " + String(m2.html || "").replace(/<style[\s\S]*?<\/style>|<[^>]+>/gi, " ");
+              parsed.text = `${parsed.text || ""}\n\n---------- Attached email ----------\nFrom: ${m2.from ? m2.from.text : ""}\nSubject: ${m2.subject || ""}\n\n${m2.text || String(m2.html || "").replace(/<style[\s\S]*?<\/style>|<[^>]+>/gi, " ")}`; parsed.html = null; } catch (e) {}
+          }
+          if (!COURT_BODY.test(inner.slice(0, 400000))) continue;
+        }
         out.push({ ext_id: "imap:" + (h.mid || h.box + ":" + h.uid), from: h.from, subject: h.subject, html: parsed.html || null, text: parsed.text || null, received: h.received });
       } finally { lock.release(); }
     }
@@ -318,7 +326,7 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
           ? `Your ${det.domain} email runs on Google Workspace, not Microsoft — the Microsoft sign-in opened an empty mailbox. Disconnect, then use Sign in with Gmail.`
           : `Your ${det.domain || ""} email is hosted by ${(await imapGuess(mb.email)).label}, not Microsoft — the Microsoft sign-in opened an empty mailbox, so there's nothing to read. Disconnect this, then use "Connect with your email password" below.`;
     }
-    const stats = { note, scanned: r.scanned, from: r.first, to: r.last, court: r.msgs.length, checked: r.msgs.length, added, matched, created, dup, near: Object.fromEntries(nearTop), at: new Date().toISOString() };
+    const stats = { v: SCAN_V, note, scanned: r.scanned, from: r.first, to: r.last, court: r.msgs.length, checked: r.msgs.length, added, matched, created, dup, near: Object.fromEntries(nearTop), at: new Date().toISOString() };
     await q("UPDATE mailboxes SET status='ok', last_sync=now(), last_seen=COALESCE($2,last_seen), last_error=NULL, stats=$3 WHERE id=$1", [id, seen || null, stats]);
     console.log(`[mail] ${mb.provider} mailbox ${id} (${mb.user_name}, @${domainOf(mb.email)}): scanned ${r.scanned} emails since ${since.toISOString().slice(0, 10)}${r.more ? " (more left, continues next check)" : ""}; ${r.msgs.length} court emails, ${added} new, ${dup} already had, ${created} cases created, ${matched} matched` +
       (nearTop.length ? `; other official-looking senders not read: ${nearTop.map(([d, n]) => d + "×" + n).join(", ")}` : ""));
@@ -330,8 +338,10 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
   } finally { running.delete(id); }
 }
 // One-time: mailboxes checked by the old 500-email scan get a fresh 30-day look.
+const SCAN_V = 3;
 async function rescanOld() {
-  const { rows } = await q("SELECT m.id FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE u.active AND m.status <> 'reconnect' AND (m.stats IS NULL OR m.stats->>'scanned' IS NULL)");
+  // also look again (90 days) at password-connected mailboxes checked before Spam/Trash/Archive and forwards were read
+  const { rows } = await q("SELECT m.id FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE u.active AND m.status <> 'reconnect' AND (m.stats IS NULL OR m.stats->>'scanned' IS NULL OR (m.provider='imap' AND COALESCE(m.stats->>'v','') <> $1))", [String(SCAN_V)]);
   for (const r of rows) await syncMailbox(r.id, { days: 30, fresh: true });
   return rows.length;
 }

@@ -322,8 +322,9 @@
     let mb; try { mb = await api("/api/mail"); } catch (e) { return toast(e.message); }
     const list = mb.mailboxes.map(x => `<div class="row" style="justify-content:space-between;border-top:1px solid var(--line);padding:8px 0"><span class="brk"><b>${esc(x.email || mb.names[x.provider])}</b><br><span class="mute">${esc(mb.names[x.provider] || x.provider)} · ${esc(x.status)}</span></span><button type="button" class="btn sm danger" data-dis="${x.id}">Disconnect</button></div>`).join("");
     openSheet("Email accounts", `${list ? `<div>${list}</div>` : `<p class="mute" style="margin:0">Sign in once with your work email. You'll see all of it here, and court emails keep updating your cases.</p>`}
-      ${mb.configured.microsoft ? `<a class="btn" href="/api/mail/connect/microsoft?full=1" style="display:block;text-align:center;text-decoration:none;padding:12px">Sign in with Outlook / Microsoft 365</a>` : ""}
-      ${imapForm(mb, !mb.configured.microsoft)}`, sh => {
+      ${emailPicker(mb, { full: true })}`, sh => {
+      const done = r => { closeSheet(); M.accounts = null; M.acct = r && r.id ? r.id : null; M.folder = null; M.sel = null; M.reading = false; M.q = ""; M.court = false; start(); };
+      wirePicker(mb, done);
       wireImap(r => { closeSheet(); M.accounts = null; M.acct = r && r.id ? r.id : null; M.folder = null; M.sel = null; M.reading = false; M.q = ""; M.court = false; start(); });   // just connected: open that account's Inbox
       sh.querySelectorAll("[data-dis]").forEach(b => b.onclick = async () => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again"; return; } await api(`/api/mail/${b.dataset.dis}`, { method: "DELETE" }); closeSheet(); M.accounts = null; M.acct = null; start(); });
     });
