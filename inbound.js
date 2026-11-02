@@ -81,10 +81,13 @@ function parseNotice(text) {
   if (out.cause_no) out.cause_no = out.cause_no.split(/\s/)[0].toUpperCase();
   const blob = (out.court || "") + " " + lines.slice(0, 40).join(" ");
   // County: the court line first, else the county named most often anywhere in the notice (eFileTexas puts it far down)
-  const cm = String(out.court || "").match(/\b([A-Z][a-z]+(?: [A-Z][a-z]+)?) County\b/);
-  if (cm && COUNTIES.includes(cm[1])) out.county = cm[1];
-  else { const n = {}; for (const m of lines.slice(0, 400).filter(l => !/\bTX\s*7\d{4}\b|\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}/i.test(l)).join(" ").matchAll(/\b([A-Z][a-z]+(?: [A-Z][a-z]+)?) County\b/g)) if (COUNTIES.includes(m[1])) n[m[1]] = (n[m[1]] || 0) + 1;
-    const top = Object.entries(n).sort((a, b) => b[1] - a[1])[0]; if (top) out.county = top[0]; }
+  // any capitalization ("HIDALGO COUNTY", "Hidalgo County"); "Location: Hidalgo - County Court at Law" also names it
+  const CK = Object.fromEntries(COUNTIES.map(c => [c.toLowerCase(), c]));
+  const countyOf = t => { const n = {}; for (const m of String(t).matchAll(/\b([A-Za-z]+(?: [A-Za-z]+)?) county\b/gi)) { const w = m[1].toLowerCase(), k = CK[w] || CK[w.split(" ").pop()]; if (k) n[k] = (n[k] || 0) + 1; }
+    return (Object.entries(n).sort((a, b) => b[1] - a[1])[0] || [])[0] || null; };
+  const loc = lines.find(l => /^(location|court location|county)\s*:/i.test(l));
+  const locC = loc && (countyOf(loc) || (CK[(loc.split(":")[1] || "").trim().split(/[\s,-]+/)[0].toLowerCase()] || null));
+  out.county = countyOf(out.court || "") || locC || countyOf(lines.slice(0, 400).filter(l => !/\bTX\s*7\d{4}\b|\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}/i.test(l)).join("\n")) || undefined;
   const crt = blob.match(/\b(\d{1,3}(?:st|nd|rd|th) (?:Judicial )?District Court|County Court at Law(?: No\.?)? ?#?\d*|Probate Court(?: No\.? ?\d+)?|Justice of the Peace[^,;]*)/i);
   if (crt) out.court_name = crt[1];
   const hl = lines.find(l => /(hearing|set for|setting|trial|docket call|mediation)/i.test(l) && /\d{1,2}\/\d{1,2}\/\d{4}/.test(l) && !/(filed|submitted)/i.test(l));
@@ -214,6 +217,7 @@ async function processEmail(u, { from = "", subject = "", text, html, ext_id = n
     [owner, u.firm_id, fromAddr, subject, body, kind, causes, matched, confirm, String(html || "").slice(0, 400000) || null, extKey, source, parsed, received, shared, dupe ? "duplicate" : (routed || null), dupe ? new Date() : null]);
   if (dupe) { console.log(`[inbound] ${shared ? "shared" : "user " + u.id} copy already listed — kept hidden: "${subject.slice(0, 80)}"`); return { duplicate: true, matched, created }; }
   await q("INSERT INTO audit_log(user_id, firm_id, action, detail) VALUES($1,$2,'email_alert',$3)", [owner, u.firm_id, { source, kind, subject, causes: causes.length, matched: matched.length, created: created.length, ...(shared ? { shared: true, routed: routed || "unassigned" } : {}) }]);
+  if (kind === "research_alert" && causes.length && !matched.length && !created.length) console.log(`[inbound] no case filed: cause ${parsed.cause_no || "?"} county ${parsed.county || "?"} court ${(parsed.court_name || parsed.court || "?").slice(0, 60)} (counties picked ${(u.counties || []).length})`);
   console.log(`[inbound] ${shared ? `firm ${u.firm_id} shared inbox → ${owner ? "user " + owner + " (" + routed + ")" : "needs assigning"}` : "user " + u.id} ${source} kind=${kind} causes=${causes.length} matched=${matched.length} created=${created.length} subject="${subject.slice(0, 80)}"`);
   return { ok: true, kind, causes, matched, created, owner, routed };
 }
