@@ -29,6 +29,10 @@ const PROVIDERS = {
 const COURT_SENDER = /(efiletexas\.gov|efile|tylertech\.(com|cloud)|tylerhost\.net|txcourts\.gov|courts\.state\.tx\.us|\.tx\.us\b|countytx\.gov|county(tx)?\.(us|org|gov|net)\b|hctx\.net|bexar\.org|texasbar\.com|odyssey|research\.tylertech|clerk|courts?\b)/i;
 // Senders that look official but aren't on the list above — logged by domain only, so missed court senders can be added.
 const NEAR_MISS = /(county|court|clerk|judic|\.tx\.us|\.gov$|tyler|efile|texas)/i;
+// A court notice someone forwarded (to themselves or the firm): the sender is a person, so look inside for the court system's own footprints.
+const COURT_DOMAIN = /(efiletexas\.gov|tylertech\.(com|cloud)|tylerhost\.net|txcourts\.gov|courts\.state\.tx\.us|\.tx\.us$|countytx\.gov|hctx\.net|bexar\.org|texasbar\.com)$/i;
+const FWD_SUBJECT = /^\s*(fwd?|fw)\s*:/i;
+const COURT_BODY = /(efiletexas\.gov|tylertech\.(com|cloud)|tylerhost\.net|txcourts\.gov|courts\.state\.tx\.us|re:?searchtx|notification of service|envelope (number|#|no\.?))/i;
 const domainOf = a => String(a || "").split("@")[1]?.toLowerCase() || "";
 const GMAIL_QUERY = "from:(efiletexas.gov OR tylertech.com OR tylertech.cloud OR tylerhost.net OR txcourts.gov OR tx.us OR clerk)";
 const redirect = p => `${APP}/api/mail/callback/${p}`;
@@ -103,7 +107,7 @@ async function finish(provider, code, state) {
     ON CONFLICT(user_id, provider) WHERE shared_firm IS NULL DO UPDATE SET email=$3, enc_refresh=$4, enc_access=$5, access_expires=EXCLUDED.access_expires, status='ok', last_error=NULL, key_source=$7, last_seen=NULL, stats=NULL, scope_req=$8, scope_got=$9
     RETURNING id`, [st.userId, provider, email, box.seal(t.refresh_token), box.seal(t.access_token), String((t.expires_in || 3600) - 120), keys ? keys.source : "app", st.scope || PROVIDERS[provider].scope, t.scope || null]);
   await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [st.userId, { provider, email, ...(st.shared ? { shared: true } : {}), ...(st.dev ? { dev: true } : {}) }]);
-  syncMailbox(rows[0].id, { days: 30 }).catch(() => {}); // first pull: last 30 days
+  syncMailbox(rows[0].id, { days: 30 }).catch(() => {}); // first pull: last 90 days (lookback)
   return { userId: st.userId, email, shared: st.shared };
 }
 
@@ -234,12 +238,12 @@ async function connectImap(user, { email, password, host }, opts = {}) {
   }
   throw lastErr || new Error("Couldn't connect.");
 }
-const SKIP_FOLDER = /\\(Trash|Junk|Sent|Drafts)|^(trash|spam|junk|sent|drafts|deleted|outbox)/i;
+const SKIP_FOLDER = /\\(Trash|Sent|Drafts)|^(trash|sent|drafts|deleted|outbox)/i;   // Spam/Junk IS read: court notices often land there (court senders only, like everywhere else)
 async function fetchImap(c, since) {
   const { simpleParser } = require("mailparser");
   const cl = imapClient(c);
   try { await cl.connect(); } catch (e) { throw imapError(e, c.host); }
-  const hits = [], near = {}; let scanned = 0, first = null, last = null, more = false;
+  const hits = [], near = {}, folders = {}; let scanned = 0, first = null, last = null, more = false;
   try {
     const boxes = (await cl.list()).filter(b => !b.flags?.has("\\Noselect") && !SKIP_FOLDER.test(b.specialUse || "") && !SKIP_FOLDER.test(b.name)).slice(0, 25);
     for (const b of boxes) {
@@ -252,22 +256,28 @@ async function fetchImap(c, since) {
         for await (const m of cl.fetch(uids.slice(-20000).join(","), { uid: true, envelope: true, internalDate: true }, { uid: true })) {
           const when = new Date(m.internalDate || m.envelope?.date || Date.now()).toISOString();
           if (new Date(when) < since) continue;
-          scanned++; if (!first || when < first) first = when; if (!last || when > last) last = when;
+          scanned++; folders[b.path] = (folders[b.path] || 0) + 1; if (!first || when < first) first = when; if (!last || when > last) last = when;
           const from = m.envelope?.from?.[0]?.address || "";
-          if (COURT_SENDER.test(from + " " + (m.envelope?.subject || ""))) hits.push({ box: b.path, uid: m.uid, from, subject: m.envelope?.subject || "", received: when, mid: m.envelope?.messageId || null });
+          const junk = /junk|spam/i.test((b.specialUse || "") + " " + b.path);   // in Spam/Junk only a real court address counts, not a subject that says "court"
+          if (junk ? COURT_DOMAIN.test(domainOf(from)) : COURT_SENDER.test(from + " " + (m.envelope?.subject || ""))) hits.push({ box: b.path, uid: m.uid, from, subject: m.envelope?.subject || "", received: when, mid: m.envelope?.messageId || null });
+          else if (!junk && FWD_SUBJECT.test(m.envelope?.subject || "")) hits.push({ fwd: true, box: b.path, uid: m.uid, from, subject: m.envelope?.subject || "", received: when, mid: m.envelope?.messageId || null });
           else { const d = domainOf(from); if (NEAR_MISS.test(d)) near[d] = (near[d] || 0) + 1; }
         }
       } finally { lock.release(); }
     }
+    // forwards: open only the newest 40 per check (each one is downloaded to look inside)
+    const fwds = hits.filter(h => h.fwd).sort((a, b) => b.received.localeCompare(a.received)), drop = new Set(fwds.slice(40));
     const out = [];
-    for (const h of hits.sort((a, b) => a.received.localeCompare(b.received))) {
+    for (const h of hits.filter(h => !drop.has(h)).sort((a, b) => a.received.localeCompare(b.received))) {
       const lock = await cl.getMailboxLock(h.box);
       try {
         const msg = await cl.fetchOne(String(h.uid), { source: true }, { uid: true });
         const parsed = msg && msg.source ? await simpleParser(msg.source) : {};
+        if (h.fwd && !COURT_BODY.test(((parsed.text || "") + " " + (parsed.html || "")).slice(0, 20000))) continue;   // a forward that isn't a court notice: skipped, never stored
         out.push({ ext_id: "imap:" + (h.mid || h.box + ":" + h.uid), from: h.from, subject: h.subject, html: parsed.html || null, text: parsed.text || null, received: h.received });
       } finally { lock.release(); }
     }
+    console.log(`[mail] imap folders read: ${Object.entries(folders).map(([f, n]) => `${f}=${n}`).join(", ") || "none"}; court hits ${hits.filter(h => !h.fwd).length}, forwards checked ${hits.filter(h => h.fwd).length}, kept ${out.length}`);
     return { msgs: out, scanned, first, last, near, more };
   } finally { await cl.logout().catch(() => cl.close?.()); }
 }
@@ -279,8 +289,8 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
   try {
     const { rows } = await q("SELECT m.*, u.firm_id, u.counties, u.active, u.name AS user_name FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE m.id=$1", [id]);
     const mb = rows[0]; if (!mb || (!mb.active && !mb.shared_firm)) return { skipped: "gone" };
-    // No court email found yet = keep looking back 30 days, not just 2.
-    const lookback = fresh || !mb.last_seen ? Math.max(days, 30) : days;
+    // No court email found yet = keep looking back 90 days, not just 2.
+    const lookback = fresh || !mb.last_seen ? Math.max(days, 90) : days;
     const since = !fresh && mb.last_seen ? new Date(new Date(mb.last_seen).getTime() - 60e3) : new Date(Date.now() - lookback * 864e5);
     const token = mb.provider === "imap" ? null : await accessToken(mb);
     const r = mb.provider === "imap" ? await fetchImap(JSON.parse(box.open(mb.enc_refresh)), since)
@@ -300,10 +310,10 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
       const det = await detect(mb.email);
       let inboxTotal = null;
       if (mb.provider === "microsoft") inboxTotal = await api("https://graph.microsoft.com/v1.0/me/mailFolders/inbox?$select=totalItemCount", token).then(j => j.totalItemCount).catch(e => "error: " + e.message);
-      console.log(`[mail] mailbox ${id} diag: no email in last 30 days; inbox total=${inboxTotal}; @${det.domain} mail hosted by ${det.host || "unknown"} (mx ${(det.mx || []).slice(0, 2).join(", ") || "none"})`);
+      console.log(`[mail] mailbox ${id} diag: no email in last 90 days; inbox total=${inboxTotal}; @${det.domain} mail hosted by ${det.host || "unknown"} (mx ${(det.mx || []).slice(0, 2).join(", ") || "none"})`);
       const em = mb.email || "your email";
       note = det.provider === mb.provider
-        ? `Connected, but this mailbox has no email from the last 30 days. Make sure you signed in with the ${mb.provider === "microsoft" ? "Microsoft 365" : "Google"} account for ${em}.`
+        ? `Connected, but this mailbox has no email from the last 90 days. Make sure you signed in with the ${mb.provider === "microsoft" ? "Microsoft 365" : "Google"} account for ${em}.`
         : det.provider === "google"
           ? `Your ${det.domain} email runs on Google Workspace, not Microsoft — the Microsoft sign-in opened an empty mailbox. Disconnect, then use Sign in with Gmail.`
           : `Your ${det.domain || ""} email is hosted by ${(await imapGuess(mb.email)).label}, not Microsoft — the Microsoft sign-in opened an empty mailbox, so there's nothing to read. Disconnect this, then use "Connect with your email password" below.`;
@@ -331,7 +341,7 @@ async function syncAll() {
   return rows.length;
 }
 
-module.exports = { PROVIDERS, NAMES, configured, configuredFor, msKeys, testFirmKeys, startUrl, finish, syncMailbox, syncAll, rescanOld, running, connectImap, imapGuess, accessToken, imapClient, imapError, COURT_SENDER };
+module.exports = { fetchImap, PROVIDERS, NAMES, configured, configuredFor, msKeys, testFirmKeys, startUrl, finish, syncMailbox, syncAll, rescanOld, running, connectImap, imapGuess, accessToken, imapClient, imapError, COURT_SENDER };
 
 // ======================= Auto-detect who hosts an email domain =======================
 const dns = require("dns").promises;
