@@ -639,7 +639,7 @@ function mount(app, { requireAuth, wrap, audit }) {
   }));
   R.get("/message", h(async (req, res) => {
     const mb = await boxOf(req); const id = String(req.query.id || "");
-    const m = await adapter(mb).get(mb, id, { markRead: req.query.peek !== "1" });
+    const m = await adapter(mb).get(mb, id, { markRead: req.query.peek !== "1" && !req.devView });   // developer view never marks mail read
     const { html, text, _atts, inlineAtts, references, ...out } = m;
     out.remote = !!(html && REMOTE_IMG.test(html));
     if (req.query.body === "1") out.body = html ? safeHtml((() => { const $ = cheerio.load(html); return $("body").html() ?? ""; })()) : esc(text || "").replace(/\n/g, "<br>");

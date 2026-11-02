@@ -46,6 +46,14 @@ app.use("/api", (req, res, next) => {
   next();
 });
 
+const TERMS = require("./terms");
+// ---- Developer view: the developer (PIN in Render: DEVELOPER_PIN) sees what any person sees, read-only, for one hour ----
+const DEV_PIN = String(process.env.DEVELOPER_PIN || process.env.DELVELOPER_PIN || "").trim();
+const DEV_HASH = DEV_PIN.length >= 8 ? crypto.createHash("sha256").update(DEV_PIN).digest() : null;   // short PINs are refused: this PIN opens every firm
+const DEV_TTL = 3600e3;
+const devOk = req => !!(req.session && req.session.dev && Date.now() - req.session.dev.at < DEV_TTL);
+// GET pages that would change something (connect a mailbox, make a calendar link, bulk export) are blocked in developer view too
+const DEV_BLOCKED_GET = /^\/(api\/mail\/connect|api\/mail\/callback|api\/mail\/admin-callback|api\/firm\/mail\/microsoft|api\/firm\/court-inbox\/connect|api\/calendar\/feed|api\/export|export)\b/;
 const loginLimiter = rateLimit({ windowMs: 15 * 60e3, max: 20, standardHeaders: true, legacyHeaders: false, message: { error: "Too many attempts. Wait 15 minutes." } });
 
 // ---------- helpers ----------
@@ -67,7 +75,8 @@ function publicUser(u) {
     access: u.access || "own", works_with: u.works_with || [], sees_firm: access.seesFirm(u), trust_access: access.trustOk(u),
     firm_dash: access.firmDash(u), firm_kind: u.firm_kind || "firm", prefs: u.prefs || {},
     licensed_on: u.licensed_on ? new Date(u.licensed_on).toISOString().slice(0, 10) : "", has_bar_card: !!u.bar_card_at,
-    court_handler: courtHandler(u), court_mode: u.court_mode || "each" };
+    court_handler: courtHandler(u), court_mode: u.court_mode || "each",
+    terms_ok: u.terms_version === TERMS.VERSION, terms_version: TERMS.VERSION };
 }
 async function loadUser(id) {
   const { rows } = await q("SELECT u.*, f.name AS firm_name, f.logo_token, f.kind AS firm_kind, f.court_mode, f.plan, f.plan_expires, f.plan_source, f.plan_checked, f.disabled AS firm_disabled FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
@@ -75,15 +84,27 @@ async function loadUser(id) {
 }
 const requireAuth = wrap(async (req, res, next) => {
   if (!req.session.uid || !req.session.mfa) return res.status(401).json({ error: "Sign in required" });
+  const path = req.originalUrl.split("?")[0];
+  if (req.session.devView) {   // developer view: read-only, one hour from the PIN
+    if (!devOk(req)) { req.session.destroy(() => {}); return res.status(401).json({ error: "Developer view ended (1 hour). Enter the developer PIN again.", code: "DEV_ENDED" }); }
+    let np = path; try { np = decodeURIComponent(path); } catch (e) {}
+    np = np.toLowerCase().replace(/\/{2,}/g, "/");   // routes match regardless of case or doubled slashes, so the check must too
+    if ((req.method !== "GET" && !["/api/dev/exit", "/api/logout"].includes(np)) || DEV_BLOCKED_GET.test(np))
+      return res.status(403).json({ error: "Developer view is read-only — nothing was changed.", code: "DEV_READONLY" });
+    req.devView = true;
+  }
   req.user = await loadUser(req.session.uid);
   if (!req.user) { req.session.destroy(() => {}); return res.status(401).json({ error: "Account disabled" }); }
-  const path = req.originalUrl.split("?")[0];
   if (req.user.must_change_pw && !["/api/me", "/api/password", "/api/logout"].includes(path))
     return res.status(403).json({ error: "Change your temporary password first", code: "CHANGE_PW" });
   // Subscription (managed in My Apps). Account, logout and subscription pages stay open so they can fix it.
-  const firm = await myapps.refresh({ id: req.user.firm_id, plan: req.user.plan, plan_expires: req.user.plan_expires, plan_source: req.user.plan_source, plan_checked: req.user.plan_checked, disabled: req.user.firm_disabled });
+  const fs = { id: req.user.firm_id, plan: req.user.plan, plan_expires: req.user.plan_expires, plan_source: req.user.plan_source, plan_checked: req.user.plan_checked, disabled: req.user.firm_disabled };
+  const firm = req.devView ? fs : await myapps.refresh(fs);   // developer view: no calls that could change the firm's plan
+  // User Agreement: required before using the app (developer view excepted — it can't accept for anyone)
+  if (!req.devView && req.user.terms_version !== TERMS.VERSION && !["/api/me", "/api/logout", "/api/password", "/api/terms/accept", "/api/subscription", "/api/subscription/redeem"].includes(path))
+    return res.status(403).json({ error: "Please accept the updated User Agreement first.", code: "TERMS" });
   req.subscription = { plan: firm.plan, expires_on: firm.plan_expires, source: firm.plan_source, ...myapps.active(firm) };
-  if (!req.subscription.ok && !["/api/me", "/api/logout", "/api/password", "/api/subscription", "/api/subscription/redeem"].includes(path))
+  if (!req.subscription.ok && !["/api/me", "/api/logout", "/api/password", "/api/subscription", "/api/subscription/redeem", "/api/terms/accept"].includes(path))
     return res.status(402).json({ error: req.subscription.reason, code: req.subscription.code });
   next();
 });
@@ -104,6 +125,7 @@ app.get("/healthz", (req, res) => res.send("ok"));
 // ---------- signup / login / 2FA ----------
 app.post("/api/signup", loginLimiter, wrap(async (req, res) => {
   const { name, email, bar, password, code } = req.body || {};
+  if (![true, 1, "1", "on", "true", "yes"].includes(req.body?.agree)) return res.status(400).json({ error: "Please read and accept the User Agreement." });
   const kind = req.body?.kind === "solo" ? "solo" : "firm";
   const firm = String(req.body?.firm || "").trim() || (kind === "solo" && name ? `Law Office of ${String(name).trim()}` : "");
   const em = String(email || "").trim().toLowerCase();
@@ -115,8 +137,8 @@ app.post("/api/signup", loginLimiter, wrap(async (req, res) => {
   try {
     await client.query("BEGIN");
     const f = await client.query("INSERT INTO firms(name, kind) VALUES($1, $2) RETURNING id", [String(firm).trim(), kind]);
-    const u = await client.query("INSERT INTO users(firm_id,email,name,bar_number,role,pw_hash) VALUES($1,$2,$3,$4,'admin',$5) RETURNING id",
-      [f.rows[0].id, em, String(name).trim(), bar, await bcrypt.hash(password, 12)]);
+    const u = await client.query("INSERT INTO users(firm_id,email,name,bar_number,role,pw_hash,terms_version,terms_at) VALUES($1,$2,$3,$4,'admin',$5,$6,now()) RETURNING id",
+      [f.rows[0].id, em, String(name).trim(), bar, await bcrypt.hash(password, 12), TERMS.VERSION]);
     await client.query("COMMIT");
     let sub = null; try { sub = await myapps.onSignup(f.rows[0].id, String(firm).trim(), code ? String(code).trim() : null); } catch (e) { console.error("[myapps] trial start failed", e.message); }
     req.session.regenerate(() => { req.session.pendingUid = u.rows[0].id; audit(req, "signup", { email: em, code: code || null }); res.json({ next: "enroll_2fa", codeError: sub?.codeError || null }); });
@@ -175,7 +197,64 @@ app.post("/api/login/2fa", loginLimiter, wrap(async (req, res) => {
 }));
 
 app.post("/api/logout", (req, res) => req.session.destroy(() => { res.clearCookie("tcd.sid"); res.json({ ok: true }); }));
-app.get("/api/me", requireAuth, (req, res) => res.json({ user: publicUser(req.user), subscription: req.subscription }));
+app.get("/api/me", requireAuth, (req, res) => res.json({ user: { ...publicUser(req.user), ...(req.devView ? { dev_view: true, dev_until: req.session.dev.at + DEV_TTL } : {}) }, subscription: req.subscription }));
+// User Agreement: public page; accepting records the version and time on the person
+app.get(["/terms", "/privacy", "/user-agreement"], (req, res) => res.set("Cache-Control", "no-cache").type("html").send(TERMS.page()));
+app.post("/api/terms/accept", requireAuth, wrap(async (req, res) => {
+  await q("UPDATE users SET terms_version=$2, terms_at=now() WHERE id=$1", [req.user.id, TERMS.VERSION]);
+  await audit(req, "terms_accepted", { version: TERMS.VERSION }); res.json({ ok: true, version: TERMS.VERSION });
+}));
+
+// Developer view (see DEV_PIN above). Every view is written to that firm's activity log.
+// failed PINs in the last hour, across all addresses (loaded once from the activity log so a restart doesn't reset it)
+const DEV_MAX_FAILS = 50; let devFails = null, devFailsLoad = null;
+async function devFailList() {
+  if (!devFails) {   // every request waits for the same single load
+    devFailsLoad = devFailsLoad || q("SELECT (extract(epoch FROM at) * 1000)::bigint t FROM audit_log WHERE action='developer_pin_failed' AND at > now() - interval '1 hour' ORDER BY at").then(r => r.rows.map(x => +x.t));
+    const loaded = await devFailsLoad; if (!devFails) devFails = loaded;
+  }
+  const now = Date.now(); while (devFails.length && now - devFails[0] > 3600e3) devFails.shift();
+  return devFails;
+}
+const devLimiter = rateLimit({ windowMs: 15 * 60e3, max: 5, standardHeaders: true, legacyHeaders: false, message: { error: "Too many tries. Wait 15 minutes." } });
+app.get("/api/dev/status", (req, res) => res.json({ pin_ok: devOk(req), until: devOk(req) ? req.session.dev.at + DEV_TTL : null }));
+app.post("/api/dev/pin", devLimiter, wrap(async (req, res) => {
+  if (!DEV_HASH) return res.status(503).json({ error: DEV_PIN ? "The developer PIN in Render is too short. Use at least 8 characters, then try again." : "Developer access is off: add DEVELOPER_PIN in Render's Environment settings." });
+  const list = await devFailList(), now = Date.now();
+  if (list.length >= DEV_MAX_FAILS) return res.status(429).json({ error: "Developer sign-in is locked for an hour after too many wrong PINs." });
+  list.push(now);                         // counted before checking, with no await in between, so parallel guesses can't slip past
+  const got = crypto.createHash("sha256").update(String(req.body?.pin || "").trim()).digest();
+  if (!crypto.timingSafeEqual(got, DEV_HASH)) {
+    console.log(`[dev] wrong developer PIN from ${req.ip} (forwarded hops: ${String(req.get("x-forwarded-for") || "").split(",").filter(Boolean).length})`);
+    await audit(req, "developer_pin_failed", {}); return res.status(401).json({ error: "Wrong developer PIN." }); }
+  list.splice(list.indexOf(now), 1);      // the right PIN isn't a failure
+  req.session.regenerate(err => {
+    if (err) return res.status(500).json({ error: "Try again." });
+    req.session.dev = { at: Date.now() }; audit(req, "developer_signin", {});
+    res.json({ ok: true, until: req.session.dev.at + DEV_TTL });
+  });
+}));
+app.get("/api/dev/people", wrap(async (req, res) => {
+  if (!devOk(req)) return res.status(401).json({ error: "Enter the developer PIN first.", code: "DEV_PIN" });
+  const { rows } = await q(`SELECT u.id, u.name, u.email, u.role, u.active, f.id AS firm_id, f.name AS firm_name, f.kind AS firm_kind
+    FROM users u JOIN firms f ON f.id=u.firm_id ORDER BY lower(f.name), f.id, CASE u.role WHEN 'admin' THEN 0 WHEN 'partner' THEN 1 WHEN 'manager' THEN 2 WHEN 'attorney' THEN 3 ELSE 4 END, lower(u.name)`);
+  res.json({ people: rows, until: req.session.dev.at + DEV_TTL });
+}));
+app.post("/api/dev/view", wrap(async (req, res) => {
+  if (!devOk(req)) return res.status(401).json({ error: "Enter the developer PIN first.", code: "DEV_PIN" });
+  const u = (await q("SELECT id, firm_id, name, active FROM users WHERE id=$1", [+req.body?.user_id || 0])).rows[0];
+  if (!u) return res.status(404).json({ error: "Person not found" });
+  if (!u.active) return res.status(400).json({ error: "That person's account is turned off." });
+  await q("INSERT INTO audit_log(user_id, firm_id, action, detail, ip) VALUES($1,$2,'developer_view',$3,$4)", [u.id, u.firm_id, { read_only: true, minutes: 60, dev: true }, req.ip]);   // logged first: no log, no view
+  req.session.uid = u.id; req.session.mfa = true; req.session.devView = true;
+  console.log(`[dev] developer view of user ${u.id} (firm ${u.firm_id})`);
+  res.json({ ok: true });
+}));
+app.post("/api/dev/exit", wrap(async (req, res) => {
+  if (req.session.devView && req.session.uid) await q("INSERT INTO audit_log(user_id, firm_id, action, detail, ip) SELECT id, firm_id, 'developer_view_ended', '{}'::jsonb, $2 FROM users WHERE id=$1", [req.session.uid, req.ip]).catch(() => {});
+  delete req.session.uid; req.session.mfa = false; req.session.devView = false;
+  res.json({ ok: true, pin_ok: devOk(req) });
+}));
 app.get("/api/subscription", requireAuth, (req, res) => res.json({ ...req.subscription, managed: myapps.enabled() }));
 app.post("/api/subscription/redeem", requireAuth, wrap(async (req, res) => {
   if (!myapps.enabled()) return res.status(400).json({ error: "Codes aren't available right now." });
@@ -608,6 +687,7 @@ app.get("/api/firm/mail", requireAuth, requireAdmin, wrap(async (req, res) => {
   res.json({ firm: f, detect: det, covered, configured: await mail.configuredFor(req.user.firm_id), google_sa_client_id: mail.GSA().clientId || null });
 }));
 app.get("/api/firm/mail/microsoft", requireAuth, requireAdmin, wrap(async (req, res) => {
+  if (req.devView) return res.status(403).json({ error: "Developer view is read-only — nothing was changed.", code: "DEV_READONLY" });   // second lock, whatever the URL spelling
   const det = await mail.detect(req.user.email);
   if (!(await mail.configuredFor(req.user.firm_id)).microsoft) return res.redirect("/?mailerror=" + encodeURIComponent("Microsoft connection isn't switched on yet."));
   if (det.personal) return res.redirect("/?mailerror=" + encodeURIComponent("Firm-wide connect needs a firm email domain (not a personal Outlook/Gmail address)."));
@@ -626,6 +706,7 @@ app.post("/api/firm/mail/google", requireAuth, requireAdmin, wrap(async (req, re
 app.post("/api/firm/mail/sync", requireAuth, requireAdmin, wrap(async (req, res) => { mail.syncFirm(req.user.firm_id).catch(() => {}); res.json({ started: true }); }));
 app.delete("/api/firm/mail", requireAuth, requireAdmin, wrap(async (req, res) => { await q("DELETE FROM firm_mail WHERE firm_id=$1", [req.user.firm_id]); await audit(req, "firm_mail_disconnected"); res.json({ ok: true }); }));
 app.get("/api/mail/connect/:provider", requireAuth, wrap(async (req, res) => {
+  if (req.devView) return res.status(403).json({ error: "Developer view is read-only — nothing was changed.", code: "DEV_READONLY" });   // second lock, whatever the URL spelling
   const p = req.params.provider;
   if (!mail.PROVIDERS[p] || !(await mail.configuredFor(req.user.firm_id))[p]) return res.redirect("/?mailerror=" + encodeURIComponent("That email provider isn't switched on yet."));
   res.redirect(await mail.startUrl(p, req.user, { full: req.query.full === "1" }));
@@ -729,6 +810,7 @@ app.put("/api/firm/court-inbox", requireAuth, requireAdmin, wrap(async (req, res
   res.json(await courtInboxInfo(fid));
 }));
 app.get("/api/firm/court-inbox/connect/microsoft", requireAuth, requireAdmin, wrap(async (req, res) => {
+  if (req.devView) return res.status(403).json({ error: "Developer view is read-only — nothing was changed.", code: "DEV_READONLY" });   // second lock, whatever the URL spelling
   if (!(await mail.configuredFor(req.user.firm_id)).microsoft) return res.redirect("/?mailerror=" + encodeURIComponent("Outlook sign-in isn't switched on yet."));
   res.redirect(await mail.startUrl("microsoft", req.user, { shared: true }));
 }));
@@ -751,11 +833,11 @@ app.delete("/api/firm/court-inbox/mailbox", requireAuth, requireAdmin, wrap(asyn
 // Court notices that came to the shared inbox and couldn't be matched to a case or an attorney
 const needHandler = (req, res, next) => courtHandler(req.user) ? next() : res.status(403).json({ error: "Only the firm admin and people they pick can assign court notices." });
 app.get("/api/court-queue", requireAuth, needHandler, wrap(async (req, res) => {
-  const { rows } = await q(`SELECT id, from_addr, subject, body, kind, causes, parsed, received_at FROM inbound_emails
+  const { rows } = await q(`SELECT id, from_addr, subject, body, kind, causes, matched_case_ids, parsed, received_at FROM inbound_emails
     WHERE firm_id=$1 AND shared AND user_id IS NULL AND dismissed_at IS NULL ORDER BY received_at DESC LIMIT 100`, [req.user.firm_id]);
-  const cm = await caseMap(req.user.firm_id, [...new Set(rows.flatMap(r => r.causes || []))], req.user);
+  const all = await caseRows(req.user.firm_id, [...new Set(rows.flatMap(r => r.causes || []))], req.user);
   const people = (await q("SELECT id, name, role FROM users WHERE firm_id=$1 AND active AND role IN ('admin','partner','manager','attorney') ORDER BY name", [req.user.firm_id])).rows;
-  res.json({ people, emails: rows.map(r => { const sm = inbound.summarize(r, cm); const p = r.parsed || {};
+  res.json({ people, emails: rows.map(r => { const sm = inbound.summarize(r, mapFor(all, r)); const p = r.parsed || {};
     return { id: r.id, from_addr: r.from_addr, subject: r.subject, received_at: r.received_at, type: sm.type, dates: sm.dates, cases: sm.cases,
       preview: sm.lines[0] || String(r.body || "").replace(/\s+/g, " ").slice(0, 160),
       notice: { cause_no: p.cause_no || (r.causes || [])[0] || "", county: p.county || inbound.countyIn(r.body || "") || "", style: p.style || "", court: p.court_name || p.court || "", next_setting: p.next_setting || "" } }; }) });
@@ -822,11 +904,11 @@ app.post("/api/inbound/postmark", wrap(async (req, res) => {
   catch (e) { console.error("[inbound] failed", e.message); res.json({ ok: false }); } // 200 so Postmark doesn't retry forever
 }));
 app.get("/api/email-alerts", requireAuth, wrap(async (req, res) => {
-  const token = await inbound.tokenFor(req.user.id);
+  const token = req.devView ? (await q("SELECT inbox_token FROM users WHERE id=$1", [req.user.id])).rows[0]?.inbox_token || null : await inbound.tokenFor(req.user.id);
   const { rows } = await q("SELECT id, from_addr, subject, kind, causes, matched_case_ids, confirm_code, received_at FROM inbound_emails WHERE user_id=$1 AND dismissed_at IS NULL ORDER BY received_at DESC LIMIT 30", [req.user.id]);
   const confirm = rows.find(r => r.kind === "forward_confirm" && r.confirm_code);
   const known = rows.length ? (await q("SELECT upper(cause_no) c FROM cases WHERE firm_id=$1", [req.user.firm_id])).rows.map(r => r.c) : [];
-  res.json({ address: inbound.addressFor(token), configured: !!inbound.addressFor(token), confirm: confirm ? { code: confirm.confirm_code, at: confirm.received_at } : null,
+  res.json({ address: token ? inbound.addressFor(token) : null, configured: !!(token && inbound.addressFor(token)), confirm: confirm ? { code: confirm.confirm_code, at: confirm.received_at } : null,
     emails: rows.filter(r => r.kind !== "forward_confirm").map(r => ({ ...r, unmatched: (r.causes || []).filter(c => !known.includes(c)) })) });
 }));
 app.get("/api/email-alerts/:id", requireAuth, wrap(async (req, res) => {
@@ -836,26 +918,32 @@ app.get("/api/email-alerts/:id", requireAuth, wrap(async (req, res) => {
   const onCase = `(dismissed_at IS NULL AND EXISTS (SELECT 1 FROM cases c WHERE c.firm_id=$3 AND (c.id = ANY(e.matched_case_ids) OR (upper(c.cause_no) = ANY(e.causes) AND lower(e.parsed->>'county') = lower(c.county))) AND ${access.caseCond(req.user, "c", p)}))`;
   const { rows } = await q(`SELECT id, from_addr, subject, body, html, kind, causes, matched_case_ids, parsed, received_at, user_id, shared FROM inbound_emails e WHERE id=$1 AND firm_id=$3 AND (user_id=$2 OR ($4 AND shared AND user_id IS NULL) OR ${onCase})`, p);
   if (!rows[0]) return res.status(404).json({ error: "Not found" });
-  if (rows[0].user_id === req.user.id) await q("UPDATE inbound_emails SET read_at=now() WHERE id=$1 AND read_at IS NULL", [rows[0].id]);
+  if (rows[0].user_id === req.user.id && !req.devView) await q("UPDATE inbound_emails SET read_at=now() WHERE id=$1 AND read_at IS NULL", [rows[0].id]);
   const cm = await caseMap(req.user.firm_id, rows[0].causes || [], req.user, rows[0].matched_case_ids || [], (rows[0].parsed || {}).county);
   delete rows[0].matched_case_ids; delete rows[0].parsed;
   res.json({ email: rows[0], summary: inbound.summarize(rows[0], cm) });
 }));
 // cause # → case. The same cause # can exist in two counties: the case the email was matched to wins, then the county it names.
-async function caseMap(firmId, causes, viewer, prefer = [], county = null) {
-  if (!causes.length) return {};
+async function caseRows(firmId, causes, viewer) {
+  if (!causes.length) return [];
   const p = [firmId, causes], only = viewer ? " AND " + access.caseCond(viewer, "cases", p) : "";   // only cases this person may see
-  const { rows } = await q(`SELECT id, upper(cause_no) c, style, county FROM cases WHERE firm_id=$1 AND upper(cause_no) = ANY($2)${only}`, p);
-  const lc = x => String(x || "").toLowerCase(), score = r => (prefer.includes(r.id) ? 2 : 0) + (county && lc(r.county) === lc(county) ? 1 : 0);
-  rows.sort((a, b) => score(a) - score(b));   // best match last, so it is the one kept
-  return Object.fromEntries(rows.map(r => [r.c, { id: r.id, style: r.style, county: r.county }]));
+  return (await q(`SELECT id, upper(cause_no) c, style, county FROM cases WHERE firm_id=$1 AND upper(cause_no) = ANY($2)${only} ORDER BY id`, p)).rows;
 }
+// one email's cause numbers → cases; when a cause # is in two counties, the case it was matched to wins, then the county it names
+function pickCases(rows, causes, prefer = [], county = null) {
+  const want = new Set(causes || []), lc = x => String(x || "").toLowerCase();
+  const score = r => (prefer.includes(r.id) ? 2 : 0) + (county && lc(r.county) === lc(county) ? 1 : 0);
+  const list = rows.filter(r => want.has(r.c)).sort((a, b) => score(a) - score(b) || a.id - b.id);   // best match last, so it is the one kept
+  return Object.fromEntries(list.map(r => [r.c, { id: r.id, style: r.style, county: r.county }]));
+}
+async function caseMap(firmId, causes, viewer, prefer = [], county = null) { return pickCases(await caseRows(firmId, causes, viewer), causes, prefer, county); }
+const mapFor = (all, r) => pickCases(all, r.causes, r.matched_case_ids || [], (r.parsed || {}).county);
 // Inbox: every email received for this attorney, newest first, each with a short summary.
 app.get("/api/inbox", requireAuth, wrap(async (req, res) => {
-  const { rows } = await q("SELECT id, from_addr, subject, body, kind, causes, read_at, received_at FROM inbound_emails WHERE user_id=$1 AND dismissed_at IS NULL ORDER BY received_at DESC LIMIT 200", [req.user.id]);
-  const cm = await caseMap(req.user.firm_id, [...new Set(rows.flatMap(r => r.causes || []))], req.user);
+  const { rows } = await q("SELECT id, from_addr, subject, body, kind, causes, matched_case_ids, parsed, read_at, received_at FROM inbound_emails WHERE user_id=$1 AND dismissed_at IS NULL ORDER BY received_at DESC LIMIT 200", [req.user.id]);
+  const all = await caseRows(req.user.firm_id, [...new Set(rows.flatMap(r => r.causes || []))], req.user);
   res.json({ unread: rows.filter(r => !r.read_at).length, emails: rows.map(r => {
-    const sm = inbound.summarize(r, cm);
+    const sm = inbound.summarize(r, mapFor(all, r));
     return { id: r.id, from_addr: r.from_addr, subject: r.subject, received_at: r.received_at, read: !!r.read_at, type: sm.type, dates: sm.dates, cases: sm.cases, preview: (sm.lines[0] || String(r.body || "").replace(/\s+/g, " ").slice(0, 140)) };
   }) });
 }));
@@ -959,6 +1047,7 @@ app.use(express.static(path.join(__dirname, "public"), { index: "index.html", se
 app.use((req, res) => req.path.startsWith("/api") ? res.status(404).json({ error: "Not found" }) : res.sendFile(path.join(__dirname, "public", "index.html")));
 app.use((err, req, res, next) => {
   if (err instanceof cl.CLError) return res.status(err.status || 502).json({ error: err.message });
+  if (err && (err.type === "entity.parse.failed" || err.type === "entity.too.large")) { console.warn(`[http] ${err.type} on ${req.method} ${req.path}`); return res.status(err.status || 400).json({ error: "Bad request" }); }
   console.error(err);
   res.status(500).json({ error: "Server error" });
 });

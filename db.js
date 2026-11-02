@@ -330,6 +330,8 @@ CREATE TABLE IF NOT EXISTS contacts (
 );
 CREATE INDEX IF NOT EXISTS contacts_firm ON contacts(firm_id, lower(name));
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS created_by INT;   -- who added it; contacts on no case are seen by them (and whole-firm roles)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version TEXT;          -- User Agreement version this person accepted
+ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS case_contacts (
   case_id INT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
   contact_id INT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,

@@ -190,6 +190,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
 
   // ---- calendar feed (subscribe in Outlook / Google / iPhone)
   R.get("/calendar/feed", requireAuth, wrap(async (req, res) => {
+    if (req.devView) return res.status(403).json({ error: "Developer view is read-only — nothing was changed.", code: "DEV_READONLY" });   // second lock, whatever the URL spelling
     let t = (await q("SELECT cal_token FROM users WHERE id=$1", [req.user.id])).rows[0]?.cal_token;
     if (!t || req.query.reset) { t = tok(); await q("UPDATE users SET cal_token=$2 WHERE id=$1", [req.user.id, t]); }
     res.json({ url: `${APP()}/cal/${t}.ics`, webcal: `${APP().replace(/^https?:/, "webcal:")}/cal/${t}.ics` });
@@ -378,7 +379,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     res.json({ ok: true });
   }));
   R.delete("/tasks/:id", requireAuth, wrap(async (req, res) => { if (!(await taskOk(req, req.params.id))) return res.status(404).json({ error: "Not found" }); await q("DELETE FROM tasks WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true }); }));
-  R.get("/firm/task-templates", requireAuth, wrap(async (req, res) => { await seedTemplates(req.user.firm_id); res.json({ templates: (await q("SELECT * FROM task_templates WHERE firm_id=$1 ORDER BY case_type, sort, id", [req.user.firm_id])).rows }); }));
+  R.get("/firm/task-templates", requireAuth, wrap(async (req, res) => { if (!req.devView) await seedTemplates(req.user.firm_id); /* developer view only reads */ res.json({ templates: (await q("SELECT * FROM task_templates WHERE firm_id=$1 ORDER BY case_type, sort, id", [req.user.firm_id])).rows }); }));
   R.post("/firm/task-templates", requireAuth, requireAdmin, wrap(async (req, res) => {
     const title = clean(req.body.title, 300); if (!title) return res.status(400).json({ error: "Task is required." });
     const { rows } = await q("INSERT INTO task_templates(firm_id, case_type, title, due_days, sort) VALUES($1,$2,$3,$4,999) RETURNING *", [req.user.firm_id, clean(req.body.case_type, 80) || "*", title, Number.isFinite(+req.body.due_days) && req.body.due_days !== "" ? +req.body.due_days : null]);
@@ -728,6 +729,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     trust: f => q("SELECT t.on_date, ct.name AS client, c.cause_no, t.amount, t.memo, t.ref FROM trust_tx t JOIN contacts ct ON ct.id=t.contact_id LEFT JOIN cases c ON c.id=t.case_id WHERE t.firm_id=$1 ORDER BY t.on_date, t.id", [f])
   };
   app.get("/export/:what.csv", requireAuth, requireAdmin, wrap(async (req, res) => {
+    if (req.devView) return res.status(403).json({ error: "Developer view is read-only — nothing was changed.", code: "DEV_READONLY" });   // second lock, whatever the URL spelling
     const fn = EXPORTS[req.params.what]; if (!fn) return res.status(404).send("Not found");
     const { rows } = await fn(req.user.firm_id); await audit(req, "export", { what: req.params.what, rows: rows.length });
     res.set({ "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="tx-case-desk-${req.params.what}-${today()}.csv"` }).send("\ufeff" + toCsv(rows));

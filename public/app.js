@@ -8,7 +8,11 @@ function toast(m) { const t = $("#toast"); t.textContent = m; t.style.display = 
 async function api(path, opts = {}) {
   const res = await fetch(path, { method: opts.method || "GET", headers: { "Content-Type": "application/json", "X-Requested-With": "tcd" }, body: opts.body ? JSON.stringify(opts.body) : undefined, credentials: "same-origin" });
   let data = {}; try { data = await res.json(); } catch (e) {}
-  if (!res.ok) { const err = new Error(data.error || "Request failed"); err.status = res.status; err.code = data.code; err.reconnect = !!data.reconnect; throw err; }
+  if (!res.ok) { const err = new Error(data.error || "Request failed"); err.status = res.status; err.code = data.code; err.reconnect = !!data.reconnect;
+    if (data.code === "DEV_READONLY" && opts.method && opts.method !== "GET") toast(err.message);   // developer view: a save was refused (background reads stay quiet)
+    if (data.code === "DEV_ENDED") { toast(err.message); setTimeout(() => { location.href = "/?dev=1"; }, 1500); }
+    if (data.code === "TERMS" && me && !me.dev_view) { me.terms_ok = false; termsView(); }   // a new User Agreement came out while signed in
+    throw err; }
   // a case was added, changed or removed: case pickers everywhere reload instead of waiting up to a minute
   if (opts.method && opts.method !== "GET" && /^\/api\/(cases|import|court-queue|court-inbox|research|court-logins|mail\/)/.test(path)) dispatchEvent(new Event("tcd:cases"));
   return data;
@@ -37,10 +41,13 @@ function authView(mode = "login", msg = "") {
    <label>Free-time code (optional)</label><input name="code" value="${esc(new URLSearchParams(location.search).get("code") || "")}" placeholder="TXC-30D-…"><br><br>` : ""}
    <label>Email</label><input name="email" type="email" autocomplete="username" required><br><br>
    <label>Password${signup ? " (10+ chars, letters & numbers)" : ""}</label><input name="password" type="password" autocomplete="${signup ? "new-password" : "current-password"}" required>
+   ${signup ? `<label class="ck" style="margin-top:12px;align-items:flex-start"><input type="checkbox" name="agree" value="1" required style="margin-top:3px"><span>I agree to the <a class="link" href="/terms" target="_blank" rel="noopener">TX Case Desk User Agreement</a> (terms and privacy)</span></label>` : ""}
    <div class="err" id="err">${esc(msg)}</div>
    <button class="btn" style="width:100%">${signup ? "Create account" : "Continue"}</button></form>
    ${signup ? `<p class="mute" style="text-align:center">Every new firm starts with a free 14-day trial.</p>` : ""}
-   <p class="mute" style="text-align:center"><a class="link" id="sw">${signup ? "Have an account? Sign in" : "New firm? Create an account"}</a></p></div>`;
+   <p class="mute" style="text-align:center"><a class="link" id="sw">${signup ? "Have an account? Sign in" : "New firm? Create an account"}</a></p>
+   <p class="mute authf"><a class="link" href="/terms" target="_blank" rel="noopener">User Agreement</a><span aria-hidden="true">·</span><a class="link" id="devGo" href="#" role="button">Developer</a></p></div>`;
+  $("#devGo").onclick = e => { e.preventDefault(); devPinView(); };
   $("#sw").onclick = () => authView(signup ? "login" : "signup");
   $$("[name=kind]").forEach(r => r.onchange = () => { const solo = $("[name=kind]:checked").value === "solo"; $("#firmLbl").textContent = solo ? "Practice name (optional)" : "Firm name"; $("#firmIn").required = !solo; $("#firmIn").placeholder = solo ? "Law Office of …" : ""; });
   $("#f").onsubmit = async e => {
@@ -49,6 +56,76 @@ function authView(mode = "login", msg = "") {
     try { const r = await api(signup ? "/api/signup" : "/api/login", { method: "POST", body: b }); r.next === "verify_2fa" ? verifyView() : enrollView(); }
     catch (err) { $("#err").textContent = err.message; }
   };
+}
+// ---------------- User Agreement (accepted once per version; shown again when it changes) ----------------
+function termsView() {
+  shellOff();
+  $("#app").innerHTML = `<div class="narrow card"><h2>User Agreement</h2>
+   <p class="mute" style="margin-top:0">Please read and accept TX Case Desk's User Agreement to continue. In short:</p>
+   <ul style="padding-left:20px;margin:0 0 10px;font-size:15px">
+     <li>Your data is yours. It's kept confidential, never sold, never used for advertising or to train AI.</li>
+     <li>TX Case Desk is a tool, not legal advice: check deadlines, court dates and case law yourself.</li>
+     <li>For support, the developer can open a read-only view of an account. It's PIN-protected, ends after one hour, and every view is recorded.</li>
+   </ul>
+   <p style="margin:0 0 12px"><a class="link" href="/terms" target="_blank" rel="noopener">Read the full User Agreement</a></p>
+   <form id="f"><label class="ck" style="align-items:flex-start"><input type="checkbox" name="agree" required style="margin-top:3px"><span>I have read and agree to the User Agreement${me.role === "admin" ? " for myself and my firm" : ""}</span></label>
+   <div class="err" id="err"></div><button class="btn" style="width:100%">Continue</button></form>
+   <p class="mute" style="text-align:center;margin-bottom:0"><a class="link" id="out">Sign out</a></p></div>`;
+  $("#f").onsubmit = async e => { e.preventDefault(); try { await api("/api/terms/accept", { method: "POST" }); me.terms_ok = true; start(); } catch (x) { $("#err").textContent = x.message; } };
+  $("#out").onclick = async () => { await api("/api/logout", { method: "POST" }).catch(() => {}); location.href = "/"; };
+}
+
+// ---------------- Developer view (read-only; PIN set in Render) ----------------
+function devPinView(msg = "") {
+  shellOff();
+  $("#app").innerHTML = `<div class="narrow card"><h2>Developer sign in</h2>
+   <p class="mute" style="margin-top:0">See exactly what an attorney or staff member sees. Read-only, for one hour. Each view is recorded.</p>
+   <form id="f"><label>Developer PIN</label><input name="pin" type="password" autocomplete="off" required autofocus>
+   <div class="err" id="err">${esc(msg)}</div><button class="btn" style="width:100%">Continue</button></form>
+   <p class="mute" style="text-align:center;margin-bottom:0"><a class="link" id="back">← Attorney sign in</a></p></div>`;
+  $("#back").onclick = () => authView("login");
+  $("#f").onsubmit = async e => { e.preventDefault(); const b = e.target.querySelector("button"); b.disabled = true;
+    try { await api("/api/dev/pin", { method: "POST", body: { pin: e.target.pin.value } }); devPickView(); }
+    catch (x) { $("#err").textContent = x.message; b.disabled = false; } };
+}
+async function devPickView() {
+  shellOff(); devBar(true);
+  $("#app").innerHTML = `<div class="card mute">Loading people…</div>`;
+  let r; try { r = await api("/api/dev/people"); } catch (e) { return devPinView(e.message); }
+  const ROLE = { admin: "Admin", partner: "Partner", manager: "Manager", attorney: "Attorney", paralegal: "Paralegal" };
+  const firms = []; for (const p of r.people) { let f = firms.find(x => x.id === p.firm_id); if (!f) firms.push(f = { id: p.firm_id, name: p.firm_name, kind: p.firm_kind, people: [] }); f.people.push(p); }
+  const until = new Date(r.until).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  $("#app").innerHTML = `<div class="card"><h2 style="margin:0">Developer view</h2>
+     <p class="mute" style="margin:4px 0 10px">Pick a person to see the app exactly as they do. Read-only. PIN good until ${esc(until)}.</p>
+     <input type="search" id="dvQ" placeholder="Find a firm or person" aria-label="Find a firm or person"></div>
+   <div class="card mute" id="dvNone" hidden>No firm or person matches.</div>
+   ${firms.map(f => `<div class="card dvf" data-f="${esc(f.name.toLowerCase())}">
+     <h3 style="margin:0 0 6px" class="brk">${esc(f.name)} <span class="tag n">${f.kind === "solo" ? "Solo" : "Firm"}</span></h3>
+     ${f.people.map(p => `<div class="row dvp" data-s="${esc((p.name + " " + p.email).toLowerCase())}" style="justify-content:space-between;border-top:1px solid var(--line2);padding:8px 0;gap:8px">
+       <span class="brk" style="flex:1 1 200px"><b>${esc(p.name)}</b> <span class="tag">${esc(ROLE[p.role] || p.role)}</span>${p.active ? "" : ` <span class="tag r">Off</span>`}<br><span class="mute">${esc(p.email)}</span></span>
+       ${p.active ? `<button type="button" class="btn sm" data-dv="${p.id}">View as</button>` : ""}</div>`).join("")}</div>`).join("") || `<div class="card mute">No accounts yet.</div>`}
+   <p class="mute" style="text-align:center"><a class="link" id="dvOut">Sign out of developer view</a></p>`;
+  $("#dvQ").oninput = e => { const t = e.target.value.trim().toLowerCase(); let any = false;
+    $$(".dvf").forEach(c => { const firmHit = !t || c.dataset.f.includes(t); let n = 0;
+      c.querySelectorAll(".dvp").forEach(p => { const on = firmHit || p.dataset.s.includes(t); p.hidden = !on; if (on) n++; });
+      c.hidden = !n; if (n) any = true; });
+    $("#dvNone").hidden = any; };
+  $$("[data-dv]").forEach(b => b.onclick = async () => { b.disabled = true; try { await api("/api/dev/view", { method: "POST", body: { user_id: +b.dataset.dv } }); location.href = "/"; } catch (e) { toast(e.message); b.disabled = false; } });
+  $("#dvOut").onclick = async () => { await api("/api/logout", { method: "POST" }).catch(() => {}); location.href = "/"; };
+}
+// the banner while viewing as someone: who, read-only, until when; switch person or leave
+function devBar(off) {
+  let bar = document.getElementById("devbar");
+  if (off || !me || !me.dev_view) { if (bar) bar.remove(); document.body.classList.remove("devv"); return; }
+  if (!bar) { bar = document.createElement("div"); bar.id = "devbar"; bar.setAttribute("role", "status"); document.body.prepend(bar); }
+  document.body.classList.add("devv");
+  // line 1: whose account (always visible); line 2: developer view, read-only time, firm
+  bar.innerHTML = `<span class="dvt"><span class="dv1" title="${esc(me.name)}">Viewing as <b>${esc(me.name)}</b></span><span class="dv2" title="${esc(me.firm_name)}">Developer view · read-only until ${esc(new Date(me.dev_until).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))} · ${esc(me.firm_name)}</span></span>
+    <span class="dvb"><button type="button" class="btn sm ghost" id="dvSw" title="View as someone else">Switch</button><button type="button" class="btn sm" id="dvEx" title="Leave developer view">Exit</button></span>`;
+  const fit = () => document.body.style.setProperty("--devh", bar.offsetHeight + "px");   // the page starts right under the banner, however many lines it takes
+  fit(); if (!bar._fit) { bar._fit = true; addEventListener("resize", fit); }
+  bar.querySelector("#dvSw").onclick = async () => { await api("/api/dev/exit", { method: "POST" }).catch(() => {}); location.href = "/"; };
+  bar.querySelector("#dvEx").onclick = async () => { await api("/api/dev/exit", { method: "POST" }).catch(() => {}); await api("/api/logout", { method: "POST" }).catch(() => {}); location.href = "/"; };
 }
 function verifyView() {
   $("#app").innerHTML = `<div class="narrow card"><h2>Two-factor code</h2><p class="mute">Open your authenticator app and enter the 6-digit code for TX Case Desk.</p>
@@ -126,6 +203,8 @@ function shellOn() {
 }
 function start() {
   if (me.must_change_pw) return changePwView(true);
+  if (!me.terms_ok && !me.dev_view) return termsView();
+  devBar();
   // paralegals don't lead cases, so "My cases" would be empty for one who sees the whole firm
   if (me.role === "paralegal" && me.sees_firm && me.firm_kind !== "solo" && caseF.view === "mine") caseF.view = "firm";
   api("/api/inbox").then(r => { if (r.unread !== inboxUnread) { inboxUnread = r.unread; renderNav(); } }).catch(() => {});
@@ -1129,5 +1208,10 @@ checkVersion();
   const qs = new URLSearchParams(location.search);
   if (qs.get("connected") || qs.get("mailerror")) { tab = /firm/.test(qs.get("connected") || "") ? "firm" : "inbox"; if (/court inbox/.test(qs.get("connected") || "")) fsSec = "email"; history.replaceState(null, "", "/"); setTimeout(() => toast(qs.get("connected") ? `Email connected: ${qs.get("connected")} — checking court emails now` : qs.get("mailerror")), 600); }
   try { me = (await api("/api/me")).user; start(); }
-  catch (e) { e.code === "CHANGE_PW" ? (me = { must_change_pw: true }, changePwView(true)) : authView(qs.get("signup") || qs.get("code") ? "signup" : "login"); }
+  catch (e) {
+    if (e.code === "CHANGE_PW") { me = { must_change_pw: true }; return changePwView(true); }
+    try { const st = await api("/api/dev/status"); if (st.pin_ok) return devPickView(); } catch (x) {}
+    if (qs.get("dev")) return devPinView();
+    authView(qs.get("signup") || qs.get("code") ? "signup" : "login");
+  }
 })();
