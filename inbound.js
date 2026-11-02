@@ -127,8 +127,11 @@ async function processEmail(u, { from = "", subject = "", text, html, ext_id = n
   } else if (/re:?search|txcourts|tylertech|tylerhost|efiletexas|\.tx\.us|clerk/i.test(from + " " + subject + " " + body.slice(0, 2000))) kind = "research_alert";
   const parsed = kind === "forward_confirm" ? {} : parseNotice(body);
   if (kind !== "forward_confirm") {
+    if (!parsed.cause_no && /efiletexas|tylertech|tylerhost|txcourts|re:?search/i.test(from)) { const one = causesIn(subject + "\n" + body); if (new Set(one).size === 1) parsed.cause_no = one[0]; }   // exactly one case # — only from the e-filing systems themselves, never a person's email
     if (!parsed.cause_no) { const sm = String(subject).match(/for Case:\s*((?=[A-Z-]*\d)[A-Z0-9][A-Z0-9-]{3,})/i); if (sm) parsed.cause_no = sm[1].toUpperCase(); }   // "Notification of Service for Case: CL-26-4816-G, ..."
     if (!parsed.county && u.counties && u.counties.length === 1 && parsed.cause_no) parsed.county = u.counties[0];   // no county named: only when the attorney works one county
+    // Hidalgo's own cause-number shapes (district C-1234-25-G, county court at law CL-26-1234-G), only for attorneys who work Hidalgo
+    if (!parsed.county && parsed.cause_no && /^(C-\d{3,5}-\d{2}-[A-Z]|CL-\d{2}-\d{3,5}-[A-Z])$/.test(parsed.cause_no) && (u.counties || []).includes("Hidalgo")) parsed.county = "Hidalgo";
   }
   const causes = kind === "forward_confirm" ? [] : [...new Set([parsed.cause_no, ...causesIn(subject + "\n" + body)].filter(Boolean))].slice(0, 50);
   // de-dupe the same message (mailbox re-reads). Shared-inbox copies are tagged so they never collide with the attorney's own copy.

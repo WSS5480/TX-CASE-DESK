@@ -338,7 +338,7 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
   } finally { running.delete(id); }
 }
 // One-time: mailboxes checked by the old 500-email scan get a fresh 30-day look.
-const SCAN_V = 5;
+const SCAN_V = 6;
 async function rescanOld() {
   // also look again (90 days) at password-connected mailboxes checked before Spam/Trash/Archive and forwards were read
   const { rows } = await q("SELECT m.id FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE u.active AND m.status <> 'reconnect' AND (m.stats IS NULL OR m.stats->>'scanned' IS NULL OR (m.provider='imap' AND COALESCE(m.stats->>'v','') <> $1))", [String(SCAN_V)]);
