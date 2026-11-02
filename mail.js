@@ -65,7 +65,7 @@ async function startUrl(provider, user, opts = {}) {
   const keys = provider === "microsoft" ? await msKeys(user.firm_id) : { id: P.id(), source: "app" };
   const state = crypto.randomBytes(16).toString("hex");
   const scope = provider === "microsoft" && opts.full ? FULL_MS_SCOPE : P.scope;
-  states.set(state, { userId: user.id, firmId: user.firm_id, provider, keySource: keys.source, shared: !!opts.shared, scope, exp: Date.now() + 10 * 60e3 });
+  states.set(state, { userId: user.id, firmId: user.firm_id, provider, keySource: keys.source, shared: !!opts.shared, dev: !!opts.dev, scope, exp: Date.now() + 10 * 60e3 });
   for (const [k, v] of states) if (v.exp < Date.now()) states.delete(k);
   const p = new URLSearchParams({ client_id: keys.id, response_type: "code", redirect_uri: redirect(provider), scope, state });
   if (provider === "google") { p.set("access_type", "offline"); p.set("prompt", "consent"); p.set("include_granted_scopes", "true"); }
@@ -102,7 +102,7 @@ async function finish(provider, code, state) {
     VALUES($1,$2,$3,$4,$5,now() + ($6 || ' seconds')::interval,'ok',NULL,$7,$8,$9)
     ON CONFLICT(user_id, provider) WHERE shared_firm IS NULL DO UPDATE SET email=$3, enc_refresh=$4, enc_access=$5, access_expires=EXCLUDED.access_expires, status='ok', last_error=NULL, key_source=$7, last_seen=NULL, stats=NULL, scope_req=$8, scope_got=$9
     RETURNING id`, [st.userId, provider, email, box.seal(t.refresh_token), box.seal(t.access_token), String((t.expires_in || 3600) - 120), keys ? keys.source : "app", st.scope || PROVIDERS[provider].scope, t.scope || null]);
-  await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [st.userId, { provider, email, ...(st.shared ? { shared: true } : {}) }]);
+  await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [st.userId, { provider, email, ...(st.shared ? { shared: true } : {}), ...(st.dev ? { dev: true } : {}) }]);
   syncMailbox(rows[0].id, { days: 30 }).catch(() => {}); // first pull: last 30 days
   return { userId: st.userId, email, shared: st.shared };
 }
@@ -226,7 +226,7 @@ async function connectImap(user, { email, password, host }, opts = {}) {
             ON CONFLICT(shared_firm) WHERE shared_firm IS NOT NULL DO UPDATE SET user_id=$1, provider='imap', email=$2, enc_refresh=$3, enc_access=NULL, status='ok', last_error=NULL, key_source='imap', last_seen=NULL, stats=NULL, scope_req=NULL, scope_got=NULL RETURNING id`, [user.id, email, box.seal(JSON.stringify(c)), user.firm_id])
         : await q(`INSERT INTO mailboxes(user_id, provider, email, enc_refresh, status, last_error, key_source) VALUES($1,'imap',$2,$3,'ok',NULL,'imap')
             ON CONFLICT(user_id, provider) WHERE shared_firm IS NULL DO UPDATE SET email=$2, enc_refresh=$3, status='ok', last_error=NULL, last_seen=NULL, stats=NULL RETURNING id`, [user.id, email, box.seal(JSON.stringify(c))]);
-      await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [user.id, { provider: "imap", email, host: h, ...(opts.shared ? { shared: true } : {}) }]);
+      await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [user.id, { provider: "imap", email, host: h, ...(opts.shared ? { shared: true } : {}), ...(opts.dev ? { dev: true } : {}) }]);
       console.log(`[mail] imap connected for user ${user.id} @${domainOf(email)} via ${h}`);
       syncMailbox(rows[0].id, { days: 30 }).catch(() => {});
       return { id: rows[0].id, email, host: h, label: g.label };
@@ -354,10 +354,10 @@ async function detect(email) {
 // The firm's Microsoft 365 admin approves once; we then read court emails for the firm's attorneys
 // (only users registered in TX Case Desk with an address on the firm's domain).
 const adminStates = new Map();
-async function adminConsentUrl(firmId, domain) {
+async function adminConsentUrl(firmId, domain, opts = {}) {
   const keys = await msKeys(firmId);
   const state = crypto.randomBytes(16).toString("hex");
-  adminStates.set(state, { firmId, domain, keySource: keys.source, exp: Date.now() + 15 * 60e3 });
+  adminStates.set(state, { firmId, domain, keySource: keys.source, dev: !!opts.dev, exp: Date.now() + 15 * 60e3 });
   const p = new URLSearchParams({ client_id: keys.id, redirect_uri: `${APP}/api/mail/admin-callback/microsoft`, scope: "https://graph.microsoft.com/.default", state });
   return `https://login.microsoftonline.com/${keys.source === "firm" ? keys.tenant : "organizations"}/v2.0/adminconsent?${p}`;
 }
@@ -368,7 +368,7 @@ async function finishAdminConsent(query) {
   if (!query.tenant) throw new Error("Microsoft didn't return the firm's tenant.");
   await q(`INSERT INTO firm_mail(firm_id, provider, tenant, domain, status, last_error, key_source) VALUES($1,'microsoft',$2,$3,'ok',NULL,$4)
     ON CONFLICT(firm_id) DO UPDATE SET provider='microsoft', tenant=$2, domain=$3, status='ok', last_error=NULL, key_source=$4`, [st.firmId, query.tenant, st.domain, st.keySource || "app"]);
-  await q("INSERT INTO audit_log(firm_id, action, detail) VALUES($1,'firm_mail_connected',$2)", [st.firmId, { provider: "microsoft", tenant: query.tenant, domain: st.domain }]);
+  await q("INSERT INTO audit_log(firm_id, action, detail) VALUES($1,'firm_mail_connected',$2)", [st.firmId, { provider: "microsoft", tenant: query.tenant, domain: st.domain, ...(st.dev ? { dev: true } : {}) }]);
   syncFirm(st.firmId, { days: 30 }).catch(() => {});
   return st;
 }
@@ -411,11 +411,11 @@ async function googleDelegatedToken(userEmail) {
   if (!r.ok) throw Object.assign(new Error(j.error_description || j.error || "Google Workspace firm access failed — check the admin console setup."), { reconnect: true });
   return j.access_token;
 }
-async function connectGoogleFirm(firmId, domain, testEmail) {
+async function connectGoogleFirm(firmId, domain, testEmail, opts = {}) {
   await googleDelegatedToken(testEmail); // throws if the admin hasn't authorized us yet
   await q(`INSERT INTO firm_mail(firm_id, provider, tenant, domain, status, last_error) VALUES($1,'google',NULL,$2,'ok',NULL)
     ON CONFLICT(firm_id) DO UPDATE SET provider='google', tenant=NULL, domain=$2, status='ok', last_error=NULL`, [firmId, domain]);
-  await q("INSERT INTO audit_log(firm_id, action, detail) VALUES($1,'firm_mail_connected',$2)", [firmId, { provider: "google", domain }]);
+  await q("INSERT INTO audit_log(firm_id, action, detail) VALUES($1,'firm_mail_connected',$2)", [firmId, { provider: "google", domain, ...(opts.dev ? { dev: true } : {}) }]);
   syncFirm(firmId, { days: 30 }).catch(() => {});
 }
 

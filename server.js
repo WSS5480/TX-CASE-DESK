@@ -23,6 +23,30 @@ const sync = require("./sync");
 const box = require("./crypto-box");
 
 authenticator.options = { window: 1 };
+// 2FA secrets are stored encrypted (older plain ones still work and get encrypted the next time they're used).
+const SEALED = /^[A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+$/;
+const totpOpen = s => !s ? null : SEALED.test(s) ? box.open(s) : s;
+const totpSeal = s => { try { return box.seal(s); } catch (e) { return s; } };   // no CRED_KEY (local tests): stays as is
+// A code works once: the 30-second step it belongs to is recorded, and only later codes are accepted after it.
+async function useTotp(userId, stored, code) {
+  code = String(code || "").replace(/\s/g, "");
+  if (!/^\d{6}$/.test(code) || !stored) return false;
+  let secret; try { secret = totpOpen(stored); } catch (e) { return false; }
+  const now = Date.now(), delta = authenticator.clone({ epoch: now }).checkDelta(code, secret); if (delta === null || delta === undefined) return false;   // one clock reading for both
+  const step = Math.floor(now / 30000) + delta;
+  const r = await q("UPDATE users SET totp_last_step=$2 WHERE id=$1 AND (totp_last_step IS NULL OR totp_last_step < $2) RETURNING id", [userId, step]);
+  if (r.rowCount && !SEALED.test(stored)) { const sealed = totpSeal(secret); if (sealed !== secret) await q("UPDATE users SET totp_secret=$2 WHERE id=$1 AND totp_secret=$3", [userId, sealed, stored]); }   // only if nobody reset it meanwhile
+  return r.rowCount > 0;
+}
+// Wrong 2FA codes per account (from any address): 10 an hour, then that account waits. Counted before the code is checked.
+async function codeTry(userId) {
+  const r = await q(`UPDATE users SET totp_fails = CASE WHEN totp_fail_at IS NULL OR totp_fail_at < now() - interval '1 hour' THEN 1 ELSE totp_fails + 1 END,
+      totp_fail_at = CASE WHEN totp_fail_at IS NULL OR totp_fail_at < now() - interval '1 hour' THEN now() ELSE totp_fail_at END WHERE id=$1 RETURNING totp_fails`, [userId]);
+  return (r.rows[0] || {}).totp_fails <= 10;
+}
+const TOO_MANY_CODES = { error: "Too many codes tried for this account. Wait an hour, or ask your firm's admin to reset your sign-in.", code: "CODES" };
+const signOutAll = (uid, keepSid) => q(`DELETE FROM session WHERE (sess->>'uid' = $1 OR sess->>'pendingUid' = $1 OR sess->>'resetUid' = $1)${keepSid ? " AND sid <> $2" : ""}`, keepSid ? [String(uid), keepSid] : [String(uid)]);
+if (process.env.NODE_ENV === "production" && !(process.env.CRED_KEY || "").trim()) console.error("[security] CRED_KEY is not set: 2FA secrets and mailbox passwords can't be encrypted. Set it in Render and never change it.");
 const PROD = process.env.NODE_ENV === "production";
 const app = express();
 app.set("trust proxy", 1);
@@ -53,7 +77,15 @@ const DEV_HASH = DEV_PIN.length >= 8 ? crypto.createHash("sha256").update(DEV_PI
 const DEV_TTL = 3600e3;
 const devOk = req => !!(req.session && req.session.dev && Date.now() - req.session.dev.at < DEV_TTL);
 // GET pages that would change something (connect a mailbox, make a calendar link, bulk export) are blocked in developer view too
-const DEV_BLOCKED_GET = /^\/(api\/mail\/connect|api\/mail\/callback|api\/mail\/admin-callback|api\/firm\/mail\/microsoft|api\/firm\/court-inbox\/connect|api\/calendar\/feed|api\/export|export)\b/;
+const DEV_BLOCKED_GET = /^\/(api\/calendar\/feed|api\/export|export)\b/;
+// The one thing the developer may change: email setup (a person's mailboxes, the firm's Microsoft/Google mail, the court inbox).
+// Everything else stays read-only. Each of these is logged with dev:true.
+const DEV_EMAIL = [
+  ["GET", /^\/api\/mail\/connect\/[a-z]+$/], ["POST", /^\/api\/mail\/imap$/], ["POST", /^\/api\/mail\/\d+\/sync$/], ["DELETE", /^\/api\/mail\/\d+$/],
+  ["GET", /^\/api\/firm\/mail\/microsoft$/], ["POST", /^\/api\/firm\/mail\/(google|sync)$/], ["DELETE", /^\/api\/firm\/mail$/],
+  ["PUT", /^\/api\/firm\/court-inbox$/], ["GET", /^\/api\/firm\/court-inbox\/connect\/microsoft$/], ["POST", /^\/api\/firm\/court-inbox\/(imap|sync)$/], ["DELETE", /^\/api\/firm\/court-inbox\/mailbox$/],
+];
+const devEmailOk = (method, p) => DEV_EMAIL.some(([m, re]) => m === method && re.test(p));
 const loginLimiter = rateLimit({ windowMs: 15 * 60e3, max: 20, standardHeaders: true, legacyHeaders: false, message: { error: "Too many attempts. Wait 15 minutes." } });
 
 // ---------- helpers ----------
@@ -64,6 +96,7 @@ const strongPw = s => typeof s === "string" && s.length >= 10 && /[A-Za-z]/.test
 const tempPw = () => crypto.randomBytes(9).toString("base64url");
 async function audit(req, action, detail = {}) {
   const u = req.user || {};
+  if (req.devView) detail = { ...detail, dev: true };   // anything done in developer view is marked as the developer's
   await q("INSERT INTO audit_log(user_id, firm_id, action, detail, ip) VALUES($1,$2,$3,$4,$5)", [u.id || req.session?.pendingUid || null, u.firm_id || null, action, detail, req.ip]).catch(() => {});
 }
 // who works the firm's unassigned court notices (shared court inbox): the admin plus anyone the admin picks
@@ -87,14 +120,20 @@ const requireAuth = wrap(async (req, res, next) => {
   const path = req.originalUrl.split("?")[0];
   if (req.session.devView) {   // developer view: read-only, one hour from the PIN
     if (!devOk(req)) { req.session.destroy(() => {}); return res.status(401).json({ error: "Developer view ended (1 hour). Enter the developer PIN again.", code: "DEV_ENDED" }); }
-    let np = path; try { np = decodeURIComponent(path); } catch (e) {}
+    let np = path; try { np = new URL(req.originalUrl, "http://x").pathname; } catch (e) {}   // absolute-form request lines too
+    try { np = decodeURIComponent(np); } catch (e) {}
     np = np.toLowerCase().replace(/\/{2,}/g, "/");   // routes match regardless of case or doubled slashes, so the check must too
-    if ((req.method !== "GET" && !["/api/dev/exit", "/api/logout"].includes(np)) || DEV_BLOCKED_GET.test(np))
+    req.devEmail = devEmailOk(req.method, np);
+    if ((req.method !== "GET" && !["/api/dev/exit", "/api/logout"].includes(np) && !req.devEmail) || DEV_BLOCKED_GET.test(np)) {
+      // a link the browser followed (connect email, export): back to the app with a plain message instead of raw text
+      if (req.method === "GET" && /text\/html/.test(req.get("accept") || "")) return res.redirect(303, "/?devro=1");
       return res.status(403).json({ error: "Developer view is read-only — nothing was changed.", code: "DEV_READONLY" });
+    }
     req.devView = true;
   }
   req.user = await loadUser(req.session.uid);
   if (!req.user) { req.session.destroy(() => {}); return res.status(401).json({ error: "Account disabled" }); }
+  if (req.devEmail) await q("INSERT INTO audit_log(user_id, firm_id, action, detail, ip) VALUES($1,$2,'developer_email_setup',$3,$4)", [req.user.id, req.user.firm_id, { dev: true, method: req.method, path }, req.ip]);   // logged before it runs
   if (req.user.must_change_pw && !["/api/me", "/api/password", "/api/logout"].includes(path))
     return res.status(403).json({ error: "Change your temporary password first", code: "CHANGE_PW" });
   // Subscription (managed in My Apps). Account, logout and subscription pages stay open so they can fix it.
@@ -162,14 +201,14 @@ app.get("/api/2fa/setup", wrap(async (req, res) => {
   if (!uid) return res.status(401).json({ error: "Sign in first" });
   const { rows } = await q("SELECT email, totp_enabled, totp_secret FROM users WHERE id=$1", [uid]);
   if (!rows[0] || rows[0].totp_enabled) return res.status(400).json({ error: "2FA already set up" });
-  let secret = rows[0].totp_secret;
-  if (!secret) { secret = authenticator.generateSecret(); await q("UPDATE users SET totp_secret=$1 WHERE id=$2", [secret, uid]); }
+  let secret = rows[0].totp_secret ? totpOpen(rows[0].totp_secret) : null;
+  if (!secret) { secret = authenticator.generateSecret(); await q("UPDATE users SET totp_secret=$1 WHERE id=$2", [totpSeal(secret), uid]); }
   const uri = authenticator.keyuri(rows[0].email, "TX Case Desk", secret);
   res.json({ qr: await QRCode.toDataURL(uri), secret });
 }));
 
 async function finishMfa(req, res, uid, action) {
-  await q("UPDATE users SET last_login=now() WHERE id=$1", [uid]);
+  await q("UPDATE users SET last_login=now(), totp_fails=0, totp_fail_at=NULL WHERE id=$1", [uid]);
   req.session.regenerate(async () => {
     req.session.uid = uid; req.session.mfa = true;
     req.user = await loadUser(uid);
@@ -182,7 +221,8 @@ app.post("/api/2fa/enable", loginLimiter, wrap(async (req, res) => {
   const uid = req.session.pendingUid;
   if (!uid) return res.status(401).json({ error: "Sign in first" });
   const { rows } = await q("SELECT totp_secret FROM users WHERE id=$1", [uid]);
-  if (!rows[0]?.totp_secret || !authenticator.check(String(req.body?.code || "").replace(/\s/g, ""), rows[0].totp_secret))
+  if (!(await codeTry(uid))) return res.status(429).json(TOO_MANY_CODES);
+  if (!rows[0]?.totp_secret || !(await useTotp(uid, rows[0].totp_secret, req.body?.code)))
     return res.status(400).json({ error: "Code didn't match. Check your authenticator app's time and try again." });
   await q("UPDATE users SET totp_enabled=true WHERE id=$1", [uid]);
   await finishMfa(req, res, uid, "2fa_enabled");
@@ -191,11 +231,44 @@ app.post("/api/login/2fa", loginLimiter, wrap(async (req, res) => {
   const uid = req.session.pendingUid;
   if (!uid) return res.status(401).json({ error: "Sign in first" });
   const { rows } = await q("SELECT totp_secret, totp_enabled FROM users WHERE id=$1 AND active", [uid]);
-  if (!rows[0]?.totp_enabled || !authenticator.check(String(req.body?.code || "").replace(/\s/g, ""), rows[0].totp_secret))
-    return res.status(401).json({ error: "Wrong code." });
+  if (!(await codeTry(uid))) return res.status(429).json(TOO_MANY_CODES);
+  if (!rows[0]?.totp_enabled || !(await useTotp(uid, rows[0].totp_secret, req.body?.code)))
+    return res.status(401).json({ error: "Wrong code, or a code that was already used. Wait for the next one." });
   await finishMfa(req, res, uid, "login");
 }));
 
+// Forgot password: prove it's you with your email and the 6-digit code from your authenticator app, then choose a new one.
+// (No email needed. Lost the phone too? The firm admin resets it: Firm settings → People → Reset password & 2FA.)
+app.post("/api/password/forgot", loginLimiter, wrap(async (req, res) => {
+  const em = String(req.body?.email || "").trim().toLowerCase().slice(0, 200), code = String(req.body?.code || "").replace(/\s/g, "");
+  // 5 tries a day per email, from anywhere — counted before the code is checked, the same for every email (so it reveals nothing)
+  await q("DELETE FROM reset_attempts WHERE day < CURRENT_DATE");
+  const tries = (await q(`INSERT INTO reset_attempts(email, day, n) VALUES($1, CURRENT_DATE, 1)
+    ON CONFLICT (email) DO UPDATE SET n = CASE WHEN reset_attempts.day = CURRENT_DATE THEN reset_attempts.n + 1 ELSE 1 END, day = CURRENT_DATE RETURNING n`, [em])).rows[0].n;
+  if (tries > 5) return res.status(429).json({ error: "Too many tries today. Ask your firm's admin to reset your sign-in, or try again tomorrow." });
+  const u = (await q("SELECT id, firm_id, totp_secret, totp_enabled FROM users WHERE email=$1 AND active", [em])).rows[0];
+  if (!u || !u.totp_enabled || !u.totp_secret || !(await useTotp(u.id, u.totp_secret, code))) {
+    await q("INSERT INTO audit_log(user_id, firm_id, action, detail, ip) VALUES($1,$2,'password_reset_failed','{}'::jsonb,$3)", [u ? u.id : null, u ? u.firm_id : null, req.ip]).catch(() => {});
+    return res.status(400).json({ error: "That email and code don't match. Use the 6-digit code your authenticator app shows for TX Case Desk right now." });   // same answer whether or not the email exists
+  }
+  req.session.regenerate(err => {
+    if (err) return res.status(500).json({ error: "Try again." });
+    req.session.resetUid = u.id; req.session.resetAt = Date.now();
+    res.json({ ok: true });
+  });
+}));
+app.post("/api/password/forgot/set", loginLimiter, wrap(async (req, res) => {
+  const uid = req.session.resetUid;
+  if (!uid || Date.now() - (req.session.resetAt || 0) > 10 * 60e3) return res.status(401).json({ error: "That took longer than 10 minutes. Start again." });
+  const next = req.body?.next;
+  if (!strongPw(next)) return res.status(400).json({ error: "New password must be 10+ characters with letters and numbers." });
+  const hash = await bcrypt.hash(next, 12);
+  const u = (await q("UPDATE users SET pw_hash=$1, must_change_pw=false WHERE id=$2 AND active RETURNING id, firm_id", [hash, uid])).rows[0];
+  if (!u) return res.status(401).json({ error: "Start again." });
+  await signOutAll(uid, req.sessionID);   // then sign out everywhere else: signed-in sessions, half-way sign-ins, other open resets
+  await q("INSERT INTO audit_log(user_id, firm_id, action, detail, ip) VALUES($1,$2,'password_reset_self','{}'::jsonb,$3)", [u.id, u.firm_id, req.ip]);
+  req.session.destroy(() => res.json({ ok: true }));
+}));
 app.post("/api/logout", (req, res) => req.session.destroy(() => { res.clearCookie("tcd.sid"); res.json({ ok: true }); }));
 app.get("/api/me", requireAuth, (req, res) => res.json({ user: { ...publicUser(req.user), ...(req.devView ? { dev_view: true, dev_until: req.session.dev.at + DEV_TTL } : {}) }, subscription: req.subscription }));
 // User Agreement: public page; accepting records the version and time on the person
@@ -277,6 +350,7 @@ app.post("/api/password", requireAuth, wrap(async (req, res) => {
   if (!await bcrypt.compare(String(current || ""), req.user.pw_hash)) return res.status(400).json({ error: "Current password is wrong." });
   if (!strongPw(next)) return res.status(400).json({ error: "New password must be 10+ characters with letters and numbers." });
   await q("UPDATE users SET pw_hash=$1, must_change_pw=false WHERE id=$2", [await bcrypt.hash(next, 12), req.user.id]);
+  await signOutAll(req.user.id, req.sessionID);   // other devices sign in again
   await audit(req, "password_changed");
   res.json({ ok: true });
 }));
@@ -425,7 +499,7 @@ app.patch("/api/firm/users/:id", requireAuth, requireAdmin, wrap(async (req, res
   if (id === req.user.id && req.body.active === false) return res.status(400).json({ error: "You can't disable yourself." });
   const { rows } = await q("SELECT id FROM users WHERE id=$1 AND firm_id=$2", [id, req.user.firm_id]);
   if (!rows[0]) return res.status(404).json({ error: "Not found" });
-  if (typeof req.body.active === "boolean") await q("UPDATE users SET active=$1 WHERE id=$2", [req.body.active, id]);
+  if (typeof req.body.active === "boolean") { await q("UPDATE users SET active=$1 WHERE id=$2", [req.body.active, id]); if (!req.body.active) await signOutAll(id); }
   const b = req.body || {};
   if (ROLES.includes(b.role)) {
     const cur = (await q("SELECT role FROM users WHERE id=$1", [id])).rows[0].role;
@@ -446,7 +520,8 @@ app.patch("/api/firm/users/:id", requireAuth, requireAdmin, wrap(async (req, res
     await q("UPDATE users SET name=$2, bar_number=$3, licensed_on=$4, phone=$5, title=$6 WHERE id=$1", [id, nm, bn || null, lic, pclean(d.phone, 30) || null, pclean(d.title, 80) || null]);
   }
   let temp_password;
-  if (req.body.reset) { temp_password = tempPw(); await q("UPDATE users SET pw_hash=$1, must_change_pw=true, totp_enabled=false, totp_secret=NULL WHERE id=$2", [await bcrypt.hash(temp_password, 12), id]); }
+  if (req.body.reset) { temp_password = tempPw(); const h = await bcrypt.hash(temp_password, 12);
+    await q("UPDATE users SET pw_hash=$1, must_change_pw=true, totp_enabled=false, totp_secret=NULL, totp_last_step=NULL, totp_fails=0, totp_fail_at=NULL WHERE id=$2", [h, id]); await signOutAll(id); }
   await audit(req, "seat_updated", { id, ...req.body });
   res.json({ ok: true, temp_password });
 }));
@@ -687,11 +762,10 @@ app.get("/api/firm/mail", requireAuth, requireAdmin, wrap(async (req, res) => {
   res.json({ firm: f, detect: det, covered, configured: await mail.configuredFor(req.user.firm_id), google_sa_client_id: mail.GSA().clientId || null });
 }));
 app.get("/api/firm/mail/microsoft", requireAuth, requireAdmin, wrap(async (req, res) => {
-  if (req.devView) return res.status(403).json({ error: "Developer view is read-only — nothing was changed.", code: "DEV_READONLY" });   // second lock, whatever the URL spelling
   const det = await mail.detect(req.user.email);
   if (!(await mail.configuredFor(req.user.firm_id)).microsoft) return res.redirect("/?mailerror=" + encodeURIComponent("Microsoft connection isn't switched on yet."));
   if (det.personal) return res.redirect("/?mailerror=" + encodeURIComponent("Firm-wide connect needs a firm email domain (not a personal Outlook/Gmail address)."));
-  res.redirect(await mail.adminConsentUrl(req.user.firm_id, det.domain));
+  res.redirect(await mail.adminConsentUrl(req.user.firm_id, det.domain, { dev: !!req.devView }));
 }));
 app.get("/api/mail/admin-callback/microsoft", async (req, res) => {
   try { await mail.finishAdminConsent(req.query); res.redirect("/?connected=" + encodeURIComponent("whole firm (Microsoft 365)")); }
@@ -700,20 +774,19 @@ app.get("/api/mail/admin-callback/microsoft", async (req, res) => {
 app.post("/api/firm/mail/google", requireAuth, requireAdmin, wrap(async (req, res) => {
   const det = await mail.detect(req.user.email);
   if (det.personal || !det.domain) return res.status(400).json({ error: "Firm-wide connect needs a firm email domain." });
-  try { await mail.connectGoogleFirm(req.user.firm_id, det.domain, req.user.email); await audit(req, "firm_mail_google"); res.json({ ok: true }); }
+  try { await mail.connectGoogleFirm(req.user.firm_id, det.domain, req.user.email, { dev: !!req.devView }); await audit(req, "firm_mail_google"); res.json({ ok: true }); }
   catch (e) { res.status(400).json({ error: e.message }); }
 }));
 app.post("/api/firm/mail/sync", requireAuth, requireAdmin, wrap(async (req, res) => { mail.syncFirm(req.user.firm_id).catch(() => {}); res.json({ started: true }); }));
 app.delete("/api/firm/mail", requireAuth, requireAdmin, wrap(async (req, res) => { await q("DELETE FROM firm_mail WHERE firm_id=$1", [req.user.firm_id]); await audit(req, "firm_mail_disconnected"); res.json({ ok: true }); }));
 app.get("/api/mail/connect/:provider", requireAuth, wrap(async (req, res) => {
-  if (req.devView) return res.status(403).json({ error: "Developer view is read-only — nothing was changed.", code: "DEV_READONLY" });   // second lock, whatever the URL spelling
   const p = req.params.provider;
   if (!mail.PROVIDERS[p] || !(await mail.configuredFor(req.user.firm_id))[p]) return res.redirect("/?mailerror=" + encodeURIComponent("That email provider isn't switched on yet."));
-  res.redirect(await mail.startUrl(p, req.user, { full: req.query.full === "1" }));
+  res.redirect(await mail.startUrl(p, req.user, { full: req.query.full === "1", dev: !!req.devView }));
 }));
 // Password sign-in (IMAP) for Titan / GoDaddy / Zoho and other hosts
 app.post("/api/mail/imap", requireAuth, wrap(async (req, res) => {
-  try { const r = await mail.connectImap(req.user, req.body || {}); await audit(req, "mailbox_connected_imap", { host: r.host }); res.json(r); }
+  try { const r = await mail.connectImap(req.user, req.body || {}, { dev: !!req.devView }); await audit(req, "mailbox_connected_imap", { host: r.host }); res.json(r); }
   catch (e) { res.status(400).json({ error: e.message }); }
 }));
 // A firm's own Microsoft (Azure) keys — entered by the firm admin, stored encrypted, never shown again
@@ -785,6 +858,7 @@ app.get("/api/firm/court-inbox", requireAuth, requireAdmin, wrap(async (req, res
 }));
 app.put("/api/firm/court-inbox", requireAuth, requireAdmin, wrap(async (req, res) => {
   const b = req.body || {}, fid = req.user.firm_id;
+  if (req.devView && b.handlers !== undefined) return res.status(403).json({ error: "Developer view can set up the court inbox, but not change who handles it.", code: "DEV_READONLY" });
   if (b.mode !== undefined) {
     if (!["each", "shared", "both"].includes(b.mode)) return res.status(400).json({ error: "Pick how your firm gets court emails." });
     await q("UPDATE firms SET court_mode=$2 WHERE id=$1", [fid, b.mode]);
@@ -810,12 +884,11 @@ app.put("/api/firm/court-inbox", requireAuth, requireAdmin, wrap(async (req, res
   res.json(await courtInboxInfo(fid));
 }));
 app.get("/api/firm/court-inbox/connect/microsoft", requireAuth, requireAdmin, wrap(async (req, res) => {
-  if (req.devView) return res.status(403).json({ error: "Developer view is read-only — nothing was changed.", code: "DEV_READONLY" });   // second lock, whatever the URL spelling
   if (!(await mail.configuredFor(req.user.firm_id)).microsoft) return res.redirect("/?mailerror=" + encodeURIComponent("Outlook sign-in isn't switched on yet."));
-  res.redirect(await mail.startUrl("microsoft", req.user, { shared: true }));
+  res.redirect(await mail.startUrl("microsoft", req.user, { shared: true, dev: !!req.devView }));
 }));
 app.post("/api/firm/court-inbox/imap", requireAuth, requireAdmin, wrap(async (req, res) => {
-  try { const r = await mail.connectImap(req.user, req.body || {}, { shared: true }); await audit(req, "court_inbox_connected", { provider: "imap", host: r.host }); res.json(r); }
+  try { const r = await mail.connectImap(req.user, req.body || {}, { shared: true, dev: !!req.devView }); await audit(req, "court_inbox_connected", { provider: "imap", host: r.host }); res.json(r); }
   catch (e) { res.status(400).json({ error: e.message }); }
 }));
 app.post("/api/firm/court-inbox/sync", requireAuth, requireAdmin, wrap(async (req, res) => {

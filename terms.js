@@ -1,7 +1,7 @@
 // TX Case Desk User Agreement (terms of service + privacy). Bump VERSION when the text changes:
 // everyone is asked to accept the new version at their next sign-in.
-const VERSION = "2026-11-01";
-const UPDATED = "November 1, 2026";
+const VERSION = "2026-11-02";
+const UPDATED = "November 2, 2026";
 
 const SECTIONS = [
   ["What TX Case Desk is", `
@@ -31,12 +31,12 @@ const SECTIONS = [
       <li><b>Legal requests.</b> If we're legally required to disclose your data (for example, by subpoena), we'll tell you first when the law allows, so you can object.</li>
     </ul>`],
   ["When TX Case Desk can see your account (developer access)", `
-    <p>To fix problems, answer your questions and keep the service secure, the TX Case Desk developer can open a <b>read-only developer view</b> of an account, seeing what that person sees.</p>
+    <p>To fix problems, answer your questions, set up your email and keep the service secure, the TX Case Desk developer can open a <b>developer view</b> of an account, seeing what that person sees.</p>
     <ul>
       <li>It is used only for support, troubleshooting, security, or when the law requires it.</li>
       <li>It is protected by a separate developer PIN that only the developer holds, and it ends after one hour.</li>
-      <li>It is read-only: the developer can't send email or change, add or delete anything as you, can't use the Export feature or download your data in bulk, and opening your emails doesn't mark them read. Like you, the developer can open individual documents and emails while viewing.</li>
-      <li>Every developer view is recorded with the date and time, and we'll give your firm that record on request.</li>
+      <li>It is read-only, with one exception: the developer can set up your email connection for you (connect or disconnect a mailbox or the firm's court inbox, and connect the firm's Microsoft or Google mail). The developer can't change who handles your court inbox or your firm's Microsoft app keys. The developer can't send email or change, add or delete anything else as you, can't use the Export feature or download your data in bulk, and opening your emails doesn't mark them read. Like you, the developer can open individual documents and emails while viewing.</li>
+      <li>Every developer view and every email-setup change made in it is recorded with the date and time, and we'll give your firm that record on request.</li>
     </ul>
     <p>Anyone who works on TX Case Desk is bound to keep what they see confidential.</p>`],
   ["Connecting your email", `

@@ -46,8 +46,10 @@ function authView(mode = "login", msg = "") {
    <button class="btn" style="width:100%">${signup ? "Create account" : "Continue"}</button></form>
    ${signup ? `<p class="mute" style="text-align:center">Every new firm starts with a free 14-day trial.</p>` : ""}
    <p class="mute" style="text-align:center"><a class="link" id="sw">${signup ? "Have an account? Sign in" : "New firm? Create an account"}</a></p>
+   ${signup ? "" : `<p class="mute" style="text-align:center;margin:8px 0 0"><a class="link" id="forgot" href="#" role="button">Forgot password?</a></p>`}
    <p class="mute authf"><a class="link" href="/terms" target="_blank" rel="noopener">User Agreement</a><span aria-hidden="true">·</span><a class="link" id="devGo" href="#" role="button">Developer</a></p></div>`;
   $("#devGo").onclick = e => { e.preventDefault(); devPinView(); };
+  if ($("#forgot")) $("#forgot").onclick = e => { e.preventDefault(); forgotView($("#f [name=email]").value); };
   $("#sw").onclick = () => authView(signup ? "login" : "signup");
   $$("[name=kind]").forEach(r => r.onchange = () => { const solo = $("[name=kind]:checked").value === "solo"; $("#firmLbl").textContent = solo ? "Practice name (optional)" : "Firm name"; $("#firmIn").required = !solo; $("#firmIn").placeholder = solo ? "Law Office of …" : ""; });
   $("#f").onsubmit = async e => {
@@ -57,6 +59,32 @@ function authView(mode = "login", msg = "") {
     catch (err) { $("#err").textContent = err.message; }
   };
 }
+// ---------------- Forgot password: email + the code from their authenticator app, then a new password ----------------
+function forgotView(email = "") {
+  shellOff();
+  $("#app").innerHTML = `<div class="narrow card"><h2>Forgot password</h2>
+   <p class="mute" style="margin-top:0">Enter your email and the 6-digit code your authenticator app shows for TX Case Desk.</p>
+   <form id="f"><label>Email</label><input name="email" type="email" autocomplete="username" required value="${esc(email)}"><br><br>
+   <label>6-digit code</label><input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required>
+   <div class="err" id="err"></div><button class="btn" style="width:100%">Continue</button></form>
+   <p class="mute" style="font-size:14px">Lost your phone or authenticator app too? Ask your firm's admin to reset your sign-in (Firm settings → People → Reset password &amp; 2FA). If you're the admin or a solo attorney, contact TX Case Desk.</p>
+   <p class="mute" style="text-align:center;margin-bottom:0"><a class="link" id="back" href="#" role="button">← Back to sign in</a></p></div>`;
+  $("#back").onclick = e => { e.preventDefault(); authView("login"); };
+  $("#f").onsubmit = async e => { e.preventDefault(); const b = e.target.querySelector("button"); b.disabled = true;
+    try { await api("/api/password/forgot", { method: "POST", body: { email: e.target.email.value, code: e.target.code.value } }); newPwView(); }
+    catch (x) { $("#err").textContent = x.message; b.disabled = false; } };
+}
+function newPwView() {
+  $("#app").innerHTML = `<div class="narrow card"><h2>Choose a new password</h2>
+   <form id="f"><label>New password (10+ chars, letters &amp; numbers)</label><input name="next" type="password" autocomplete="new-password" required><br><br>
+   <label>Type it again</label><input name="again" type="password" autocomplete="new-password" required>
+   <div class="err" id="err"></div><button class="btn" style="width:100%">Save new password</button></form></div>`;
+  $("#f").onsubmit = async e => { e.preventDefault();
+    if (e.target.next.value !== e.target.again.value) { $("#err").textContent = "The two passwords don't match."; return; }
+    try { await api("/api/password/forgot/set", { method: "POST", body: { next: e.target.next.value } }); authView("login"); $("#err").style.color = "var(--ok,#1e7a4c)"; $("#err").textContent = "Password changed. Sign in with your new password, then the next code your app shows."; }
+    catch (x) { $("#err").textContent = x.message; if (x.status === 401) setTimeout(() => forgotView(), 1800); } };
+}
+
 // ---------------- User Agreement (accepted once per version; shown again when it changes) ----------------
 function termsView() {
   shellOff();
@@ -65,7 +93,7 @@ function termsView() {
    <ul style="padding-left:20px;margin:0 0 10px;font-size:15px">
      <li>Your data is yours. It's kept confidential, never sold, never used for advertising or to train AI.</li>
      <li>TX Case Desk is a tool, not legal advice: check deadlines, court dates and case law yourself.</li>
-     <li>For support, the developer can open a read-only view of an account. It's PIN-protected, ends after one hour, and every view is recorded.</li>
+     <li>For support, the developer can open a view of an account. It's read-only except for setting up your email, PIN-protected, ends after one hour, and every view is recorded.</li>
    </ul>
    <p style="margin:0 0 12px"><a class="link" href="/terms" target="_blank" rel="noopener">Read the full User Agreement</a></p>
    <form id="f"><label class="ck" style="align-items:flex-start"><input type="checkbox" name="agree" required style="margin-top:3px"><span>I have read and agree to the User Agreement${me.role === "admin" ? " for myself and my firm" : ""}</span></label>
@@ -79,7 +107,7 @@ function termsView() {
 function devPinView(msg = "") {
   shellOff();
   $("#app").innerHTML = `<div class="narrow card"><h2>Developer sign in</h2>
-   <p class="mute" style="margin-top:0">See exactly what an attorney or staff member sees. Read-only, for one hour. Each view is recorded.</p>
+   <p class="mute" style="margin-top:0">See exactly what an attorney or staff member sees, for one hour. Read-only, except email setup (mailboxes, court inbox, Microsoft/Google mail), which you can do for them. Everything is recorded.</p>
    <form id="f"><label>Developer PIN</label><input name="pin" type="password" autocomplete="off" required autofocus>
    <div class="err" id="err">${esc(msg)}</div><button class="btn" style="width:100%">Continue</button></form>
    <p class="mute" style="text-align:center;margin-bottom:0"><a class="link" id="back">← Attorney sign in</a></p></div>`;
@@ -120,7 +148,7 @@ function devBar(off) {
   if (!bar) { bar = document.createElement("div"); bar.id = "devbar"; bar.setAttribute("role", "status"); document.body.prepend(bar); }
   document.body.classList.add("devv");
   // line 1: whose account (always visible); line 2: developer view, read-only time, firm
-  bar.innerHTML = `<span class="dvt"><span class="dv1" title="${esc(me.name)}">Viewing as <b>${esc(me.name)}</b></span><span class="dv2" title="${esc(me.firm_name)}">Developer view · read-only until ${esc(new Date(me.dev_until).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))} · ${esc(me.firm_name)}</span></span>
+  bar.innerHTML = `<span class="dvt"><span class="dv1" title="${esc(me.name)}">Viewing as <b>${esc(me.name)}</b></span><span class="dv2" title="${esc(me.firm_name)}">Developer view · read-only (email setup allowed) until ${esc(new Date(me.dev_until).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))} · ${esc(me.firm_name)}</span></span>
     <span class="dvb"><button type="button" class="btn sm ghost" id="dvSw" title="View as someone else">Switch</button><button type="button" class="btn sm" id="dvEx" title="Leave developer view">Exit</button></span>`;
   const fit = () => document.body.style.setProperty("--devh", bar.offsetHeight + "px");   // the page starts right under the banner, however many lines it takes
   fit(); if (!bar._fit) { bar._fit = true; addEventListener("resize", fit); }
@@ -1207,7 +1235,8 @@ checkVersion();
   try { META = await api("/api/meta"); } catch (e) { $("#app").innerHTML = `<div class="card err">Can't reach server.</div>`; return; }
   const qs = new URLSearchParams(location.search);
   if (qs.get("connected") || qs.get("mailerror")) { tab = /firm/.test(qs.get("connected") || "") ? "firm" : "inbox"; if (/court inbox/.test(qs.get("connected") || "")) fsSec = "email"; history.replaceState(null, "", "/"); setTimeout(() => toast(qs.get("connected") ? `Email connected: ${qs.get("connected")} — checking court emails now` : qs.get("mailerror")), 600); }
-  try { me = (await api("/api/me")).user; start(); }
+  try { me = (await api("/api/me")).user; start();
+    if (qs.get("devro")) { history.replaceState(null, "", "/"); setTimeout(() => toast("Developer view is read-only (except email setup): exports and calendar links are off. Nothing was changed."), 400); } }
   catch (e) {
     if (e.code === "CHANGE_PW") { me = { must_change_pw: true }; return changePwView(true); }
     try { const st = await api("/api/dev/status"); if (st.pin_ok) return devPickView(); } catch (x) {}

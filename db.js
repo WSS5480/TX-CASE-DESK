@@ -332,6 +332,10 @@ CREATE INDEX IF NOT EXISTS contacts_firm ON contacts(firm_id, lower(name));
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS created_by INT;   -- who added it; contacts on no case are seen by them (and whole-firm roles)
 ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version TEXT;          -- User Agreement version this person accepted
 ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_last_step BIGINT;        -- each 2FA code works once
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_fails INT DEFAULT 0;     -- wrong 2FA codes in the current hour
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_fail_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS reset_attempts (email TEXT PRIMARY KEY, day DATE NOT NULL, n INT NOT NULL);   -- forgot-password tries per email per day
 CREATE TABLE IF NOT EXISTS case_contacts (
   case_id INT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
   contact_id INT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
