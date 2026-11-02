@@ -107,7 +107,7 @@ async function finish(provider, code, state) {
     ON CONFLICT(user_id, provider) WHERE shared_firm IS NULL DO UPDATE SET email=$3, enc_refresh=$4, enc_access=$5, access_expires=EXCLUDED.access_expires, status='ok', last_error=NULL, key_source=$7, last_seen=NULL, stats=NULL, scope_req=$8, scope_got=$9
     RETURNING id`, [st.userId, provider, email, box.seal(t.refresh_token), box.seal(t.access_token), String((t.expires_in || 3600) - 120), keys ? keys.source : "app", st.scope || PROVIDERS[provider].scope, t.scope || null]);
   await q("INSERT INTO audit_log(user_id, action, detail) VALUES($1,'mailbox_connected',$2)", [st.userId, { provider, email, ...(st.shared ? { shared: true } : {}), ...(st.dev ? { dev: true } : {}) }]);
-  syncMailbox(rows[0].id, { days: 30 }).catch(() => {}); // first pull: last 90 days (lookback)
+  syncMailbox(rows[0].id, { days: 30 }).catch(() => {}); // first pull: all email history
   return { userId: st.userId, email, shared: st.shared };
 }
 
@@ -297,8 +297,8 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
   try {
     const { rows } = await q("SELECT m.*, u.firm_id, u.counties, u.active, u.name AS user_name FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE m.id=$1", [id]);
     const mb = rows[0]; if (!mb || (!mb.active && !mb.shared_firm)) return { skipped: "gone" };
-    // No court email found yet = keep looking back 90 days, not just 2.
-    const lookback = fresh || !mb.last_seen ? Math.max(days, 90) : days;
+    // First check (or a fresh re-read): all email history, so every case the attorney has gets built. After that, only what's new.
+    const lookback = fresh || !mb.last_seen ? Math.max(days, ALL_DAYS) : days;
     const since = !fresh && mb.last_seen ? new Date(new Date(mb.last_seen).getTime() - 60e3) : new Date(Date.now() - lookback * 864e5);
     const token = mb.provider === "imap" ? null : await accessToken(mb);
     const r = mb.provider === "imap" ? await fetchImap(JSON.parse(box.open(mb.enc_refresh)), since)
@@ -318,10 +318,10 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
       const det = await detect(mb.email);
       let inboxTotal = null;
       if (mb.provider === "microsoft") inboxTotal = await api("https://graph.microsoft.com/v1.0/me/mailFolders/inbox?$select=totalItemCount", token).then(j => j.totalItemCount).catch(e => "error: " + e.message);
-      console.log(`[mail] mailbox ${id} diag: no email in last 90 days; inbox total=${inboxTotal}; @${det.domain} mail hosted by ${det.host || "unknown"} (mx ${(det.mx || []).slice(0, 2).join(", ") || "none"})`);
+      console.log(`[mail] mailbox ${id} diag: no email found; inbox total=${inboxTotal}; @${det.domain} mail hosted by ${det.host || "unknown"} (mx ${(det.mx || []).slice(0, 2).join(", ") || "none"})`);
       const em = mb.email || "your email";
       note = det.provider === mb.provider
-        ? `Connected, but this mailbox has no email from the last 90 days. Make sure you signed in with the ${mb.provider === "microsoft" ? "Microsoft 365" : "Google"} account for ${em}.`
+        ? `Connected, but this mailbox has no email in it. Make sure you signed in with the ${mb.provider === "microsoft" ? "Microsoft 365" : "Google"} account for ${em}.`
         : det.provider === "google"
           ? `Your ${det.domain} email runs on Google Workspace, not Microsoft — the Microsoft sign-in opened an empty mailbox. Disconnect, then use Sign in with Gmail.`
           : `Your ${det.domain || ""} email is hosted by ${(await imapGuess(mb.email)).label}, not Microsoft — the Microsoft sign-in opened an empty mailbox, so there's nothing to read. Disconnect this, then use "Connect with your email password" below.`;
@@ -338,15 +338,16 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
   } finally { running.delete(id); }
 }
 // One-time: mailboxes checked by the old 500-email scan get a fresh 30-day look.
-const SCAN_V = 6;
+const SCAN_V = 7;
+const ALL_DAYS = 3650;   // "all history": 10 years
 async function rescanOld() {
-  // also look again (90 days) at password-connected mailboxes checked before Spam/Trash/Archive and forwards were read
+  // also look again (all history) at password-connected mailboxes checked before Spam/Trash/Archive and forwards were read
   const { rows } = await q("SELECT m.id FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE u.active AND m.status <> 'reconnect' AND (m.stats IS NULL OR m.stats->>'scanned' IS NULL OR (m.provider='imap' AND COALESCE(m.stats->>'v','') <> $1))", [String(SCAN_V)]);
   for (const r of rows) {
-    // court emails stored by an earlier check that matched no case: drop and read again (last 90 days, not dismissed), so the better reading can file them.
+    // court emails stored by an earlier check that matched no case: drop and read again (not dismissed), so the better reading can file them.
     // Marked done first, so a check that fails can never repeat the clean-up. Personal mailboxes only — never the shared court inbox.
     const mk = await q(`UPDATE mailboxes SET stats = jsonb_set(COALESCE(stats,'{}'::jsonb), '{v}', to_jsonb($2::int)) WHERE id=$1 AND provider='imap' AND shared_firm IS NULL AND status='ok' AND COALESCE(stats->>'v','') <> $2::text RETURNING user_id`, [r.id, SCAN_V]);
-    if (mk.rows[0]) await q(`DELETE FROM inbound_emails WHERE user_id=$1 AND NOT COALESCE(shared,false) AND source='imap' AND dismissed_at IS NULL AND received_at > now() - interval '90 days' AND COALESCE(cardinality(matched_case_ids),0)=0`, [mk.rows[0].user_id]);
+    if (mk.rows[0]) await q(`DELETE FROM inbound_emails WHERE user_id=$1 AND NOT COALESCE(shared,false) AND source='imap' AND dismissed_at IS NULL AND COALESCE(cardinality(matched_case_ids),0)=0`, [mk.rows[0].user_id]);
     await syncMailbox(r.id, { days: 30, fresh: true });
   }
   return rows.length;
