@@ -80,8 +80,11 @@ function parseNotice(text) {
   }
   if (out.cause_no) out.cause_no = out.cause_no.split(/\s/)[0].toUpperCase();
   const blob = (out.court || "") + " " + lines.slice(0, 40).join(" ");
-  const cm = blob.match(/\b([A-Z][a-z]+(?: [A-Z][a-z]+)?) County\b/);
+  // County: the court line first, else the county named most often anywhere in the notice (eFileTexas puts it far down)
+  const cm = String(out.court || "").match(/\b([A-Z][a-z]+(?: [A-Z][a-z]+)?) County\b/);
   if (cm && COUNTIES.includes(cm[1])) out.county = cm[1];
+  else { const n = {}; for (const m of lines.slice(0, 400).filter(l => !/\bTX\s*7\d{4}\b|\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}/i.test(l)).join(" ").matchAll(/\b([A-Z][a-z]+(?: [A-Z][a-z]+)?) County\b/g)) if (COUNTIES.includes(m[1])) n[m[1]] = (n[m[1]] || 0) + 1;
+    const top = Object.entries(n).sort((a, b) => b[1] - a[1])[0]; if (top) out.county = top[0]; }
   const crt = blob.match(/\b(\d{1,3}(?:st|nd|rd|th) (?:Judicial )?District Court|County Court at Law(?: No\.?)? ?#?\d*|Probate Court(?: No\.? ?\d+)?|Justice of the Peace[^,;]*)/i);
   if (crt) out.court_name = crt[1];
   const hl = lines.find(l => /(hearing|set for|setting|trial|docket call|mediation)/i.test(l) && /\d{1,2}\/\d{1,2}\/\d{4}/.test(l) && !/(filed|submitted)/i.test(l));
@@ -120,6 +123,10 @@ async function processEmail(u, { from = "", subject = "", text, html, ext_id = n
     confirm = (body.match(/Confirmation code:\s*(\d{6,12})/i) || [])[1] || (body.match(/https:\/\/mail[^\s]*google\.com\/mail\/[^\s]+/) || [])[0] || null;
   } else if (/re:?search|txcourts|tylertech|tylerhost|efiletexas|\.tx\.us|clerk/i.test(from + " " + subject + " " + body.slice(0, 2000))) kind = "research_alert";
   const parsed = kind === "forward_confirm" ? {} : parseNotice(body);
+  if (kind !== "forward_confirm") {
+    if (!parsed.cause_no) { const sm = String(subject).match(/for Case:\s*((?=[A-Z-]*\d)[A-Z0-9][A-Z0-9-]{3,})/i); if (sm) parsed.cause_no = sm[1].toUpperCase(); }   // "Notification of Service for Case: CL-26-4816-G, ..."
+    if (!parsed.county && u.counties && u.counties.length === 1 && parsed.cause_no) parsed.county = u.counties[0];   // no county named: only when the attorney works one county
+  }
   const causes = kind === "forward_confirm" ? [] : [...new Set([parsed.cause_no, ...causesIn(subject + "\n" + body)].filter(Boolean))].slice(0, 50);
   // de-dupe the same message (mailbox re-reads). Shared-inbox copies are tagged so they never collide with the attorney's own copy.
   const extKey = ext_id && shared ? "shared:" + ext_id : ext_id;

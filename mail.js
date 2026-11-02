@@ -30,7 +30,7 @@ const COURT_SENDER = /(efiletexas\.gov|efile|tylertech\.(com|cloud)|tylerhost\.n
 // Senders that look official but aren't on the list above — logged by domain only, so missed court senders can be added.
 const NEAR_MISS = /(county|court|clerk|judic|\.tx\.us|\.gov$|tyler|efile|texas)/i;
 // A court notice someone forwarded (to themselves or the firm): the sender is a person, so look inside for the court system's own footprints.
-const COURT_DOMAIN = /(efiletexas\.gov|tylertech\.(com|cloud)|tylerhost\.net|txcourts\.gov|courts\.state\.tx\.us|\.tx\.us$|countytx\.gov|hctx\.net|bexar\.org|texasbar\.com)$/i;
+const COURT_DOMAIN = /(efiletexas\.gov|tylertech\.(com|cloud)|tylerhost\.net|txcourts\.gov|courts\.state\.tx\.us|\.tx\.us$|countytx\.gov|hctx\.net|bexar\.org)$/i;   // not texasbar.com: State Bar newsletters aren't court notices
 const FWD_SUBJECT = /^\s*(fwd?|fw)\s*:/i;
 const COURT_BODY = /(efiletexas\.gov|tylertech\.(com|cloud)|tylerhost\.net|txcourts\.gov|courts\.state\.tx\.us|re:?searchtx|notification of service|envelope (number|#|no\.?))/i;
 const domainOf = a => String(a || "").split("@")[1]?.toLowerCase() || "";
@@ -338,11 +338,17 @@ async function syncMailbox(id, { days = 2, fresh = false } = {}) {
   } finally { running.delete(id); }
 }
 // One-time: mailboxes checked by the old 500-email scan get a fresh 30-day look.
-const SCAN_V = 3;
+const SCAN_V = 4;
 async function rescanOld() {
   // also look again (90 days) at password-connected mailboxes checked before Spam/Trash/Archive and forwards were read
   const { rows } = await q("SELECT m.id FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE u.active AND m.status <> 'reconnect' AND (m.stats IS NULL OR m.stats->>'scanned' IS NULL OR (m.provider='imap' AND COALESCE(m.stats->>'v','') <> $1))", [String(SCAN_V)]);
-  for (const r of rows) await syncMailbox(r.id, { days: 30, fresh: true });
+  for (const r of rows) {
+    // court emails stored by an earlier check that matched no case: drop and read again (last 90 days, not dismissed), so the better reading can file them.
+    // Marked done first, so a check that fails can never repeat the clean-up. Personal mailboxes only — never the shared court inbox.
+    const mk = await q(`UPDATE mailboxes SET stats = jsonb_set(COALESCE(stats,'{}'::jsonb), '{v}', to_jsonb($2::int)) WHERE id=$1 AND provider='imap' AND shared_firm IS NULL AND status='ok' AND COALESCE(stats->>'v','') <> $2::text RETURNING user_id`, [r.id, SCAN_V]);
+    if (mk.rows[0]) await q(`DELETE FROM inbound_emails WHERE user_id=$1 AND NOT COALESCE(shared,false) AND source='imap' AND dismissed_at IS NULL AND received_at > now() - interval '90 days' AND COALESCE(cardinality(matched_case_ids),0)=0`, [mk.rows[0].user_id]);
+    await syncMailbox(r.id, { days: 30, fresh: true });
+  }
   return rows.length;
 }
 async function syncAll() {
