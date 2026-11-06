@@ -75,6 +75,7 @@ const TERMS = require("./terms");
 const DEV_PIN = String(process.env.DEVELOPER_PIN || process.env.DELVELOPER_PIN || "").trim();
 const DEV_HASH = DEV_PIN.length >= 8 ? crypto.createHash("sha256").update(DEV_PIN).digest() : null;   // short PINs are refused: this PIN opens every firm
 const DEV_TTL = 3600e3;
+const MFA_OFF = new Set(String(process.env.MFA_OFF_EMAILS || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean));
 const devOk = req => !!(req.session && req.session.dev && Date.now() - req.session.dev.at < DEV_TTL);
 // GET pages that would change something (connect a mailbox, make a calendar link, bulk export) are blocked in developer view too
 const DEV_BLOCKED_GET = /^\/(api\/calendar\/feed|api\/export|export)\b/;
@@ -190,6 +191,8 @@ app.post("/api/login", loginLimiter, wrap(async (req, res) => {
   const u = rows[0];
   const ok = u && await bcrypt.compare(String(req.body?.password || ""), u.pw_hash);
   if (!ok) { await q("INSERT INTO audit_log(action, detail, ip) VALUES('login_failed',$1,$2)", [{ email: em }, req.ip]); return res.status(401).json({ error: "Wrong email or password." }); }
+  // Two-step sign-in turned off for this person by the developer (Render setting MFA_OFF_EMAILS): password only. Logged.
+  if (MFA_OFF.has(em)) { req.session.pendingUid = u.id; return finishMfa(req, res, u.id, "login_password_only"); }
   req.session.regenerate(() => {
     req.session.pendingUid = u.id;
     res.json({ next: u.totp_enabled ? "verify_2fa" : "enroll_2fa" });

@@ -55,7 +55,7 @@ function authView(mode = "login", msg = "") {
   $("#f").onsubmit = async e => {
     e.preventDefault();
     const b = Object.fromEntries(new FormData(e.target));
-    try { const r = await api(signup ? "/api/signup" : "/api/login", { method: "POST", body: b }); r.next === "verify_2fa" ? verifyView() : enrollView(); }
+    try { const r = await api(signup ? "/api/signup" : "/api/login", { method: "POST", body: b }); if (r.user) { me = r.user; start(); } else r.next === "verify_2fa" ? verifyView() : enrollView(); }
     catch (err) { $("#err").textContent = err.message; }
   };
 }
