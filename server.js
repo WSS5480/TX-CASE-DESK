@@ -71,6 +71,7 @@ app.use("/api", (req, res, next) => {
 });
 
 const TERMS = require("./terms");
+const rt = require("./richtext");
 // ---- Developer view: the developer (PIN in Render: DEVELOPER_PIN) sees what any person sees, read-only, for one hour ----
 const DEV_PIN = String(process.env.DEVELOPER_PIN || process.env.DELVELOPER_PIN || "").trim();
 const DEV_HASH = DEV_PIN.length >= 8 ? crypto.createHash("sha256").update(DEV_PIN).digest() : null;   // short PINs are refused: this PIN opens every firm
@@ -159,7 +160,7 @@ app.get("/api/version", wrap(async (req, res) => {
   const c = await mail.configuredFor(firmId);
   res.json({ v: VERSION, updated: STARTED, outlook: c.microsoft, gmail: c.google });
 }));
-app.get("/api/meta", wrap(async (req, res) => res.json({ counties: COUNTIES, appeals: APPEALS, connectors: CONNECTORS, courts: cl.TX_COURTS, localLaw: await lawdb.available(), lawCount: await lawdb.size().catch(() => 0), tokenSet: !!process.env.COURTLISTENER_TOKEN })));
+app.get("/api/meta", wrap(async (req, res) => res.json({ stages: STAGES, preFiling: PRE_FILING, counties: COUNTIES, appeals: APPEALS, connectors: CONNECTORS, courts: cl.TX_COURTS, localLaw: await lawdb.available(), lawCount: await lawdb.size().catch(() => 0), tokenSet: !!process.env.COURTLISTENER_TOKEN })));
 app.get("/healthz", (req, res) => res.send("ok"));
 
 // ---------- signup / login / 2FA ----------
@@ -531,7 +532,11 @@ app.patch("/api/firm/users/:id", requireAuth, requireAdmin, wrap(async (req, res
 
 // ---------- pending cases ----------
 // Rule: attorneys only see/add cases in the counties they practice in — plus cases they explicitly track.
-const CASE_COLS = ["county", "cause_no", "court", "style", "case_type", "filed_date", "status", "next_setting", "notes", "tracked", "watch_dates", "issues", "law_watch"];
+const CASE_COLS = ["county", "cause_no", "court", "style", "case_type", "filed_date", "status", "next_setting", "notes", "tracked", "watch_dates", "issues", "law_watch", "stage"];
+// The firm's own case stages, in order (the Cases list sorts by this). "Status" stays what the court says.
+const STAGES = ["Intake", "Pre-litigation", "Demand / negotiation", "Filed – pleadings", "Discovery", "Motions", "Mediation", "Trial preparation", "Trial", "Post-trial / appeal", "Settled", "Closed"];
+const PRE_FILING = ["Intake", "Pre-litigation", "Demand / negotiation"];   // no cause # yet: the app holds a PRE- number until it's filed
+const preCause = () => "PRE-" + new Date().toISOString().slice(2, 7).replace("-", "") + "-" + crypto.randomBytes(3).toString("hex").toUpperCase();
 function cleanCase(b) {
   const o = {};
   for (const k of CASE_COLS) if (b[k] !== undefined) o[k] = typeof b[k] === "string" ? b[k].trim().slice(0, 500) : b[k];
@@ -541,6 +546,8 @@ function cleanCase(b) {
   if ("watch_dates" in o) o.watch_dates = !!o.watch_dates;
   if ("law_watch" in o) o.law_watch = !!o.law_watch;
   if (typeof b.issues === "string") o.issues = b.issues.trim().slice(0, 1000);
+  if (typeof b.notes === "string") { if (b.notes.length > 100000) throw Object.assign(new Error("Notes are too long (100,000 characters at most)."), { status: 400 }); o.notes = rt.cleanNotes(b.notes) || null; }   // Word-style notes: formatting kept, anything else stripped
+  if ("stage" in o) o.stage = STAGES.find(x => x.toLowerCase() === String(o.stage || "").trim().toLowerCase()) || null;
   return o;
 }
 app.get("/api/cases", requireAuth, wrap(async (req, res) => {
@@ -555,14 +562,22 @@ app.get("/api/cases", requireAuth, wrap(async (req, res) => {
   if (req.query.attorney) { params.push(+req.query.attorney); where += ` AND c.user_id=$${params.length}`; }
   if (county) { params.push(county); where += ` AND c.county=$${params.length}`; }
   if (type) { params.push(type); where += ` AND c.case_type=$${params.length}`; }
-  const { rows } = await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} ORDER BY (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL) DESC, c.filed_date DESC NULLS LAST, c.id DESC LIMIT 500`, params);
+  if (req.query.stage === "none") where += " AND c.stage IS NULL";
+  else if (STAGES.includes(req.query.stage)) { params.push(req.query.stage); where += ` AND c.stage=$${params.length}`; }
+  const alertsFirst = "(c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL) DESC";
+  const byStage = /^stage(_desc)?$/.test(req.query.sort || ""); if (byStage) params.push(STAGES);
+  const stPos = `array_position($${params.length}::text[], c.stage)`;
+  const order = byStage ? `${stPos} ${req.query.sort === "stage_desc" ? "DESC" : "ASC"} NULLS LAST, ${alertsFirst}, c.filed_date DESC NULLS LAST`
+    : { style: "lower(COALESCE(NULLIF(c.style,''), c.cause_no)) ASC", updated: "c.updated_at DESC NULLS LAST" }[req.query.sort] || `${alertsFirst}, c.filed_date DESC NULLS LAST`;
+  const { rows } = await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} ORDER BY ${order}, c.id DESC LIMIT 500`, params);
   const ap = [req.user.firm_id, req.user.counties || []];
   const al = await q(`SELECT count(*)::int n FROM cases c WHERE c.firm_id=$1 AND (c.county = ANY($2) OR c.tracked) AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL) AND ${access.seesFirm(req.user) && req.user.role !== "attorney" ? "TRUE" : access.seesFirm(req.user) ? (ap.push(req.user.id), "c.user_id=$3") : access.caseCond(req.user, "c", ap)}`, ap);
   res.json({ cases: rows, alerts: al.rows[0].n });
 }));
 app.post("/api/cases", requireAuth, wrap(async (req, res) => {
   const c = cleanCase(req.body || {});
-  if (!c.county || !COUNTIES.includes(c.county) || !c.cause_no) return res.status(400).json({ error: "County and cause # are required." });
+  if (!c.cause_no && PRE_FILING.includes(c.stage)) c.cause_no = preCause();   // not filed yet
+  if (!c.county || !COUNTIES.includes(c.county) || !c.cause_no) return res.status(400).json({ error: c.county ? "Add the cause #. Not filed yet? Set the stage to Intake, Pre-litigation or Demand / negotiation and leave the cause # blank." : "County is required." });
   if (!(req.user.counties || []).includes(c.county) && !c.tracked) return res.status(403).json({ error: `${c.county} isn't one of your counties. Add it under My Counties, or mark the case as Tracked.` });
   const cols = Object.keys(c);
   const { rows } = await q(`INSERT INTO cases(firm_id,user_id,source,${cols.join(",")}) VALUES($1,$2,'manual',${cols.map((_, i) => "$" + (i + 3)).join(",")})
@@ -574,12 +589,20 @@ app.post("/api/cases", requireAuth, wrap(async (req, res) => {
 }));
 app.patch("/api/cases/:id", requireAuth, wrap(async (req, res) => {
   const c = cleanCase(req.body || {}); delete c.county; delete c.cause_no;
+  // A case added before filing holds a PRE- number: the real cause # can be filled in once (only then).
+  const nc = String((req.body || {}).cause_no || "").trim().slice(0, 500);
+  if (nc) { const cur = (await q("SELECT cause_no FROM cases WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id])).rows[0];
+    if (cur && /^PRE-/.test(cur.cause_no) && nc !== cur.cause_no) {
+      if (/^PRE-/i.test(nc)) return res.status(400).json({ error: "Enter the real cause # from the court." });
+      c.cause_no = nc;
+    } }
   const cols = Object.keys(c);
   if (!cols.length) return res.status(400).json({ error: "Nothing to update" });
-  const { rows } = await q(`UPDATE cases SET ${cols.map((k, i) => `${k}=$${i + 3}`).join(",")}, updated_at=now() WHERE id=$1 AND firm_id=$2 RETURNING *`,
-    [+req.params.id, req.user.firm_id, ...cols.map(k => c[k])]);
+  let rows; try { ({ rows } = await q(`UPDATE cases SET ${cols.map((k, i) => `${k}=$${i + 3}`).join(",")}, updated_at=now() WHERE id=$1 AND firm_id=$2 RETURNING *`,
+    [+req.params.id, req.user.firm_id, ...cols.map(k => c[k])])); }
+  catch (e) { if (e.code === "23505") return res.status(409).json({ error: "That cause # is already on another case in your firm for this county." }); throw e; }
   if (!rows[0]) return res.status(404).json({ error: "Not found" });
-  await audit(req, "case_updated", { id: rows[0].id, fields: cols });
+  await audit(req, "case_updated", { id: rows[0].id, fields: cols });   // fields only, never the note text
   res.json({ case: rows[0] });
 }));
 app.post("/api/cases/:id/ack", requireAuth, wrap(async (req, res) => {
@@ -673,6 +696,7 @@ app.post("/api/cases/import", requireAuth, wrap(async (req, res) => {
   for (const r of rows.slice(1, 2001)) {
     const o = {}; head.forEach((h, i) => { if (CASE_COLS.includes(h)) o[h] = r[i]; });
     const c = cleanCase(o);
+    if (!c.cause_no && PRE_FILING.includes(c.stage)) c.cause_no = preCause();   // not filed yet
     const county = COUNTIES.find(x => x.toLowerCase() === String(c.county || "").toLowerCase().replace(/\s*county$/, ""));
     if (!county || !c.cause_no) { skipped.push(`${c.cause_no || "?"}: missing county/cause #`); continue; }
     if (!(req.user.counties || []).includes(county)) { skipped.push(`${c.cause_no}: ${county} not in your counties`); continue; }
@@ -1124,6 +1148,7 @@ app.use((req, res) => req.path.startsWith("/api") ? res.status(404).json({ error
 app.use((err, req, res, next) => {
   if (err instanceof cl.CLError) return res.status(err.status || 502).json({ error: err.message });
   if (err && (err.type === "entity.parse.failed" || err.type === "entity.too.large")) { console.warn(`[http] ${err.type} on ${req.method} ${req.path}`); return res.status(err.status || 400).json({ error: "Bad request" }); }
+  if (err && err.status >= 400 && err.status < 500 && err.message && !err.type) return res.status(err.status).json({ error: err.message });   // a plain-English refusal raised on purpose
   console.error(err);
   res.status(500).json({ error: "Server error" });
 });

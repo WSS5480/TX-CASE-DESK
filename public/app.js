@@ -21,7 +21,7 @@ async function api(path, opts = {}) {
 let META = null, me = null, tab = "today";
 const VIEWS = {}; // extra views registered by practice.js
 let moreOpen = false;
-const caseF = { view: "mine", county: "", type: "", attorney: "" };
+const caseF = { view: "mine", county: "", type: "", attorney: "", stage: "", sort: "" };
 let firmUsers = null;
 let inboxUnread = 0;
 const law = { q: "", court: "", after: "", county: "", results: null, open: null, issues: "", rkCounty: "", rank: null };
@@ -619,6 +619,114 @@ function fail(err) {
 
 // ---------------- pending cases ----------------
 const TYPES = ["Civil – Contract", "Civil – Personal Injury", "Civil – DTPA / Consumer", "Civil – Real Property", "Eviction", "Family", "Probate", "Criminal – Felony", "Criminal – Misdemeanor", "Other"];
+
+// ---------------- Word-style notes (shared by the Cases list, Add case and the case screen) ----------------
+// Only plain formatting survives (bold, italic, underline, lists, headings, paragraphs). The server cleans it the same way.
+const RT_OK = new Set(["p", "br", "b", "strong", "i", "em", "u", "ul", "ol", "li", "div", "h3", "blockquote"]);
+function safeHtml(html) {   // same rules as the server's richtext.js: plain formatting only, every tag closed
+  const s = String(html == null ? "" : html), low = s.toLowerCase(), out = [], open = [], tag = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)\b[^<>]*>/y;
+  const DROP = /^(script|style|iframe|object|embed|template|svg|math|head|title|textarea|xml|noscript|select|option|noembed|noframes)$/, tx = t => t.replace(/&(?!#?[a-z0-9]+;)/gi, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  let i = 0;
+  while (i < s.length) {
+    const lt = s.indexOf("<", i); if (lt < 0) { out.push(tx(s.slice(i))); break; }
+    out.push(tx(s.slice(i, lt)));
+    if (s.startsWith("<!--", lt)) { const e = s.indexOf("-->", lt + 4); i = e < 0 ? s.length : e + 3; continue; }
+    tag.lastIndex = lt; const m = tag.exec(s); if (!m) { out.push("&lt;"); i = lt + 1; continue; }
+    i = tag.lastIndex; const close = m[1] === "/", t = m[2].toLowerCase();
+    if (!close && DROP.test(t)) { const e = low.indexOf("</" + t, i); if (e < 0) i = s.length; else { const g = s.indexOf(">", e); i = g < 0 ? s.length : g + 1; } continue; }
+    if (!RT_OK.has(t)) continue;
+    if (t === "br") { out.push("<br>"); continue; }
+    if (!close) { if (open.length >= 50) continue; out.push(`<${t}>`); open.push(t); continue; }   // nesting capped: keeps a hostile paste fast
+    const k = open.lastIndexOf(t); if (k < 0) continue; while (open.length > k) out.push(`</${open.pop()}>`);
+  }
+  while (open.length) out.push(`</${open.pop()}>`);
+  return out.join("");
+}
+const isRichText = s => /<(p|br|b|strong|i|em|u|ul|ol|li|div|h3|blockquote)\b[^<>]*>/i.test(String(s || ""));
+const renderNotes = s => isRichText(s) ? `<div class="rtv">${safeHtml(s)}</div>` : `<div class="rtv" style="white-space:pre-wrap">${esc(s || "")}</div>`;
+function richEditor(name, value, label = "Notes", ph = "Type or dictate notes…") {
+  const B = (cmd, txt, tip, arg = "") => `<button type="button" data-rc="${cmd}" data-ra="${arg}" title="${tip}" aria-label="${tip}">${txt}</button>`;
+  return `<div class="rte"><div class="rtb" role="toolbar" aria-label="${esc(label)} formatting">${B("bold", "<b>B</b>", "Bold")}${B("italic", "<i>I</i>", "Italic")}${B("underline", "<u>U</u>", "Underline")}<span class="rsep"></span>${B("insertUnorderedList", "•&nbsp;List", "Bulleted list")}${B("insertOrderedList", "1.&nbsp;List", "Numbered list")}<span class="rsep"></span>${B("formatBlock", "Heading", "Heading", "h3")}${B("formatBlock", "Text", "Normal paragraph", "p")}${B("removeFormat", "Clear", "Clear formatting")}</div>
+    <div class="rta" contenteditable="true" role="textbox" aria-multiline="true" aria-label="${esc(label)}" data-ph="${esc(ph)}">${isRichText(value) ? safeHtml(value) : esc(value || "").replace(/\n/g, "<br>")}</div><input type="hidden" name="${esc(name)}"></div>`;
+}
+function wireRte(root) {
+  (root || document).querySelectorAll(".rte").forEach(w => {
+    if (w.dataset.wired) return; w.dataset.wired = 1;
+    const ed = w.querySelector(".rta"), hid = w.querySelector("input[type=hidden]");
+    const sync = () => { const h = ed.innerHTML.trim(), blank = /^(<br>|<p><br><\/p>|<div><br><\/div>|\s|&nbsp;)*$/.test(h);
+      hid.value = blank ? "" : isRichText(h) ? h : `<p>${h}</p>`;   // the editor always saves formatted text, so "&" and "<" come back as typed
+      ed.classList.toggle("empty", blank); };
+    const state = () => w.querySelectorAll("[data-rc=bold],[data-rc=italic],[data-rc=underline],[data-rc=insertUnorderedList],[data-rc=insertOrderedList]").forEach(b => { let on = false; try { on = document.queryCommandState(b.dataset.rc); } catch (e) {} b.setAttribute("aria-pressed", on ? "true" : "false"); });
+    document.addEventListener("selectionchange", () => { if (document.activeElement === ed) state(); });
+    try { document.execCommand("defaultParagraphSeparator", false, "p"); } catch (e) {}
+    w.querySelectorAll("[data-rc]").forEach(b => {
+      b.addEventListener("mousedown", e => e.preventDefault());   // keep the cursor where it was
+      b.onclick = () => { ed.focus(); const a = b.dataset.ra; document.execCommand(b.dataset.rc, false, a ? `<${a}>` : null); sync(); state(); };
+    });
+    ed.addEventListener("input", sync);
+    ed.addEventListener("paste", e => {   // pasting from Word or a web page keeps the formatting, drops everything else
+      const cd = e.clipboardData; if (!cd) return; e.preventDefault();
+      const h = cd.getData("text/html"); h ? document.execCommand("insertHTML", false, safeHtml(h.replace(/^[\s\S]*<body[^>]*>|<\/body>[\s\S]*$/gi, ""))) : document.execCommand("insertText", false, cd.getData("text/plain")); sync();
+    });
+    w.syncNow = sync; sync();
+  });
+}
+const syncRte = root => (root || document).querySelectorAll(".rte").forEach(w => w.syncNow && w.syncNow());
+
+// ---------------- Dictation: a mic on whatever you're typing in ----------------
+// Uses the browser's own speech recognition (Chrome, Edge, Safari). Phones also have the keyboard's mic.
+(function dictation() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition; if (!SR) return;
+  const btn = document.createElement("button"); btn.type = "button"; btn.className = "mic"; btn.hidden = true;
+  btn.setAttribute("aria-label", "Dictate"); btn.title = "Dictate (tap again to stop)";
+  btn.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a1 1 0 1 1 2 0 7 7 0 0 1-6 6.92V21h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2.08A7 7 0 0 1 5 12a1 1 0 1 1 2 0 5 5 0 0 0 10 0Z"/></svg>`;
+  const ok = el => el && !el.disabled && !el.readOnly && !el.closest("[data-nomic]") && ((el.classList && el.classList.contains("rta")) || el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && /^(text|search)$/i.test(el.getAttribute("type") || "text")));
+  let field = null, rec = null, on = false, raf = 0, told = false;
+  const gone = () => { if (field && !document.body.contains(field)) { stop(); btn.hidden = true; field = null; return true; } return false; };
+  const place = () => { if (gone() || !field || btn.hidden) return; const r = field.getBoundingClientRect(), multi = field.tagName !== "INPUT";
+    if (r.bottom < 0 || r.top > innerHeight) { btn.style.visibility = "hidden"; return; } btn.style.visibility = "";
+    btn.style.top = Math.round(scrollY + r.top + (multi ? 6 : Math.max(0, (r.height - 32) / 2))) + "px"; btn.style.left = Math.round(scrollX + r.right - 38) + "px"; };
+  const replace = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(place); };
+  const cap = (t, before) => /(^|[.!?]\s*|\n\s*)$/.test(before) ? t.replace(/^\s*\w/, c => c.toUpperCase()) : t;
+  function words(t) { return t.replace(/\s*\b(period|full stop)\b/gi, ".").replace(/\s*\bcomma\b/gi, ",").replace(/\s*\bquestion mark\b/gi, "?").replace(/\s*\bcolon\b/gi, ":").replace(/\s*\bsemicolon\b/gi, ";")
+    .replace(/\s*\bnew paragraph\b\s*/gi, "\n\n").replace(/\s*\bnew line\b\s*/gi, "\n"); }
+  function insert(raw) {
+    if (!field || !document.body.contains(field)) return stop();
+    let t = words(raw.trim()); if (!t) return;
+    if (field.tagName === "INPUT" || field.tagName === "TEXTAREA") {
+      if (field.tagName === "INPUT") t = t.replace(/\n+/g, " ");
+      const a = field.selectionStart ?? field.value.length, b = field.selectionEnd ?? a, before = field.value.slice(0, a);
+      t = cap(t, before); if (before && !/[\s\n]$/.test(before) && !/^[.,?:;\n]/.test(t)) t = " " + t;
+      field.setRangeText(t, a, b, "end"); field.dispatchEvent(new Event("input", { bubbles: true }));
+    } else {
+      field.focus(); const parts = t.split(/(\n+)/); let brk = false;
+      for (const p of parts) { if (!p) continue; if (/^\n\n/.test(p)) { document.execCommand("insertParagraph"); brk = true; } else if (/^\n/.test(p)) { document.execCommand("insertLineBreak"); brk = true; } else {
+        const sel = getSelection(), pre = brk ? "" : sel && sel.anchorNode && sel.anchorNode.nodeType === 3 ? String(sel.anchorNode.textContent || "").slice(0, sel.anchorOffset) : "";
+        let q = cap(p.trim(), brk ? "\n" : pre); if (pre && !/\s$/.test(pre) && !/^[.,?:;]/.test(q)) q = " " + q; document.execCommand("insertText", false, q); brk = false; } }
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }
+  function start() {
+    if (!told) { told = true; toast("Dictating — speak, then tap the mic to stop. Say \"period\", \"comma\", \"new line\" or \"new paragraph\"."); }
+    try { rec = new SR(); } catch (e) { return toast("Dictation isn't available in this browser."); }
+    rec.lang = navigator.language || "en-US"; rec.continuous = true; rec.interimResults = false;
+    rec.onresult = ev => { for (let i = ev.resultIndex; i < ev.results.length; i++) if (ev.results[i].isFinal) insert(ev.results[i][0].transcript); };
+    rec.onerror = ev => { if (/not-allowed|service-not-allowed|audio-capture/.test(ev.error)) { toast(ev.error === "audio-capture" ? "No microphone found." : "The microphone is blocked. Allow it for this site in your browser settings, then tap the mic again."); stop(); } };
+    let restarts = []; rec.onend = () => { if (!on) return; if (gone()) return;   // keeps listening until you tap stop (but gives up if it keeps failing)
+      const now = Date.now(); restarts = restarts.filter(t => now - t < 15000); restarts.push(now);
+      if (restarts.length > 4) { stop(); return toast("Dictation stopped. Tap the mic to try again."); }
+      setTimeout(() => { if (on && rec) { try { rec.start(); } catch (e) { stop(); } } }, 250); };
+    try { rec.start(); on = true; btn.classList.add("rec"); btn.setAttribute("aria-pressed", "true"); btn.title = "Stop dictating"; } catch (e) { stop(); }
+  }
+  function stop() { on = false; btn.classList.remove("rec"); btn.setAttribute("aria-pressed", "false"); btn.title = "Dictate (tap again to stop)"; try { rec && rec.stop(); } catch (e) {} rec = null; }
+  btn.addEventListener("pointerdown", e => e.preventDefault()); btn.addEventListener("mousedown", e => e.preventDefault());   // the text box keeps the cursor
+  btn.onclick = () => on ? stop() : start();
+  document.addEventListener("focusin", e => { const t = e.target; if (t === btn) return; if (ok(t)) { if (on && t !== field) stop(); field = t; field.classList.add("hasmic"); btn.hidden = false; place(); } else if (!on) btn.hidden = true; });
+  document.addEventListener("focusout", e => { const t = e.target; setTimeout(() => { if (!on && document.activeElement !== field) { btn.hidden = true; if (t && t.classList) t.classList.remove("hasmic"); } }, 120); });
+  addEventListener("scroll", replace, true); addEventListener("resize", replace); document.addEventListener("input", replace, true);
+  const ready = () => { document.body.appendChild(btn); const a = document.getElementById("app"); if (a) new MutationObserver(() => gone()).observe(a, { childList: true }); }; document.body ? ready() : addEventListener("DOMContentLoaded", ready);
+})();
+
 async function casesView() {
   const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
   const app = $("#app");
@@ -636,20 +744,24 @@ async function casesView() {
    <div><label>Show</label><select id="v"><option value="mine">${me.sees_firm ? "My cases" : "My cases (and cases I'm on)"}</option>${me.sees_firm && me.firm_kind !== "solo" ? `<option value="firm">Whole firm (my counties)</option>` : ""}<option value="tracked">Tracked cases</option><option value="watched">Watching court dates</option><option value="alerts">Alerts (dates, filings, case law)</option></select></div>
    ${me.role === "admin" ? `<div><label>Attorney</label><select id="af2"><option value="">All attorneys</option>${(firmUsers || []).filter(u => u.role !== "paralegal").map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("")}</select></div>` : ""}
    <div><label>County</label><select id="cf"><option value="">All my counties</option>${me.counties.map(c => `<option>${esc(c)}</option>`).join("")}</select></div>
-   <div><label>Case type</label><select id="tf"><option value="">All types</option>${TYPES.map(t => `<option>${t}</option>`).join("")}</select></div></div></div>
+   <div><label>Case type</label><select id="tf"><option value="">All types</option>${TYPES.map(t => `<option>${t}</option>`).join("")}</select></div>
+   <div><label for="sf">Stage</label><select id="sf"><option value="">All stages</option>${(META.stages || []).map(t => `<option>${esc(t)}</option>`).join("")}<option value="none">No stage set</option></select></div>
+   <div><label for="so">Sort by</label><select id="so"><option value="">Alerts, then newest filed</option><option value="stage">Stage (Intake → Closed)</option><option value="stage_desc">Stage (Closed → Intake)</option><option value="style">Case name A–Z</option><option value="updated">Recently updated</option></select></div></div></div>
   <div class="row" style="margin:0 0 12px"><button class="btn sm ghost" id="watchAll">Watch court dates on all ${caseF.attorney && firmUsers ? esc((firmUsers.find(u => u.id === +caseF.attorney) || {}).name || "") + "'s" : "my"} cases</button></div>
   <details class="card" id="addBox"><summary>+ Add a case</summary><br>${caseForm()}</details>
   <details class="card"><summary>Import CSV</summary><p class="mute">Header row with: county, cause_no, court, style, case_type, filed_date (YYYY-MM-DD), status, next_setting, notes</p>
    <input type="file" id="csvFile" accept=".csv,text/csv"><br><br><textarea id="csv" placeholder="county,cause_no,court,style,case_type,filed_date,status,next_setting"></textarea>
    <div class="err" id="csvErr"></div><button class="btn" id="imp">Import</button></details>
   <div class="mute" style="margin:0 4px 8px">${cs.length} case${cs.length === 1 ? "" : "s"}</div>
-  ${cs.map(caseCard).join("") || `<div class="card mute">No cases here yet.</div>`}`;
+  ${(/^stage/.test(caseF.sort) ? cs.map((c, i) => (i === 0 || (cs[i - 1].stage || "") !== (c.stage || "") ? `<h3 class="stgh">${esc(c.stage || "No stage set")} <span class="mute">${cs.filter(x => (x.stage || "") === (c.stage || "")).length}</span></h3>` : "") + caseCard(c)) : cs.map(caseCard)).join("") || `<div class="card mute">No cases here yet.</div>`}`;
   $("#goCourt").onclick = () => { tab = "court"; renderNav(); show(); };
   if ($("#seeAlerts")) $("#seeAlerts").onclick = () => { caseF.view = "alerts"; casesView(); };
   if ($("#af2")) { $("#af2").value = caseF.attorney; $("#af2").onchange = e => { caseF.attorney = e.target.value; if (e.target.value && caseF.view === "mine") caseF.view = "firm"; casesView(); }; }
   const wa = $("#watchAll");
   if (wa) wa.onclick = async () => { try { const r = await api("/api/cases/watch-all", { method: "POST", body: { user_id: +caseF.attorney || null, on: true } }); toast(`Watching court dates on ${r.updated} case(s)`); casesView(); } catch (e) { fail(e); } };
-  $("#v").value = caseF.view; $("#cf").value = caseF.county; $("#tf").value = caseF.type;
+  $("#v").value = caseF.view; $("#cf").value = caseF.county; $("#tf").value = caseF.type; $("#sf").value = caseF.stage; $("#so").value = caseF.sort;
+  $("#sf").onchange = e => { caseF.stage = e.target.value; casesView(); };
+  $("#so").onchange = e => { caseF.sort = e.target.value; casesView(); };
   $("#v").onchange = e => { caseF.view = e.target.value; casesView(); };
   $("#cf").onchange = e => { caseF.county = e.target.value; casesView(); };
   $("#tf").onchange = e => { caseF.type = e.target.value; casesView(); };
@@ -677,15 +789,16 @@ async function casesView() {
 }
 function caseCard(c) {
   const st = /new/i.test(c.status || "") ? "n" : /trial|mediation|hearing/i.test(c.status || "") ? "y" : "g";
-  return `<div class="card" id="case-${c.id}"><div class="row">${c.status ? `<span class="tag ${st}">${esc(c.status)}</span>` : ""}${c.tracked ? `<span class="tag y">★ Tracked</span>` : ""}<span class="mute">${esc(c.county)} County${c.court ? " · " + esc(c.court) : ""}</span></div>
+  const pre = /^PRE-/.test(c.cause_no || "");
+  return `<div class="card" id="case-${c.id}"><div class="row">${c.stage ? `<span class="tag stg">${esc(c.stage)}</span>` : ""}${c.status ? `<span class="tag ${st}">${esc(c.status)}</span>` : ""}${c.tracked ? `<span class="tag y">★ Tracked</span>` : ""}<span class="mute">${esc(c.county)} County${c.court ? " · " + esc(c.court) : ""}</span></div>
    <h3 style="margin-top:6px">${esc(c.style || c.cause_no)}</h3>
-   <div class="kv"><div><b>Cause #</b>${esc(c.cause_no)}</div><div><b>Type</b>${esc(c.case_type || "—")}</div><div><b>Filed</b>${c.filed_date ? String(c.filed_date).slice(0, 10) : "—"}</div>
+   <div class="kv"><div><b>Cause #</b>${pre ? "Not filed yet" : esc(c.cause_no)}</div><div><b>Type</b>${esc(c.case_type || "—")}</div><div><b>Filed</b>${c.filed_date ? String(c.filed_date).slice(0, 10) : "—"}</div>
    <div><b>Next</b>${esc(c.next_setting || "—")}</div><div><b>Appeals to</b>${esc(META.appeals[c.county] || "—")}</div><div><b>Attorney</b>${esc(c.attorney || "—")}</div></div>
    ${c.date_alert ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4;margin:10px 0 0;padding:10px"><b>Court date changed</b><div>${esc(c.date_alert)}</div><div class="mute">${c.date_alert_at ? new Date(c.date_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="ack" style="margin-top:6px">Got it</button></div>` : ""}
    ${c.filing_alert ? `<div class="card" style="background:#e3f4ea;border-color:#bfe3cd;margin:10px 0 0;padding:10px"><b>Court email</b><div style="font-size:14px">${esc(c.filing_alert)}</div><div class="mute">${c.filing_alert_at ? new Date(c.filing_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="fileack" style="margin-top:6px">Got it</button></div>` : ""}
    ${c.law_alert ? `<div class="card" style="background:#e8eefc;border-color:#c9d6f5;margin:10px 0 0;padding:10px"><b>New case law</b><div style="font-size:14px">${esc(c.law_alert)}</div><button class="btn sm" data-a="lawack" style="margin-top:6px">Got it</button></div>` : ""}
    ${c.issues ? `<p class="mute" style="margin:8px 0 0">Issues: ${esc(c.issues)}</p>` : ""}
-   ${c.notes ? `<p class="mute" style="margin:8px 0 0">${esc(c.notes)}</p>` : ""}
+   ${c.notes ? `<div class="cnotes"><b>Notes</b>${renderNotes(c.notes)}</div>` : ""}
    ${c.source === "county_sync" ? `<p class="mute" style="margin:6px 0 0">↻ Pulled from county portal${c.last_synced ? " · " + new Date(c.last_synced).toLocaleString() : ""}</p>` : ""}
    ${c.external_url ? `<a class="btn sm ghost" style="margin-top:8px;display:inline-block;text-decoration:none" href="${esc(c.external_url)}" target="_blank" rel="noopener">Open on county portal ↗</a>` : ""}
    <div class="row" style="margin-top:10px"><button class="btn sm" data-a="open">Open case</button><button class="btn sm ghost" data-a="edit">Edit</button><button class="btn sm ghost" data-a="track">${c.tracked ? "★ Untrack" : "☆ Track"}</button><button class="btn sm" data-a="analyze">Analyze case law</button><button class="btn sm ghost" data-a="law">Search case law</button></div>
@@ -698,23 +811,26 @@ function caseForm(c) {
   const counties = c ? [c.county] : me.counties;
   return `<form><div class="grid">
    <div><label>County</label><select name="county" ${c ? "disabled" : ""}>${counties.map(x => `<option ${c?.county === x ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></div>
-   <div><label>Cause #</label><input name="cause_no" value="${v("cause_no")}" ${c ? "disabled" : "required"}></div>
+   <div><label for="cfStage${c ? c.id : ""}">Stage</label><select name="stage" id="cfStage${c ? c.id : ""}"><option value="">Choose a stage</option>${(META.stages || []).map(t => `<option ${c?.stage === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></div>
+   <div><label>Cause #${c && /^PRE-/.test(c.cause_no) ? " (add it once filed)" : c ? "" : " (blank if not filed yet)"}</label><input name="cause_no" value="${c && /^PRE-/.test(c.cause_no) ? "" : v("cause_no")}" ${c && !/^PRE-/.test(c.cause_no) ? "disabled" : ""} placeholder="${c && /^PRE-/.test(c.cause_no) ? "Not filed yet" : "e.g. C-1234-26-G"}"></div>
    <div class="full"><label>Style (e.g. Smith v. Jones)</label><input name="style" value="${v("style")}"></div>
    <div><label>Court</label><input name="court" value="${v("court")}" placeholder="275th District Court"></div>
    <div><label>Case type</label><select name="case_type"><option value=""></option>${TYPES.map(t => `<option ${c?.case_type === t ? "selected" : ""}>${t}</option>`).join("")}</select></div>
    <div><label>Filed</label><input name="filed_date" type="date" value="${c?.filed_date ? String(c.filed_date).slice(0, 10) : ""}"></div>
-   <div><label>Status</label><input name="status" value="${v("status")}" placeholder="Discovery"></div>
+   <div><label>Court status</label><input name="status" value="${v("status")}" placeholder="What the court shows, e.g. Open"></div>
    <div class="full"><label>Next setting</label><input name="next_setting" value="${v("next_setting")}" placeholder="2026-11-18 – Hearing on MTC"></div>
    <div class="full"><label>Issues (comma-separated — used for case-law analysis)</label><input name="issues" value="${v("issues")}" placeholder="slip and fall, constructive notice, grocery store"></div>
-   <div class="full"><label>Notes</label><input name="notes" value="${v("notes")}"></div>
+   <div class="full"><label>Notes</label>${richEditor("notes", c?.notes || "")}</div>
    ${c ? "" : `<div class="full"><label><input type="checkbox" name="tracked" style="width:auto"> Track this case</label></div>`}
   </div><div class="err"></div><div class="row"><button class="btn">${c ? "Save" : "Add case"}</button>${c ? `<button type="button" class="btn ghost" data-a="cancel">Cancel</button><button type="button" class="btn danger" data-a="del">Delete</button>` : ""}</div></form>`;
 }
 function bindCaseForm(form, c) {
   if (!form) return;
+  wireRte(form);
   form.onsubmit = async e => {
-    e.preventDefault();
+    e.preventDefault(); syncRte(form);
     const b = Object.fromEntries(new FormData(form)); b.tracked = !!b.tracked; if (c) delete b.tracked;
+    if (c && !/^PRE-/.test(c.cause_no)) delete b.cause_no; else if (c && !b.cause_no) delete b.cause_no;
     try { c ? await api(`/api/cases/${c.id}`, { method: "PATCH", body: b }) : await api("/api/cases", { method: "POST", body: b }); toast(c ? "Saved" : "Case added"); casesView(); }
     catch (err) { form.querySelector(".err").textContent = err.message; }
   };

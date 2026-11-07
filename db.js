@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS court_logins (
   UNIQUE (user_id, county)
 );
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS external_url TEXT;
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS stage TEXT;   -- the firm's own stage (Intake, Pre-litigation, Discovery...); status stays the court's
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS last_synced TIMESTAMPTZ;
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS watch_dates BOOLEAN DEFAULT false;
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS date_alert TEXT;

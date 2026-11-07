@@ -1,4 +1,5 @@
 // Word (.docx) drafts filled from the case. Every draft is for the attorney to review and edit before filing.
+const causeNo = c => /^PRE-/.test(String(c.cause_no || "")) ? "__________" : c.cause_no;   // not filed yet: a blank to fill in
 const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, AlignmentType, WidthType, BorderStyle, ImageRun } = require("docx");
 
 const LIST = [
@@ -33,7 +34,7 @@ function caption(c) {
   const rows = Math.max(pt.left.length, right.length);
   const L = Array.from({ length: rows }, (_, i) => pt.left[i] ?? ""), Rr = Array.from({ length: rows }, (_, i) => right[i] ?? "");
   return [
-    para([run(`CAUSE NO. ${c.cause_no}`, { bold: true })], { align: AlignmentType.CENTER, after: 240 }),
+    para([run(`CAUSE NO. ${causeNo(c)}`, { bold: true })], { align: AlignmentType.CENTER, after: 240 }),
     new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, borders: noBorders, rows: [new TableRow({ children: [
       cell(L, 46), cell(Array.from({ length: rows }, () => "§"), 8, AlignmentType.CENTER), cell(Rr, 46)] })] }),
     blank()
@@ -100,22 +101,22 @@ async function render(key, { c, contacts, events, signer, opts }) {
     const upcoming = events.filter(e => e.kind === "hearing" || e.kind === "meeting").slice(0, 4);
     body = [...letterhead(signer), para(new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "America/Chicago" })), blank(),
       para(client ? client.name : "________", { after: 0 }), ...(client && client.address ? addrLines(client.address).map(l => para(l, { after: 0 })) : []), blank(),
-      para([run(`Re: ${c.style || c.cause_no}, Cause No. ${c.cause_no}, ${c.court ? c.court + ", " : ""}${c.county} County, Texas`, { bold: true })]),
+      para([run(`Re: ${c.style || causeNo(c)}, Cause No. ${causeNo(c)}, ${c.court ? c.court + ", " : ""}${c.county} County, Texas`, { bold: true })]),
       para(`Dear ${client ? client.name.split(" ")[0] : "________"}:`),
       para(`I am writing to update you on your case. ${c.status ? `The case is currently at this stage: ${c.status}.` : ""}`, { indent: true }),
       para(upcoming.length ? `Upcoming court dates: ${upcoming.map(e => `${e.date}${e.time ? " at " + e.time : ""} — ${e.title}`).join("; ")}. Please plan to be available, and contact me if you have a conflict.` : "There are no court dates set at this time. I will let you know as soon as one is scheduled.", { indent: true }),
       para("Please call or email me with any questions.", { indent: true }), para("Sincerely,"), blank(), blank(), para(signer.name, { after: 0 }), ...(signer.title ? [para(signer.title, { after: 0 })] : []), para(signer.firm || "", { after: 0 }), ...(signer.phone || signer.firmPhone ? [para(signer.phone || signer.firmPhone, { after: 0 })] : []), para(signer.email || "", { after: 0 })];
   } else if (key === "case_summary") {
     name = "Case Summary";
-    body = [para([run(c.style || c.cause_no, { bold: true, size: 30 })]), para(`Cause No. ${c.cause_no} · ${c.court ? c.court + " · " : ""}${c.county} County, Texas`),
+    body = [para([run(c.style || causeNo(c), { bold: true, size: 30 })]), para(`Cause No. ${causeNo(c)} · ${c.court ? c.court + " · " : ""}${c.county} County, Texas`),
       para(`Status: ${c.status || "—"} · Type: ${c.case_type || "—"} · Attorney: ${c.attorney || "—"} · Filed: ${c.filed_date ? String(c.filed_date instanceof Date ? c.filed_date.toISOString() : c.filed_date).slice(0, 10) : "—"}`),
       para([run("People", { bold: true })], { after: 80 }), ...(contacts.length ? contacts.map(p => para(`${p.role}: ${p.name}${p.company ? ", " + p.company : ""}${p.phone ? " · " + p.phone : ""}${p.email ? " · " + p.email : ""}`, { after: 40 })) : [para("None added yet.")]),
       blank(), para([run("Upcoming dates and deadlines", { bold: true })], { after: 80 }),
       ...(events.length ? events.map(e => para(`${e.date}${e.time ? " " + e.time : ""} — ${e.kind === "deadline" ? "DEADLINE: " : ""}${e.title}${e.cite ? " (" + e.cite + ")" : ""}`, { after: 40 })) : [para("None scheduled.")]),
-      ...(c.issues ? [blank(), para([run("Issues", { bold: true })], { after: 80 }), para(c.issues)] : []), ...(c.notes ? [blank(), para([run("Notes", { bold: true })], { after: 80 }), para(c.notes)] : [])];
+      ...(c.issues ? [blank(), para([run("Issues", { bold: true })], { after: 80 }), para(c.issues)] : []), ...(c.notes ? [blank(), para([run("Notes", { bold: true })], { after: 80 }), ...require("./richtext").toText(c.notes).split("\n").map(l => para(l, { after: 40 }))] : [])];
   } else throw new Error("Unknown template");
   const doc = new Document({ sections: [{ properties: { page: { margin: { top: 1440, bottom: 1440, left: 1440, right: 1440 } } }, children: key === "case_summary" ? body : [draftNote(), ...body] }] });
   const buffer = await Packer.toBuffer(doc);
-  return { buffer, filename: `${name} - ${String(c.cause_no).replace(/[^\w.-]+/g, "_")}.docx` };
+  return { buffer, filename: `${name} - ${String(causeNo(c)).replace(/[^\w.-]+/g, "_")}.docx` };
 }
 module.exports = { list, render };

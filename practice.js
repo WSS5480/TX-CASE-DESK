@@ -720,7 +720,8 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
 
   // ===================== Export / import =====================
   const EXPORTS = {
-    cases: f => q("SELECT c.county, c.cause_no, c.style, c.court, c.case_type, c.filed_date, c.status, c.next_setting, c.notes, c.issues, u.name AS attorney, c.source, c.created_at FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE c.firm_id=$1 ORDER BY c.id", [f]),
+    cases: f => q("SELECT c.county, c.cause_no, c.style, c.court, c.case_type, c.filed_date, c.stage, c.status, c.next_setting, c.notes, c.issues, u.name AS attorney, c.source, c.created_at FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE c.firm_id=$1 ORDER BY c.id", [f])
+      .then(r => { r.rows.forEach(x => { x.notes = require("./richtext").toText(x.notes); }); return r; }),   // Word-style notes as plain text in the export
     contacts: f => q("SELECT kind, name, company, email, phone, address, notes FROM contacts WHERE firm_id=$1 ORDER BY name", [f]),
     calendar: f => q("SELECT e.on_date, e.at_time, e.kind, e.title, e.cite, e.done, c.cause_no, c.style, e.notes FROM events e LEFT JOIN cases c ON c.id=e.case_id WHERE e.firm_id=$1 ORDER BY e.on_date", [f]),
     tasks: f => q("SELECT t.title, t.due_date, t.done, u.name AS assignee, c.cause_no FROM tasks t LEFT JOIN users u ON u.id=t.assignee LEFT JOIN cases c ON c.id=t.case_id WHERE t.firm_id=$1 ORDER BY t.id", [f]),

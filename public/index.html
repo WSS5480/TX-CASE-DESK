@@ -496,6 +496,30 @@ body.devv .shell{min-height:calc(100vh - var(--devh,44px))}
   body.mailmode .fab{display:none}
 }
 @media (min-width:1000px){.mpb{display:none}}
+
+/* Word-style notes */
+.rte{border:1px solid var(--field);border-radius:10px;background:var(--card);overflow:hidden}
+.rte:focus-within{border-color:var(--acc);box-shadow:0 0 0 3px rgba(122,46,46,.12)}
+.rtb{display:flex;flex-wrap:wrap;gap:4px;align-items:center;padding:6px;border-bottom:1px solid var(--line);background:var(--chip)}
+.rtb button{min-width:36px;min-height:34px;padding:4px 8px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--ink);font:500 14px var(--sans);cursor:pointer}
+.rtb button:hover,.rtb button:focus-visible{background:var(--card);border-color:var(--line)}
+.rtb .rsep{width:1px;height:20px;background:var(--line);margin:0 2px}
+.rta{min-height:140px;max-height:60vh;overflow:auto;padding:10px 46px 10px 12px;font:15px/1.55 var(--sans);color:var(--ink);outline:none;overflow-wrap:anywhere}
+.rta.empty:before{content:attr(data-ph);color:var(--mute);pointer-events:none}
+.rta p,.rtv p{margin:0 0 .6em}.rta ul,.rta ol,.rtv ul,.rtv ol{margin:0 0 .6em;padding-left:1.4em}.rta h3,.rtv h3{font-size:16px;margin:.4em 0 .3em}
+.rtv{font-size:14px;color:var(--ink2);overflow-wrap:anywhere}.rtv>:last-child{margin-bottom:0}
+.cnotes{margin:10px 0 0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:#fbfaf7}.cnotes>b{display:block;font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--mute);margin-bottom:4px}
+.tag.stg{background:#e8eefc;color:#1d3a7a}
+.stgh{margin:16px 4px 8px;font-size:15px}
+.stsel{width:auto;min-width:0;max-width:100%;padding:4px 8px;min-height:32px;font-size:14px}
+/* Dictation mic: sits inside the box you're typing in */
+.mic{position:absolute;z-index:60;width:32px;height:32px;border-radius:50%;border:1px solid var(--line);background:var(--card);color:var(--acc);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);padding:0}
+.mic[hidden]{display:none}
+.mic:hover{background:var(--chip)}
+.mic.rec{background:var(--bad);color:#fff;border-color:var(--bad);animation:micp 1.4s ease-in-out infinite}
+@keyframes micp{0%,100%{box-shadow:0 0 0 0 rgba(180,35,24,.45)}50%{box-shadow:0 0 0 7px rgba(180,35,24,0)}}
+@media (prefers-reduced-motion:reduce){.mic.rec{animation:none}}
+input.hasmic,textarea.hasmic{padding-right:44px}
 </style>
 </head>
 <body class="out">
