@@ -198,6 +198,8 @@ async function processEmail(u, { from = "", subject = "", text, html, ext_id = n
   // "Both" mode: one court email can reach the shared inbox AND the attorney's own mailbox. The case is already updated;
   // list it once. Outlook and Gmail give each copy its own id, so a copy also counts as the same email when the sender
   // and subject match within 10 minutes. The second copy is kept as a hidden marker so later syncs skip it.
+  // court settings tables (docket reminders): hearings on the calendar, next court dates, missing cases — before the email is saved so its case links are stored
+  if (kind === "research_alert") { try { const st = await applySettings({ ...u, id: shared ? owner : u.id }, { from, subject, html, body }); for (const id of st.caseIds || []) if (!matched.includes(id)) matched.push(id); } catch (e) { console.warn("[inbound] settings table:", e.message); } }
   const fromAddr = String(from).slice(0, 200);
   let dupe = false;
   if (shared && owner && ext_id && (await q("SELECT 1 FROM inbound_emails WHERE user_id=$1 AND ext_id=$2", [owner, ext_id])).rowCount) dupe = true;
@@ -253,4 +255,99 @@ function summarize(e, caseMap = {}) {
   return { type, dates, lines, links, cases, action };
 }
 
-module.exports = { processEmail, parseNotice, summarize, handle, tokenFor, addressFor, causesIn, countyIn, attorneyIn };
+
+// ---------- Court settings tables (county clerk "docket reminder" emails and similar) ----------
+// A table whose headings include a case number and a date (e.g. Hidalgo County Clerk: Court Location | Case Nbr | Style |
+// Hearing Type | Hearing Date | Start Time). Every row becomes a hearing on the case attorney's calendar, the case's next
+// court date is updated, and a case the firm doesn't have yet is added (the clerk's own record, addressed to the attorney).
+const pad2 = n => String(n).padStart(2, "0");
+function parseSettingsTable(html) {
+  const rows = [];
+  if (!html || !/<table/i.test(html)) return rows;
+  const $ = require("cheerio").load(html);
+  $("table").each((_, t) => {
+    const trs = $(t).find("tr").toArray(); if (trs.length < 2) return;
+    const cells = tr => $(tr).children("th,td").toArray().map(c => $(c).text().replace(/\s+/g, " ").trim());
+    const hi = trs.findIndex(tr => { const c = cells(tr).join("|").toLowerCase().replace(/\s+/g, ""); return /(case|cause)(nbr|no|number|#)?/.test(c) && /date/.test(c); });
+    if (hi < 0) return;
+    const H = cells(trs[hi]).map(h => h.toLowerCase().replace(/[^a-z#]/g, ""));
+    const col = re => H.findIndex(h => re.test(h));
+    const ci = { cause: col(/^(case|cause)(nbr|no|number|#)?$|casenumber|causenumber|causeno|caseno/), date: col(/date/), time: col(/time/),
+      type: col(/hearingtype|settingtype|eventtype|^type$|^hearing$|^setting$|description|event/), court: col(/court|location|judge/), style: col(/style|parties|casename|title/) };
+    if (ci.cause < 0 || ci.date < 0) return;
+    for (const tr of trs.slice(hi + 1)) {
+      const c = cells(tr); if (c.length < 2) continue;
+      const cause = String(c[ci.cause] || "").replace(/\s+/g, "").toUpperCase();
+      const dm = String(c[ci.date] || "").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+      if (!/\d/.test(cause) || cause.length < 5 || !dm) continue;
+      const tm = String(ci.time >= 0 ? c[ci.time] : c[ci.date]).replace(/\s+/g, "").match(/(\d{1,2}):(\d{2})([AP])\.?M/i);
+      rows.push({ cause, date: `${dm[3]}-${pad2(dm[1])}-${pad2(dm[2])}`, time: tm ? `${+tm[1]}:${tm[2]} ${tm[3].toUpperCase()}M` : null,
+        type: ci.type >= 0 ? c[ci.type] || null : null, court: ci.court >= 0 ? c[ci.court] || null : null, style: ci.style >= 0 ? c[ci.style] || null : null });
+    }
+  });
+  return rows;
+}
+const countyFromSender = from => { const m = String(from || "").toLowerCase().match(/@(?:[a-z0-9-]+\.)*co\.([a-z-]+)\.tx\.us\b/); if (!m) return null;
+  const n = m[1].replace(/-/g, " ").replace(/\b\w/g, x => x.toUpperCase()); return COUNTIES.includes(n) ? n : null; };
+async function applySettings(u, { from, subject, html, body }) {
+  const dom = (String(from || "").toLowerCase().match(/@([a-z0-9.-]+)/) || [])[1] || "";
+  if (!/(\.tx\.us|(^|\.)txcourts\.gov)$/.test(dom)) return { settings: 0 };                    // only the court's / clerk's own addresses
+  const rows = parseSettingsTable(html).filter(r => causesIn(r.cause).length);   // a real cause number, not an invoice or file number
+  if (!rows.length) return { settings: 0 };
+  const lawyer = u.id && !u.shared && ((await q("SELECT role FROM users WHERE id=$1", [u.id])).rows[0] || {}).role !== "paralegal";
+  const county = countyFromSender(from) || countyIn(subject + "\n" + String(body || "").slice(0, 3000)) || (u.counties && u.counties.length === 1 ? u.counties[0] : null);
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+  let added = 0, created = 0; const caseIds = [];
+  for (const r of rows) {
+    let c = (await q(`SELECT id, user_id, next_setting FROM cases WHERE firm_id=$1 AND upper(cause_no)=$2 ${county ? "AND county=$3" : ""} ORDER BY id LIMIT 2`, county ? [u.firm_id, r.cause, county] : [u.firm_id, r.cause])).rows;
+    if (c.length > 1 && !u.shared) c = c.filter(x => x.user_id === u.id);
+    let cs = c.length === 1 ? c[0] : null;                        // the same cause # in two of your counties and no way to tell: skipped
+    if (!cs && !c.length && county && lawyer) {                   // addressed to this attorney by the clerk: add the case (never a paralegal's)
+      const ins = await q(`INSERT INTO cases(firm_id,user_id,county,cause_no,court,style,status,source,tracked,watch_dates) VALUES($1,$2,$3,$4,$5,$6,'Active','email',true,true)
+        ON CONFLICT DO NOTHING RETURNING id, user_id, next_setting`, [u.firm_id, u.id, county, r.cause, r.court, r.style]);
+      if (ins.rows[0]) { cs = ins.rows[0]; created++; require("./practice").onCaseCreated({ ...ins.rows[0], firm_id: u.firm_id, county, cause_no: r.cause }, u.id).catch(() => {}); }
+    }
+    if (!cs) continue;
+    caseIds.push(cs.id);
+    const title = (r.type || "Court setting").slice(0, 200);
+    const has = await q("SELECT 1 FROM events WHERE case_id=$1 AND on_date=$2 AND kind='hearing' AND lower(title)=lower($3)", [cs.id, r.date, title]);
+    if (!has.rowCount) {
+      await q(`INSERT INTO events(firm_id, case_id, user_id, kind, title, on_date, at_time, location, notes) VALUES($1,$2,$3,'hearing',$4,$5,$6,$7,$8)`,
+        [u.firm_id, cs.id, cs.user_id, title, r.date, r.time, r.court, `From the court's settings email: ${String(subject || "").slice(0, 160)}`]);
+      added++;
+    }
+    // next court date: the earliest upcoming setting
+    if (r.date >= today) {
+      const cur = String(cs.next_setting || "").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/), curIso = cur ? `${cur[3]}-${pad2(cur[1])}-${pad2(cur[2])}` : null;
+      const typed = !curIso && String(cs.next_setting || "").trim();   // a setting typed in words ("Trial week of Jan 5") is kept
+      if (!typed && (!curIso || curIso < today || r.date < curIso)) {
+        const ns = `${r.date.slice(5, 7)}/${r.date.slice(8, 10)}/${r.date.slice(0, 4)}${r.time ? " " + r.time : ""} – ${title}${r.court ? " (" + r.court + ")" : ""}`;
+        if (ns !== cs.next_setting) {
+          await q("INSERT INTO case_changes(case_id, field, old_value, new_value) VALUES($1,'next_setting',$2,$3)", [cs.id, cs.next_setting, ns]);
+          await q("UPDATE cases SET next_setting=$2, date_alert=$3, date_alert_at=now(), updated_at=now() WHERE id=$1", [cs.id, ns, `${cs.next_setting || "No setting"} → ${ns}`]);
+          cs.next_setting = ns;                                      // the next row for this case compares against this one
+        }
+      }
+    }
+  }
+  if (added || created) console.log(`[inbound] settings table: ${rows.length} row(s), ${added} hearing(s) added to calendars, ${created} case(s) added`);
+  return { settings: rows.length, added, created, caseIds };
+}
+// once: court settings emails already saved before this existed
+async function backfillSettings() {
+  const done = await q("INSERT INTO tcd_once(k) VALUES ('settings_tables_v1') ON CONFLICT DO NOTHING RETURNING k").catch(() => ({ rows: [] }));
+  if (!done.rows.length) return;
+  // saved court emails only (court addresses, not dismissed), read in small batches
+  let last = 0, seen = 0, n = 0;
+  for (;;) {
+    const { rows } = await q(`SELECT e.id, e.user_id, e.firm_id, e.from_addr, e.subject, e.html, e.body, e.shared, u.counties FROM inbound_emails e LEFT JOIN users u ON u.id=e.user_id
+      WHERE e.id > $1 AND e.kind='research_alert' AND e.dismissed_at IS NULL AND COALESCE(e.routed,'') <> 'duplicate' AND lower(e.from_addr) ~ '(\.tx\.us|txcourts\.gov)>?$'
+        AND e.html ILIKE '%<table%' AND e.html ~* '(case|cause)[[:space:]]*(nbr|no|number|#)' ORDER BY e.id LIMIT 25`, [last]);
+    if (!rows.length) break;
+    for (const r of rows) { last = r.id; seen++; try { const x = await applySettings({ id: r.user_id, firm_id: r.firm_id, shared: !!r.shared, counties: r.counties }, { from: r.from_addr, subject: r.subject, html: r.html, body: r.body }); n += x.added || 0;
+      if (x.caseIds && x.caseIds.length) await q("UPDATE inbound_emails SET matched_case_ids=(SELECT array_agg(DISTINCT x) FROM unnest(COALESCE(matched_case_ids,'{}') || $2::int[]) x) WHERE id=$1", [r.id, x.caseIds]); } catch (e) {} }
+  }
+  if (seen) console.log(`[inbound] settings backfill: ${seen} saved court email(s), ${n} hearing(s) added`);
+}
+
+module.exports = { parseSettingsTable, applySettings, backfillSettings, processEmail, parseNotice, summarize, handle, tokenFor, addressFor, causesIn, countyIn, attorneyIn };

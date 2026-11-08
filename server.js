@@ -1160,4 +1160,6 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 migrate().then(() => app.listen(PORT, () => { console.log("TX Case Desk on :" + PORT); console.log(`Outlook connect: TX Case Desk app ${mail.configured().microsoft ? "ON" : "OFF"} (MS_CLIENT_ID ${process.env.MS_CLIENT_ID ? "set" : "missing"}, MS_CLIENT_SECRET ${process.env.MS_CLIENT_SECRET ? "set" : "missing"}); firms may use their own keys`); sync.startScheduler(); setTimeout(() => mail.rescanOld().then(n => n && console.log(`[mail] rescanned ${n} mailbox(es) back 30 days`)).catch(e => console.error("[mail] rescan", e.message)), 15000);
-  if (process.env.NODE_ENV === "production") setTimeout(() => sync.MODULES.odyssey.probe(CONNECTORS.Hidalgo.url).catch(() => {}), 5000); })).catch(e => { console.error("DB migrate failed", e); process.exit(1); });
+  if (process.env.NODE_ENV === "production") setTimeout(() => sync.MODULES.odyssey.probe(CONNECTORS.Hidalgo.url).catch(() => {}), 5000);
+  // court settings emails saved before the settings reader existed
+  setTimeout(() => inbound.backfillSettings().catch(e => console.warn("[inbound] settings backfill:", e.message)), 8000); })).catch(e => { console.error("DB migrate failed", e); process.exit(1); });
