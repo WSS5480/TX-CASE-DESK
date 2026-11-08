@@ -1145,6 +1145,7 @@ app.delete("/api/research/:id", requireAuth, wrap(async (req, res) => {
 // ---------- practice management (calendar, clients, documents, tasks, billing, trust, portal) ----------
 practice.mount(app, { requireAuth, requireAdmin, wrap, audit });
 require("./mailbox").mount(app, { requireAuth, wrap, audit });   // full mail client (Outlook-style)
+require("./discovery").mount(app, { requireAuth, wrap, audit });   // discovery responses: split, AI draft, attorney approves, serve
 
 // ---------- static + errors ----------
 app.use(express.static(path.join(__dirname, "public"), { index: "index.html", setHeaders: r => r.setHeader("Cache-Control", "no-cache") }));

@@ -1,7 +1,7 @@
 // TX Case Desk User Agreement (terms of service + privacy). Bump VERSION when the text changes:
 // everyone is asked to accept the new version at their next sign-in.
-const VERSION = "2026-11-02";
-const UPDATED = "November 2, 2026";
+const VERSION = "2026-11-08";
+const UPDATED = "November 8, 2026";
 
 const SECTIONS = [
   ["What TX Case Desk is", `
@@ -46,8 +46,16 @@ const SECTIONS = [
       <li>A firm can connect one shared court inbox; notices from it go to the attorney on the case or wait for the people the admin picks to assign them.</li>
       <li>You can disconnect at any time; we then stop reading that account. Court notices already saved to your cases stay with your cases.</li>
     </ul>`],
+  ["AI drafting", `
+    <ul>
+      <li>Some features prepare first drafts with AI, for example answers and objections to discovery requests. To do that, the request and the parts of your case file it needs (case details, parties, your notes, the names of documents on the case, answers you already approved) are sent to Anthropic, which runs the Claude AI model.</li>
+      <li>Anthropic processes this to produce the draft only. Under its commercial terms it does not use your data to train its models.</li>
+      <li>An AI draft is never used or sent on its own. An attorney reviews, edits and approves every item first, and nothing is served until the attorney confirms the recipients. You remain responsible for everything you file or serve.</li>
+      <li>AI can be wrong. Drafts mark facts that are missing from the file as [CONFIRM] or [CLIENT TO PROVIDE]; check them.</li>
+      <li>Dictation (the microphone in text boxes) uses your browser's own speech service (for example Google in Chrome or Apple in Safari), not TX Case Desk.</li>
+    </ul>`],
   ["Other services we use", `
-    <p>To run TX Case Desk we rely on: Render (hosting and database), Microsoft, Google and your email provider (email connection), CourtListener by the Free Law Project (public court opinions), Postmark (receiving forwarded court emails), and Stripe (if you take card payments from clients). Each handles only what it needs for its part, under its own terms.</p>
+    <p>To run TX Case Desk we rely on: Render (hosting and database), Microsoft, Google and your email provider (email connection), CourtListener by the Free Law Project (public court opinions), Postmark (receiving forwarded court emails), Anthropic (AI drafting, described above), and Stripe (if you take card payments from clients). Each handles only what it needs for its part, under its own terms.</p>
     <p>County and state court websites: if you give TX Case Desk your own court-portal login, it signs in as you only to read your cases. It stops at any human-verification check (such as a CAPTCHA) and never tries to get around one.</p>`],
   ["Trial, plans and payment", `
     <ul>

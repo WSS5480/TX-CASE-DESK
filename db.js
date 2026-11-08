@@ -441,6 +441,35 @@ CREATE TABLE IF NOT EXISTS trust_recon (
   ok BOOLEAN, created_by INT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS cases_firm_county ON cases(firm_id, county);
+-- Discovery responses: the other side's requests, split into items; AI drafts, the attorney approves, then it's served.
+CREATE TABLE IF NOT EXISTS discovery_sets (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  case_id INT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,                     -- "Plaintiff's First Set of Interrogatories"
+  response_title TEXT,                     -- "Defendant's Responses to ..."
+  served_on DATE, served_by TEXT DEFAULT 'email', due_on DATE,
+  source_doc INT REFERENCES documents(id) ON DELETE SET NULL,
+  event_id INT REFERENCES events(id) ON DELETE SET NULL,
+  status TEXT DEFAULT 'draft',             -- draft | sent
+  ai_status TEXT, ai_error TEXT, ai_at TIMESTAMPTZ,
+  sent_at TIMESTAMPTZ, sent_to TEXT, sent_doc INT REFERENCES documents(id) ON DELETE SET NULL, sent_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_by INT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS discovery_items (
+  id SERIAL PRIMARY KEY,
+  set_id INT NOT NULL REFERENCES discovery_sets(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'rog',        -- rog | rfp | rfa | rfd | other
+  n INT NOT NULL,
+  request TEXT NOT NULL,
+  objections TEXT[] DEFAULT '{}',
+  objection_note TEXT,
+  answer TEXT,                             -- Word-style (cleaned HTML)
+  ai_answer TEXT, ai_confirm TEXT,         -- what the AI drafted and the facts it says the attorney must confirm
+  approved_by INT REFERENCES users(id) ON DELETE SET NULL, approved_at TIMESTAMPTZ,
+  added_by_hand BOOLEAN DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS discovery_items_set ON discovery_items(set_id, kind, n);
 -- Closed cases: a final disposition in the court's own record moves the case to stage Closed (off the active list).
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ;
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS closed_why TEXT;

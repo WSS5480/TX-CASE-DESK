@@ -96,4 +96,11 @@ function compute(ruleKey, triggerDate, opts = {}) {
 }
 const list = () => Object.entries(RULES).map(([k, r]) => ({ key: k, label: r.label, trigger: r.trigger, cite: r.cite, group: r.group, mail: !!r.mail, extended: !!r.extended }));
 
-module.exports = { compute, list, nationalHolidays, stateHolidays, iso, parse };
+// "N days after" a date, rolled forward past weekends and legal holidays (TRCP 4). Returns { date, moved: [why] }.
+function daysAfter(start, n) {
+  const d0 = parse(start); if (!d0) return null; const y = d0.getUTCFullYear();
+  const H = holidayMaps([y, y + 1]); const moved = [];
+  const d = rollForward(addDays(d0, n), H, moved);
+  return { date: iso(d), moved };
+}
+module.exports = { compute, list, nationalHolidays, stateHolidays, iso, parse, daysAfter };

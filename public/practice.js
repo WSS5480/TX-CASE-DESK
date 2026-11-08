@@ -634,13 +634,13 @@
   async function caseHub(id) {
     const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
     subView = true; if (window.leaveMail) leaveMail(); else document.body.classList.remove("mailmode"); window.scrollTo(0, 0); $("#app").innerHTML = `<div class="card mute">Loading case…</div>`;
-    let r, cs, tpl, ps; try { [r, cs, tpl, ps] = await Promise.all([api(`/api/cases/${id}/hub`), loadCases(), api("/api/templates"), loadPeople()]); if (!rules) rules = (await api("/api/deadlines/rules")).rules; } catch (e) { return fail(e); }
+    let r, cs, tpl, ps, dsc; try { [r, cs, tpl, ps, dsc] = await Promise.all([api(`/api/cases/${id}/hub`), loadCases(), api("/api/templates"), loadPeople(), api(`/api/cases/${id}/discovery`).catch(() => ({ sets: [] }))]); if (!rules) rules = (await api("/api/deadlines/rules")).rules; } catch (e) { return fail(e); }
     const c = r.case, t = todayStr();
     const unbilled = r.time.filter(x => x.billable && !x.invoice_id).reduce((s, x) => s + (x.amount != null ? Number(x.amount) : x.minutes / 60 * x.rate), 0);
     const groups = [...new Set(rules.map(x => x.group))];
     const back = titleOf(tab);
     if (hub.id !== id) { hub.id = id; hub.sec = "overview"; }
-    const SECS = [["overview", "Overview"], ["dates", "Dates", r.events.filter(e => e.date >= t && !e.done).length], ["people", "People", r.contacts.length], ["tasks", "Tasks", r.tasks.filter(x => !x.done).length], ["docs", "Documents", r.documents.length]];
+    const SECS = [["overview", "Overview"], ["dates", "Dates", r.events.filter(e => e.date >= t && !e.done).length], ["people", "People", r.contacts.length], ["tasks", "Tasks", r.tasks.filter(x => !x.done).length], ["docs", "Documents", r.documents.length], ["discovery", "Discovery", dsc.sets.filter(x => x.status !== "sent").length || null]];
     if (isLawyer()) SECS.push(["law", "Case law"], ["billing", "Time & billing"]);
     const st = c.status || "Open", stCls = /closed|dismiss|dispos/i.test(st) ? "k" : /new/i.test(st) ? "n" : "g";
     const up = r.events.filter(e => e.date >= t && !e.done), nextH = up.find(e => e.kind === "hearing");
@@ -693,6 +693,19 @@
           <div class="row"><label style="display:flex;gap:6px;align-items:center;font-size:13px;color:var(--ink)"><input type="checkbox" data-share="${d.id}" ${d.shared ? "checked" : ""} style="width:auto"> Show on client page</label><button class="btn sm ghost" data-docdel="${d.id}" style="margin-left:auto">Delete</button></div></div>`).join("")}
         ${r.emails.length ? `<h3 style="margin-top:12px">Court emails</h3>${r.emails.map(m => `<div style="border-top:1px solid var(--line);padding:6px 0"><a class="link" data-mail="${m.id}">${esc(m.subject || "(no subject)")}</a><div class="mute">${new Date(m.received_at).toLocaleString()}</div></div>`).join("")}` : ""}
         ${!r.documents.length && !r.emails.length ? `<div class="mute" style="margin-top:6px">Upload files, or draft a notice or letter from the case details.</div>` : ""}</div>
+      <div class="card" data-sec="discovery"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Discovery responses</h3><button class="btn sm" id="dsNew">+ Respond to discovery</button></div>
+        <p class="mute" style="margin:6px 0 0">Add the other side's requests (PDF or Word). The app splits them into items, AI drafts the objections and answers from the case file, you edit and approve every one, then one click serves the response.</p>
+        <form id="dsForm" hidden style="margin-top:10px"><div class="grid">
+          <div class="full"><label for="dsDoc">The requests</label><select id="dsDoc"><option value="">Upload a file…</option>${r.documents.filter(d => /pdf|word|text/i.test(d.mime || "") || /\.(pdf|docx|txt)$/i.test(d.name)).map(d => `<option value="${d.id}" ${/interrog|request|admission|production|discovery|RFP|RFA/i.test(d.name) ? "selected" : ""}>${esc(d.name)}</option>`).join("")}<option value="hand">None — I'll type the requests</option></select></div>
+          <div class="full" id="dsUpBox"><label for="dsUp">File (PDF or Word)</label><input type="file" id="dsUp" accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></div>
+          <div><label for="dsServed">Served on</label><input type="date" id="dsServed" value="${t}"></div>
+          <div><label for="dsBy">Served by</label><select id="dsBy"><option value="email">Email</option><option value="efile">eFileTexas</option><option value="mail">Mail (+3 days)</option><option value="hand">Hand delivery</option></select></div>
+          <div class="full" id="dsTitleBox" hidden><label for="dsTitle">What the requests are called</label><input id="dsTitle" placeholder="Plaintiff's First Set of Interrogatories"></div>
+        </div><div class="err" id="dsErr"></div><button class="btn" id="dsGo" style="margin-top:8px">Build the response</button></form>
+        ${dsc.sets.map(x => { const left = Math.round((new Date(x.due_on + "T12:00:00") - new Date(t + "T12:00:00")) / 864e5);
+          return `<div class="dsrow"><div style="min-width:0;flex:1"><a class="link" data-ds="${x.id}" style="font-weight:600">${esc(x.title)}</a>
+            <div class="mute" style="font-size:13px">${x.status === "sent" ? `Served ${esc(new Date(x.sent_at).toLocaleDateString())} to ${esc(x.sent_to || "")}` : `Due ${esc(niceDate(x.due_on))} · ${left < 0 ? `<b style="color:var(--bad)">${-left} day${left === -1 ? "" : "s"} late</b>` : left <= 7 ? `<b style="color:var(--bad)">${left} day${left === 1 ? "" : "s"} left</b>` : `${left} days left`} · ${x.counts.approved} of ${x.counts.total} approved`}</div></div>
+            <span class="tag ${x.status === "sent" ? "g" : x.counts.total && x.counts.approved === x.counts.total ? "y" : "n"}">${x.status === "sent" ? "Served" : x.counts.total && x.counts.approved === x.counts.total ? "Ready to serve" : "In progress"}</span></div>`; }).join("") || `<div class="mute" style="margin-top:8px">No discovery yet.</div>`}</div>
       ${isLawyer() ? `<div data-sec="law">${analysisPanel(c)}</div>` : ""}
       ${isLawyer() ? `<div class="card" data-sec="billing"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Time & billing</h3><button class="btn sm" id="hbTime">+ Time</button></div>
         <div id="hbTimeBox" hidden style="margin-top:8px">${timeForm(cs, c.id)}</div>
@@ -749,6 +762,26 @@
     $("#hbTkF").onsubmit = async e => { e.preventDefault(); try { await api("/api/tasks", { method: "POST", body: { ...Object.fromEntries(new FormData(e.target)), case_id: id } }); reload(); } catch (x) { fail(x); } };
     $$("[data-task]").forEach(x => x.onchange = async () => { await api(`/api/tasks/${x.dataset.task}`, { method: "PATCH", body: { done: x.checked } }); toast(x.checked ? "Done ✓" : "Reopened"); });
     // documents
+    // ---- discovery
+    $("#dsNew").onclick = () => { $("#dsForm").hidden = !$("#dsForm").hidden; dsSync(); };
+    const dsSync = () => { const v = $("#dsDoc").value; $("#dsUpBox").hidden = v !== ""; $("#dsTitleBox").hidden = v !== "hand"; };
+    $("#dsDoc").onchange = dsSync;
+    $$("[data-ds]").forEach(a => a.onclick = () => discoveryView(+a.dataset.ds, id));
+    $("#dsForm").onsubmit = async e => { e.preventDefault(); const btn = $("#dsGo"), err = $("#dsErr"); err.textContent = "";
+      try {
+        let docId = $("#dsDoc").value;
+        if (docId === "") { const f = $("#dsUp").files[0]; if (!f) return err.textContent = "Pick the file with the requests.";
+          if (f.size > 15e6) return err.textContent = "That file is over 15 MB.";
+          btn.disabled = true; btn.textContent = "Reading the requests…";
+          const up = await fetch(`/api/cases/${id}/documents`, { method: "POST", headers: { "X-Requested-With": "tcd", "X-File-Name": encodeURIComponent(f.name), "Content-Type": f.type || "application/octet-stream" }, body: f, credentials: "same-origin" });
+          const uj = await up.json().catch(() => ({})); if (!up.ok) throw new Error(uj.error || "Upload failed"); docId = uj.document.id; }
+        btn.disabled = true; btn.textContent = "Reading the requests…";
+        const body = { served_on: $("#dsServed").value, served_by: $("#dsBy").value };
+        if (docId === "hand") body.title = $("#dsTitle").value || "Discovery requests"; else body.document_id = +docId;
+        const rr = await api(`/api/cases/${id}/discovery`, { method: "POST", body });
+        toast(`${rr.set.counts.total} request${rr.set.counts.total === 1 ? "" : "s"} found · due ${niceDate(rr.set.due_on)} (on the calendar)`); discoveryView(rr.set.id, id);
+      } catch (x) { err.textContent = x.message; btn.disabled = false; btn.textContent = "Build the response"; }
+    };
     $("#docUp").onchange = async e => { for (const f of e.target.files) { if (f.size > 15e6) { toast(`${f.name} is over 15 MB`); continue; }
       const res = await fetch(`/api/cases/${id}/documents`, { method: "POST", headers: { "X-Requested-With": "tcd", "X-File-Name": encodeURIComponent(f.name), "Content-Type": f.type || "application/octet-stream" }, body: f, credentials: "same-origin" });
       if (!res.ok) { const j = await res.json().catch(() => ({})); toast(j.error || "Upload failed"); } } toast("Uploaded"); reload(); };
@@ -766,6 +799,88 @@
       $$("[data-inv]").forEach(x => x.onclick = () => invoiceView(+x.dataset.inv)); }
   }
   window.caseHub = caseHub;
+  // ===================== DISCOVERY RESPONSE EDITOR =====================
+  let dMeta = null;
+  async function discoveryView(setId, caseId) {
+    const __v = ++viewSeq; subView = true; window.scrollTo(0, 0); $("#app").innerHTML = `<div class="card mute">Loading…</div>`;
+    let d; try { if (!dMeta) dMeta = await api("/api/discovery/meta"); d = await api(`/api/discovery/${setId}`); } catch (e) { return fail(e); }
+    if (__v !== viewSeq) return;
+    const { set: S, items, case: C } = d, sent = S.status === "sent", t = todayStr();
+    const left = Math.round((new Date(S.due_on + "T12:00:00") - new Date(t + "T12:00:00")) / 864e5);
+    const KL = dMeta.kinds, total = items.length, appr = items.filter(i => i.approved_at).length;
+    const card = it => `<section class="box dsi${it.approved_at ? " ok" : ""}" id="dsi-${it.id}"><div class="dsih"><b>${esc(KL[it.kind])} No. ${it.n}</b>${it.approved_at ? `<span class="tag g">✓ Approved</span>` : it.ai_answer ? `<span class="tag n">AI draft — review</span>` : ""}${it.added_by_hand ? `<span class="tag k">Added by hand</span>` : ""}</div>
+      <div class="dsreq">${esc(it.request).replace(/\n/g, "<br>")}</div>
+      ${sent ? "" : `<details class="dsobj"${(it.objections || []).length || it.objection_note ? " open" : ""}><summary>Objections${(it.objections || []).length ? ` (${it.objections.length})` : ""}</summary>
+        <div class="objs">${dMeta.objections.map(o => `<label title="${esc(o.text)}"><input type="checkbox" data-obj="${o.k}" ${(it.objections || []).includes(o.k) ? "checked" : ""}> ${esc(o.t)}</label>`).join("")}</div>
+        <label for="on-${it.id}" style="margin-top:6px">Other objection (optional)</label><textarea id="on-${it.id}" data-onote rows="2">${esc(it.objection_note || "")}</textarea></details>`}
+      ${sent ? `<div class="rtv" style="margin-top:6px">${(it.objections || []).length ? `<p><b>Objections:</b> ${it.objections.map(k => esc((dMeta.objections.find(o => o.k === k) || {}).t || k)).join("; ")}</p>` : ""}${renderNotes(it.answer || "")}</div>`
+        : `<label style="margin-top:8px">${it.kind === "rog" ? "Answer" : "Response"}</label>${it.kind === "rfa" ? `<div class="row" style="gap:6px;margin-bottom:6px">${["Admit.", "Deny.", "Cannot admit or deny"].map(x => `<button type="button" class="btn sm ghost" data-rfa="${esc(x)}">${esc(x)}</button>`).join("")}</div>` : ""}
+          ${richEditor("answer", it.answer || "", (KL[it.kind]) + " " + it.n + " answer", "Type, dictate, or let AI draft it…")}
+          ${it.ai_confirm ? `<div class="dsconf"><b>Confirm before approving:</b><ul>${it.ai_confirm.split("\n").filter(Boolean).map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>` : ""}
+          <div class="row" style="margin-top:8px;gap:6px">${isLawyer() ? `<button type="button" class="btn sm${it.approved_at ? " ghost" : ""}" data-approve>${it.approved_at ? "Un-approve" : "✓ Approve"}</button>` : `<span class="mute" style="font-size:13px">An attorney approves</span>`}<button type="button" class="btn sm ghost" data-save>Save</button>${dMeta.ai && !it.approved_at ? `<button type="button" class="btn sm ghost" data-redraft>Redraft with AI</button>` : ""}<button type="button" class="btn sm ghost" data-del style="margin-left:auto">Remove</button></div>`}
+    </section>`;
+    $("#app").innerHTML = `<div class="dsv">
+      <button type="button" class="btn sm ghost" id="dsBack">${ic("back", 16, 2)}Back to the case</button>
+      <h1 class="pt" style="margin:10px 0 2px">${esc(S.title)}</h1><div class="mute">${esc(C.style || "")}${/^PRE-/.test(C.cause_no) ? "" : " · " + esc(C.cause_no)} · ${esc(C.county)} County</div>
+      <div class="dshead">
+        ${sent ? `<div><b>Served</b> ${esc(new Date(S.sent_at).toLocaleString())} to ${esc(S.sent_to || "")}</div>${S.sent_doc ? `<a class="btn sm ghost" href="/api/documents/${S.sent_doc}">Served copy (Word)</a>` : ""}`
+          : `<div><b>Due ${esc(niceDate(S.due_on))}</b> · ${left < 0 ? `<b style="color:var(--bad)">${-left} days late</b>` : `${left} day${left === 1 ? "" : "s"} left`}${items.some(i => i.kind === "rfa") ? ` · <span style="color:var(--bad)">Requests for admission not answered in time are deemed admitted.</span>` : ""}</div>
+          <div class="dsprog" role="progressbar" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${appr}" aria-label="Approved"><span style="width:${total ? Math.round(appr / total * 100) : 0}%"></span></div><div class="mute">${appr} of ${total} approved</div>
+          <div class="row" style="gap:6px;margin-top:8px">${dMeta.ai ? `<button class="btn sm" id="dsAi">${S.ai_status === "running" || d.drafting ? "AI is drafting…" : "Draft all with AI"}</button>` : `<span class="mute" style="font-size:13px">AI drafting turns on when the Anthropic key is added in Render.</span>`}
+            <a class="btn sm ghost" href="/api/discovery/${S.id}/docx">Preview Word</a><button class="btn sm ghost" id="dsAdd">+ Add a missing request</button>${isLawyer() ? `<button class="btn sm ghost danger" id="dsDel">Delete</button>` : ""}</div>
+          ${S.ai_status === "error" ? `<div class="err" style="margin-top:6px">AI draft didn't finish: ${esc(S.ai_error || "")}</div>` : ""}`}
+      </div>
+      ${sent ? "" : `<form id="dsAddF" hidden class="box" style="padding:12px 16px"><div class="grid"><div><label for="daK">Type</label><select id="daK">${Object.entries(KL).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select></div><div><label for="daN">Number</label><input id="daN" type="number" min="1" placeholder="next"></div>
+        <div class="full"><label for="daR">The request</label><textarea id="daR" rows="3" required></textarea></div></div><button class="btn sm" style="margin-top:8px">Add</button></form>`}
+      ${items.map(card).join("") || `<div class="card mute">No requests yet. Add them with “+ Add a missing request”.</div>`}
+      ${sent ? "" : `<section class="box" id="dsSend" style="padding:14px 18px"><h2 style="margin:0 0 6px">Serve the response</h2>
+        ${appr < total || !total ? `<p class="mute" style="margin:0">Approve every item first (${total - appr} to go). The Word response then goes from your own email to opposing counsel, with a certificate of service${items.some(i => i.kind === "rog") ? " and a verification page for your client to sign" : ""}.</p>`
+          : `<label for="dsTo">Send to (opposing counsel)</label><textarea id="dsTo" rows="2" placeholder="name@lawfirm.com, other@lawfirm.com">${esc(d.recipients.map(x => x.email).join(", "))}</textarea>
+             <label for="dsMsg">Note in the email (optional)</label><textarea id="dsMsg" rows="2"></textarea>
+             ${items.some(i => i.kind === "rog") ? `<p class="mute" style="font-size:13px">Interrogatory answers must be verified by your client (TRCP 197.2(d)). The verification page is in the Word file; send the signed page when you have it.</p>` : ""}
+             <div class="err" id="dsSendErr"></div>${isLawyer() ? `<button class="btn" id="dsServe" style="width:100%;padding:12px;white-space:normal;overflow-wrap:anywhere;height:auto">Serve response to opposing counsel</button>` : `<p class="mute">An attorney serves the response.</p>`}`}</section>`}
+    </div>`;
+    $("#dsBack").onclick = () => caseHub(caseId || C.id);
+    if (sent) return;
+    wireRte($("#app"));
+    const reload = () => discoveryView(setId, caseId);
+    const bodyOf = sec => { syncRte(sec); return { answer: sec.querySelector("input[name=answer]").value, objections: [...sec.querySelectorAll("[data-obj]:checked")].map(x => x.dataset.obj), objection_note: (sec.querySelector("[data-onote]") || {}).value || "" }; };
+    items.forEach(it => {
+      const sec = $(`#dsi-${it.id}`); if (!sec) return;
+      sec.querySelector("[data-save]").onclick = async () => { try { await api(`/api/discovery/items/${it.id}`, { method: "PATCH", body: bodyOf(sec) }); toast("Saved"); reload(); } catch (e) { fail(e); } };
+      if (sec.querySelector("[data-approve]")) sec.querySelector("[data-approve]").onclick = async () => { try { await api(`/api/discovery/items/${it.id}`, { method: "PATCH", body: it.approved_at ? { approved: false } : { ...bodyOf(sec), approved: true } }); reload(); } catch (e) { fail(e); } };
+      const rd = sec.querySelector("[data-redraft]"); if (rd) rd.onclick = async () => { try { await api(`/api/discovery/${setId}/draft`, { method: "POST", body: { items: [it.id] } }); toast("Redrafting…"); poll(); } catch (e) { fail(e); } };
+      sec.querySelector("[data-del]").onclick = e => sure(e.currentTarget, async () => { await api(`/api/discovery/items/${it.id}`, { method: "DELETE" }); reload(); });
+      sec.querySelectorAll("[data-rfa]").forEach(b => b.onclick = () => { const ed = sec.querySelector(".rta"); ed.focus(); const cur = ed.innerText.replace(/^(Admit\.|Deny\.|Cannot admit or deny[^.]*\.?)\s*/i, "");
+        ed.innerHTML = `<p>${esc(b.dataset.rfa === "Cannot admit or deny" ? "Responding Party cannot admit or deny because, after reasonable inquiry, the information it knows or can easily obtain is insufficient to enable it to admit or deny." : b.dataset.rfa)}${cur.trim() ? " " + esc(cur.trim()) : ""}</p>`; ed.dispatchEvent(new Event("input", { bubbles: true })); });
+    });
+    const ai = $("#dsAi");
+    let polling = false, dirty = false;
+    const dsv = $(".dsv"); dsv.addEventListener("input", e => { if (e.target.closest(".dsi")) dirty = true; }); dsv.addEventListener("change", e => { if (e.target.closest(".dsi")) dirty = true; });   // this screen's own element: nothing piles up
+    async function poll() { if (polling) return; polling = true; if (ai) { ai.disabled = true; ai.textContent = "AI is drafting…"; }
+      for (let i = 0; i < 120; i++) { await new Promise(r => setTimeout(r, 4000)); if (!document.getElementById(`dsi-${items[0] && items[0].id}`) && items.length) return;
+        const x = await api(`/api/discovery/${setId}`).catch(() => null); if (x && !x.drafting && x.set.ai_status !== "running") {
+          if (dirty) { if (ai) { ai.disabled = false; ai.textContent = "AI drafts are in — save your edits, then tap to show them"; ai.onclick = reload; } toast("AI drafts are in. Save your edits, then show them."); polling = false; return; }
+          toast(x.set.ai_status === "error" ? "AI draft stopped — see the note at the top" : "AI drafts are in — review and approve each one"); return reload(); } }
+      polling = false; }
+    if (ai) ai.onclick = async () => { try { await api(`/api/discovery/${setId}/draft`, { method: "POST", body: {} }); poll(); } catch (e) { fail(e); } };
+    if (S.ai_status === "running" || d.drafting) poll();
+    $("#dsAdd").onclick = () => { $("#dsAddF").hidden = !$("#dsAddF").hidden; if (!$("#dsAddF").hidden) $("#daR").focus(); };
+    $("#dsAddF").onsubmit = async e => { e.preventDefault(); try { await api(`/api/discovery/${setId}/items`, { method: "POST", body: { kind: $("#daK").value, n: +$("#daN").value || undefined, request: $("#daR").value } }); toast("Added"); reload(); } catch (x) { fail(x); } };
+    if ($("#dsDel")) $("#dsDel").onclick = e => sure(e.currentTarget, async () => { await api(`/api/discovery/${setId}`, { method: "DELETE" }); toast("Deleted"); caseHub(caseId || C.id); });
+    const serve = $("#dsServe");
+    if (serve) $("#dsTo").addEventListener("input", () => { delete serve.dataset.sure; serve.textContent = "Serve response to opposing counsel"; });
+    if (serve) serve.onclick = async () => {
+      const to = $("#dsTo").value.split(/[,;\s]+/).map(x => x.trim()).filter(Boolean).map(email => ({ email }));
+      if (!to.length) return $("#dsSendErr").textContent = "Add opposing counsel's email.";
+      if (!serve.dataset.sure) { serve.dataset.sure = 1; serve.textContent = `Tap again to serve on ${to.map(x => x.email).join(", ")}`; return; }
+      serve.disabled = true; serve.textContent = "Serving…";
+      try { const r = await api(`/api/discovery/${setId}/send`, { method: "POST", body: { to, message: $("#dsMsg").value, confirm: true } }); toast(`Served on ${r.sent_to.join(", ")} — copy saved to the case`); reload(); }
+      catch (x) { $("#dsSendErr").textContent = x.message; serve.disabled = false; delete serve.dataset.sure; serve.textContent = "Serve response to opposing counsel"; }
+    };
+  }
+  window.discoveryView = discoveryView;
+
   window.contactView = contactView;
 
   // ===================== FIRM SETTINGS (admin extras) =====================

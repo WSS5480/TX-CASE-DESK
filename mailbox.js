@@ -733,4 +733,12 @@ function mount(app, { requireAuth, wrap, audit }) {
   app.use("/api/mailx", requireAuth, R);
 }
 
-module.exports = { mount, _test: { renderSafe, smtpFor, mergeBody, decodePart, roleOf, hasAtt } };
+// Send from a person's own connected mailbox (used by discovery: one click serves the response). files: [{ name, type, data }]
+async function sendAs(user, { to, cc, subject, html, files }) {
+  const { rows } = await q("SELECT id, provider, scope_got, scope_req, status FROM mailboxes WHERE user_id=$1 AND shared_firm IS NULL ORDER BY (provider='imap') DESC, id", [user.id]);
+  const pick = rows.find(r => r.status !== "reconnect" && (r.provider === "imap" || (r.provider === "microsoft" && msFull(r))));
+  if (!pick) throw fail("Connect your email first (Court Updates → Connect your email) so the response can go from your own address.", { status: 400 });
+  const mb = await loadBox(user, pick.id); const a = adapter(mb);
+  return a.send(mb, { mode: "new", ref: null, to: people(to), cc: people(cc), bcc: [], subject: String(subject || "").replace(/[\r\n]+/g, " ").slice(0, 400), html: cleanHtml(html), files, draftOnly: false, draftId: null }, user);
+}
+module.exports = { mount, sendAs, _test: { renderSafe, smtpFor, mergeBody, decodePart, roleOf, hasAtt } };

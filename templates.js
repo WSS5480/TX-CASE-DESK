@@ -119,4 +119,4 @@ async function render(key, { c, contacts, events, signer, opts }) {
   const buffer = await Packer.toBuffer(doc);
   return { buffer, filename: `${name} - ${String(causeNo(c)).replace(/[^\w.-]+/g, "_")}.docx` };
 }
-module.exports = { list, render };
+module.exports = { list, render, parts: { caption, title, signature, firmBlock, para, run, blank, causeNo } };
