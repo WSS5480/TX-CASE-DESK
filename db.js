@@ -441,6 +441,38 @@ CREATE TABLE IF NOT EXISTS trust_recon (
   ok BOOLEAN, created_by INT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS cases_firm_county ON cases(firm_id, county);
+-- Closed cases: a final disposition in the court's own record moves the case to stage Closed (off the active list).
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ;
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS closed_why TEXT;
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS stage_before_close TEXT;
+CREATE OR REPLACE FUNCTION tcd_case_close() RETURNS trigger AS $$
+BEGIN
+  -- the court status turned final (Disposed, Dismissed, Final judgment, Nonsuit, Closed) -> Closed, remembering the stage it had
+  IF NEW.status IS NOT NULL AND (TG_OP = 'INSERT' OR NEW.status IS DISTINCT FROM OLD.status)
+     AND NEW.status ~* '(dispos|dismiss|final judgment|judgment (signed|entered|rendered)|non-?suit|\\mclosed\\M)'
+     AND NEW.status !~* '(reopen|re-open|not |pending|motion|proposed|undispos|in part|partial|as to|interlocutory|docket|intent|hearing|reinstat)'
+     AND NEW.stage IS DISTINCT FROM 'Closed' THEN
+    NEW.stage_before_close := NEW.stage; NEW.stage := 'Closed'; NEW.closed_at := now(); NEW.closed_why := 'Court status: ' || NEW.status;
+  ELSIF TG_OP = 'UPDATE' AND NEW.stage IS DISTINCT FROM OLD.stage THEN
+    IF NEW.stage = 'Closed' THEN NEW.closed_at := COALESCE(NEW.closed_at, now()); NEW.stage_before_close := COALESCE(NEW.stage_before_close, OLD.stage);
+      IF NEW.closed_why IS NOT DISTINCT FROM OLD.closed_why THEN NEW.closed_why := 'Marked closed'; END IF;
+    ELSIF OLD.stage = 'Closed' THEN NEW.closed_at := NULL; NEW.closed_why := NULL; NEW.stage_before_close := NULL; END IF;   -- reopened
+  ELSIF TG_OP = 'INSERT' AND NEW.stage = 'Closed' THEN NEW.closed_at := COALESCE(NEW.closed_at, now()); NEW.closed_why := COALESCE(NEW.closed_why, 'Marked closed');
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS tcd_case_close ON cases;
+CREATE TRIGGER tcd_case_close BEFORE INSERT OR UPDATE ON cases FOR EACH ROW EXECUTE FUNCTION tcd_case_close();
+-- once: cases whose court status was already final before this existed move to Closed (a reopened case is never re-closed by this)
+CREATE TABLE IF NOT EXISTS tcd_once (k TEXT PRIMARY KEY, at TIMESTAMPTZ DEFAULT now());
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM tcd_once WHERE k = 'close_final_v2') THEN
+    INSERT INTO tcd_once(k) VALUES ('close_final_v2') ON CONFLICT DO NOTHING;
+    UPDATE cases SET stage_before_close = stage, stage = 'Closed', closed_at = now(), closed_why = 'Court status: ' || status
+      WHERE stage IS DISTINCT FROM 'Closed' AND status ~* '(dispos|dismiss|final judgment|judgment (signed|entered|rendered)|non-?suit|\\mclosed\\M)'
+        AND status !~* '(reopen|re-open|not |pending|motion|proposed|undispos|in part|partial|as to|interlocutory|docket|intent|hearing|reinstat)';
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS audit_firm ON audit_log(firm_id, at DESC);
 `;
 

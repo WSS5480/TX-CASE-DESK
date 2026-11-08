@@ -560,6 +560,9 @@ app.get("/api/cases", requireAuth, wrap(async (req, res) => {
   if (view === "tracked") where += " AND c.tracked";
   if (view === "alerts") where += " AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL)";
   if (view === "watched") where += " AND c.watch_dates";
+  // Closed cases live in their own view; every other view shows active cases (unless you filter by the Closed stage)
+  if (view === "closed") where += " AND c.stage = 'Closed'";
+  else if (req.query.active === "1" && req.query.stage !== "Closed") where += " AND c.stage IS DISTINCT FROM 'Closed'";   // only the Cases list hides closed cases; billing, trust, calendar and search still find them
   if (req.query.attorney) { params.push(+req.query.attorney); where += ` AND c.user_id=$${params.length}`; }
   if (county) { params.push(county); where += ` AND c.county=$${params.length}`; }
   if (type) { params.push(type); where += ` AND c.case_type=$${params.length}`; }
@@ -572,7 +575,7 @@ app.get("/api/cases", requireAuth, wrap(async (req, res) => {
     : { style: "lower(COALESCE(NULLIF(c.style,''), c.cause_no)) ASC", updated: "c.updated_at DESC NULLS LAST" }[req.query.sort] || `${alertsFirst}, c.filed_date DESC NULLS LAST`;
   const { rows } = await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} ORDER BY ${order}, c.id DESC LIMIT 500`, params);
   const ap = [req.user.firm_id, req.user.counties || []];
-  const al = await q(`SELECT count(*)::int n FROM cases c WHERE c.firm_id=$1 AND (c.county = ANY($2) OR c.tracked) AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL) AND ${access.seesFirm(req.user) && req.user.role !== "attorney" ? "TRUE" : access.seesFirm(req.user) ? (ap.push(req.user.id), "c.user_id=$3") : access.caseCond(req.user, "c", ap)}`, ap);
+  const al = await q(`SELECT count(*)::int n FROM cases c WHERE c.firm_id=$1 AND (c.county = ANY($2) OR c.tracked) AND c.stage IS DISTINCT FROM 'Closed' AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL) AND ${access.seesFirm(req.user) && req.user.role !== "attorney" ? "TRUE" : access.seesFirm(req.user) ? (ap.push(req.user.id), "c.user_id=$3") : access.caseCond(req.user, "c", ap)}`, ap);
   res.json({ cases: rows, alerts: al.rows[0].n });
 }));
 app.post("/api/cases", requireAuth, wrap(async (req, res) => {

@@ -731,7 +731,7 @@ async function casesView() {
   const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
   const app = $("#app");
   app.innerHTML = `<div class="card mute">Loading cases…</div>`;
-  let data; try { data = await api(`/api/cases?${new URLSearchParams(caseF)}`); } catch (e) { return fail(e); }
+  let data; try { data = await api(`/api/cases?${new URLSearchParams({ ...caseF, active: "1" })}`); } catch (e) { return fail(e); }
   const cs = data.cases;
   if (me.role === "admin" && !firmUsers) { try { firmUsers = (await api("/api/firm/users")).users; } catch (e) { firmUsers = []; } }
   if (__v !== viewSeq) return;   // the person already opened another screen
@@ -741,7 +741,7 @@ async function casesView() {
   <div class="card"><div class="mute">Your counties</div><div style="font-weight:600">${esc(me.counties.join(", ") || "None selected")}</div>
    <div class="mute" style="margin-top:4px">Auto-pull: connect under <a class="link" id="goCourt">Court Logins</a> (live: ${esc(Object.entries(META.connectors).filter(([, v]) => v.status !== "blocked").map(([k]) => k).join(", ") || "none right now — use re:SearchTX alerts")}). Other counties: add cases below or import a CSV.</div></div>
   <div class="card"><div class="grid">
-   <div><label>Show</label><select id="v"><option value="mine">${me.sees_firm ? "My cases" : "My cases (and cases I'm on)"}</option>${me.sees_firm && me.firm_kind !== "solo" ? `<option value="firm">Whole firm (my counties)</option>` : ""}<option value="tracked">Tracked cases</option><option value="watched">Watching court dates</option><option value="alerts">Alerts (dates, filings, case law)</option></select></div>
+   <div><label>Show</label><select id="v"><option value="mine">${me.sees_firm ? "My cases" : "My cases (and cases I'm on)"}</option>${me.sees_firm && me.firm_kind !== "solo" ? `<option value="firm">Whole firm (my counties)</option>` : ""}<option value="tracked">Tracked cases</option><option value="watched">Watching court dates</option><option value="alerts">Alerts (dates, filings, case law)</option><option value="closed">Closed cases</option></select></div>
    ${me.role === "admin" ? `<div><label>Attorney</label><select id="af2"><option value="">All attorneys</option>${(firmUsers || []).filter(u => u.role !== "paralegal").map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("")}</select></div>` : ""}
    <div><label>County</label><select id="cf"><option value="">All my counties</option>${me.counties.map(c => `<option>${esc(c)}</option>`).join("")}</select></div>
    <div><label>Case type</label><select id="tf"><option value="">All types</option>${TYPES.map(t => `<option>${t}</option>`).join("")}</select></div>
@@ -773,6 +773,7 @@ async function casesView() {
   };
   cs.forEach(c => {
     const el = $(`#case-${c.id}`);
+    const ro = el.querySelector("[data-a=reopen]"); if (ro) ro.onclick = async () => { try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { stage: c.stage_before_close && c.stage_before_close !== "Closed" ? c.stage_before_close : "" } }); toast("Reopened — back on the active list"); casesView(); } catch (e) { fail(e); } };
     el.querySelector("[data-a=track]").onclick = async () => { try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { tracked: !c.tracked } }); casesView(); } catch (e) { fail(e); } };
     el.querySelector("[data-a=law]").onclick = () => { law.q = (c.case_type || "").replace(/^.*– /, ""); law.results = null; law.open = null; tab = "law"; renderNav(); lawView(true); };
     el.querySelector("[data-a=edit]").onclick = () => { el.innerHTML = caseForm(c); bindCaseForm(el.querySelector("form"), c); };
@@ -789,9 +790,10 @@ async function casesView() {
 }
 function caseCard(c) {
   const st = /new/i.test(c.status || "") ? "n" : /trial|mediation|hearing/i.test(c.status || "") ? "y" : "g";
-  const pre = /^PRE-/.test(c.cause_no || "");
+  const pre = /^PRE-/.test(c.cause_no || ""), closed = c.stage === "Closed";
   return `<div class="card" id="case-${c.id}"><div class="row">${c.stage ? `<span class="tag stg">${esc(c.stage)}</span>` : ""}${c.status ? `<span class="tag ${st}">${esc(c.status)}</span>` : ""}${c.tracked ? `<span class="tag y">★ Tracked</span>` : ""}<span class="mute">${esc(c.county)} County${c.court ? " · " + esc(c.court) : ""}</span></div>
    <h3 style="margin-top:6px">${esc(c.style || c.cause_no)}</h3>
+   ${closed ? `<div class="closedb"><span><b>Closed</b>${c.closed_at ? " " + esc(new Date(c.closed_at).toLocaleDateString()) : ""}${c.closed_why ? " · " + esc(c.closed_why) : ""}</span><button type="button" class="btn sm ghost" data-a="reopen">Reopen</button></div>` : ""}
    <div class="kv"><div><b>Cause #</b>${pre ? "Not filed yet" : esc(c.cause_no)}</div><div><b>Type</b>${esc(c.case_type || "—")}</div><div><b>Filed</b>${c.filed_date ? String(c.filed_date).slice(0, 10) : "—"}</div>
    <div><b>Next</b>${esc(c.next_setting || "—")}</div><div><b>Appeals to</b>${esc(META.appeals[c.county] || "—")}</div><div><b>Attorney</b>${esc(c.attorney || "—")}</div></div>
    ${c.date_alert ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4;margin:10px 0 0;padding:10px"><b>Court date changed</b><div>${esc(c.date_alert)}</div><div class="mute">${c.date_alert_at ? new Date(c.date_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="ack" style="margin-top:6px">Got it</button></div>` : ""}
