@@ -74,7 +74,8 @@ const TERMS = require("./terms");
 const rt = require("./richtext");
 // ---- Developer view: the developer (PIN in Render: DEVELOPER_PIN) sees what any person sees, read-only, for one hour ----
 const DEV_PIN = String(process.env.DEVELOPER_PIN || process.env.DELVELOPER_PIN || "").trim();
-const DEV_HASH = DEV_PIN.length >= 8 ? crypto.createHash("sha256").update(DEV_PIN).digest() : null;   // short PINs are refused: this PIN opens every firm
+const DEV_HASH = DEV_PIN.length >= 4 ? crypto.createHash("sha256").update(DEV_PIN).digest() : null;   // this PIN opens every firm
+const DEV_SHORT = DEV_PIN.length < 8;   // a short PIN (owner's choice) gets far stricter guessing limits: 5 wrong tries a day in total
 const DEV_TTL = 3600e3;
 const MFA_OFF = new Set(String(process.env.MFA_OFF_EMAILS || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean));
 const devOk = req => !!(req.session && req.session.dev && Date.now() - req.session.dev.at < DEV_TTL);
@@ -284,21 +285,21 @@ app.post("/api/terms/accept", requireAuth, wrap(async (req, res) => {
 
 // Developer view (see DEV_PIN above). Every view is written to that firm's activity log.
 // failed PINs in the last hour, across all addresses (loaded once from the activity log so a restart doesn't reset it)
-const DEV_MAX_FAILS = 50; let devFails = null, devFailsLoad = null;
+const DEV_MAX_FAILS = DEV_SHORT ? 5 : 50, DEV_FAIL_WIN = DEV_SHORT ? 24 * 3600e3 : 3600e3; let devFails = null, devFailsLoad = null;
 async function devFailList() {
   if (!devFails) {   // every request waits for the same single load
-    devFailsLoad = devFailsLoad || q("SELECT (extract(epoch FROM at) * 1000)::bigint t FROM audit_log WHERE action='developer_pin_failed' AND at > now() - interval '1 hour' ORDER BY at").then(r => r.rows.map(x => +x.t));
+    devFailsLoad = devFailsLoad || q("SELECT (extract(epoch FROM at) * 1000)::bigint t FROM audit_log WHERE action='developer_pin_failed' AND at > now() - ($1 || ' seconds')::interval ORDER BY at", [String(DEV_FAIL_WIN / 1000)]).then(r => r.rows.map(x => +x.t));
     const loaded = await devFailsLoad; if (!devFails) devFails = loaded;
   }
-  const now = Date.now(); while (devFails.length && now - devFails[0] > 3600e3) devFails.shift();
+  const now = Date.now(); while (devFails.length && now - devFails[0] > DEV_FAIL_WIN) devFails.shift();
   return devFails;
 }
 const devLimiter = rateLimit({ windowMs: 15 * 60e3, max: 5, standardHeaders: true, legacyHeaders: false, message: { error: "Too many tries. Wait 15 minutes." } });
 app.get("/api/dev/status", (req, res) => res.json({ pin_ok: devOk(req), until: devOk(req) ? req.session.dev.at + DEV_TTL : null }));
 app.post("/api/dev/pin", devLimiter, wrap(async (req, res) => {
-  if (!DEV_HASH) return res.status(503).json({ error: DEV_PIN ? "The developer PIN in Render is too short. Use at least 8 characters, then try again." : "Developer access is off: add DEVELOPER_PIN in Render's Environment settings." });
+  if (!DEV_HASH) return res.status(503).json({ error: DEV_PIN ? "The developer PIN in Render is too short. Use at least 4 characters, then try again." : "Developer access is off: add DEVELOPER_PIN in Render's Environment settings." });
   const list = await devFailList(), now = Date.now();
-  if (list.length >= DEV_MAX_FAILS) return res.status(429).json({ error: "Developer sign-in is locked for an hour after too many wrong PINs." });
+  if (list.length >= DEV_MAX_FAILS) return res.status(429).json({ error: DEV_SHORT ? "Developer sign-in is locked for 24 hours after 5 wrong PINs." : "Developer sign-in is locked for an hour after too many wrong PINs." });
   list.push(now);                         // counted before checking, with no await in between, so parallel guesses can't slip past
   const got = crypto.createHash("sha256").update(String(req.body?.pin || "").trim()).digest();
   if (!crypto.timingSafeEqual(got, DEV_HASH)) {
