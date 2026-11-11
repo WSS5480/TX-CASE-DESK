@@ -9,7 +9,7 @@ const crypto = require("crypto");
 const path = require("path");
 const QRCode = require("qrcode");
 const { authenticator } = require("otplib");
-const { pool, q, migrate } = require("./db");
+const { pool, q, migrate, lateIndexes } = require("./db");
 const analysis = require("./analysis");
 const lawdb = require("./lawdb");
 const inbound = require("./inbound");
@@ -602,10 +602,18 @@ app.patch("/api/cases/:id", requireAuth, wrap(async (req, res) => {
     } }
   const cols = Object.keys(c);
   if (!cols.length) return res.status(400).json({ error: "Nothing to update" });
-  let rows; try { ({ rows } = await q(`UPDATE cases SET ${cols.map((k, i) => `${k}=$${i + 3}`).join(",")}, updated_at=now() WHERE id=$1 AND firm_id=$2 RETURNING *`,
-    [+req.params.id, req.user.firm_id, ...cols.map(k => c[k])])); }
-  catch (e) { if (e.code === "23505") return res.status(409).json({ error: "That cause # is already on another case in your firm for this county." }); throw e; }
+  const was = cols.includes("next_setting") ? (await q("SELECT next_setting FROM cases WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id])).rows[0] : null;
+  // the update runs in its own transaction that names the person, so the activity log records who changed what
+  let rows, rbErr; const cl = await pool.connect();
+  try { await cl.query("BEGIN"); await cl.query("SELECT set_config('tcd.uid', $1, true)", [String(req.user.id)]);
+    ({ rows } = await cl.query(`UPDATE cases SET ${cols.map((k, i) => `${k}=$${i + 3}`).join(",")}, updated_at=now() WHERE id=$1 AND firm_id=$2 RETURNING *`,
+      [+req.params.id, req.user.firm_id, ...cols.map(k => c[k])]));
+    await cl.query("COMMIT"); }
+  catch (e) { await cl.query("ROLLBACK").catch(x => { rbErr = x; }); if (e.code === "23505") return res.status(409).json({ error: "That cause # is already on another case in your firm for this county." }); throw e; }
+  finally { cl.release(rbErr); }   // a connection that couldn't roll back is closed, not reused
   if (!rows[0]) return res.status(404).json({ error: "Not found" });
+  // activity log: a next setting typed by a person (court emails and syncs record their own)
+  if (was && (was.next_setting || null) !== (rows[0].next_setting || null)) await q("INSERT INTO case_changes(case_id, field, old_value, new_value, user_id) VALUES($1,'next_setting',$2,$3,$4)", [rows[0].id, was.next_setting, rows[0].next_setting, req.user.id]).catch(() => {});
   await audit(req, "case_updated", { id: rows[0].id, fields: cols });   // fields only, never the note text
   res.json({ case: rows[0] });
 }));
@@ -662,7 +670,7 @@ app.post("/api/cases/:id/law-ack", requireAuth, wrap(async (req, res) => {
   await q("UPDATE cases SET law_alert=NULL WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true });
 }));
 app.get("/api/cases/:id/changes", requireAuth, wrap(async (req, res) => {
-  const { rows } = await q("SELECT ch.* FROM case_changes ch JOIN cases c ON c.id=ch.case_id WHERE ch.case_id=$1 AND c.firm_id=$2 ORDER BY ch.at DESC LIMIT 50", [+req.params.id, req.user.firm_id]);
+  const { rows } = await q("SELECT ch.* FROM case_changes ch JOIN cases c ON c.id=ch.case_id WHERE ch.case_id=$1 AND c.firm_id=$2 AND ch.field='next_setting' ORDER BY ch.at DESC LIMIT 50", [+req.params.id, req.user.firm_id]);
   res.json({ changes: rows });
 }));
 // Firm admins: tick "watch court dates" on all of one attorney's cases at once.
@@ -1148,6 +1156,7 @@ require("./mailbox").mount(app, { requireAuth, wrap, audit });   // full mail cl
 require("./discovery").mount(app, { requireAuth, wrap, audit });   // discovery responses: split, AI draft, attorney approves, serve
 require("./dictate").mount(app, { requireAuth, wrap });   // dictation: AI fixes grammar, the person chooses to insert it
 require("./convos").mount(app, { requireAuth, wrap, audit });   // conversation log on each case
+require("./activity").mount(app, { requireAuth, wrap });   // activity log: everything on a case in one timeline
 
 // ---------- static + errors ----------
 app.use(express.static(path.join(__dirname, "public"), { index: "index.html", setHeaders: r => r.setHeader("Cache-Control", "no-cache") }));
@@ -1161,7 +1170,7 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-migrate().then(() => app.listen(PORT, () => { console.log("TX Case Desk on :" + PORT); console.log(`Outlook connect: TX Case Desk app ${mail.configured().microsoft ? "ON" : "OFF"} (MS_CLIENT_ID ${process.env.MS_CLIENT_ID ? "set" : "missing"}, MS_CLIENT_SECRET ${process.env.MS_CLIENT_SECRET ? "set" : "missing"}); firms may use their own keys`); sync.startScheduler(); setTimeout(() => mail.rescanOld().then(n => n && console.log(`[mail] rescanned ${n} mailbox(es) back 30 days`)).catch(e => console.error("[mail] rescan", e.message)), 15000);
+migrate().then(() => app.listen(PORT, () => { setTimeout(() => lateIndexes(), 20000); console.log("TX Case Desk on :" + PORT); console.log(`Outlook connect: TX Case Desk app ${mail.configured().microsoft ? "ON" : "OFF"} (MS_CLIENT_ID ${process.env.MS_CLIENT_ID ? "set" : "missing"}, MS_CLIENT_SECRET ${process.env.MS_CLIENT_SECRET ? "set" : "missing"}); firms may use their own keys`); sync.startScheduler(); setTimeout(() => mail.rescanOld().then(n => n && console.log(`[mail] rescanned ${n} mailbox(es) back 30 days`)).catch(e => console.error("[mail] rescan", e.message)), 15000);
   if (process.env.NODE_ENV === "production") setTimeout(() => sync.MODULES.odyssey.probe(CONNECTORS.Hidalgo.url).catch(() => {}), 5000);
   // court settings emails saved before the settings reader existed
   setTimeout(() => inbound.backfillSettings().catch(e => console.warn("[inbound] settings backfill:", e.message)), 8000); })).catch(e => { console.error("DB migrate failed", e); process.exit(1); });

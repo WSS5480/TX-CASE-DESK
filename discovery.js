@@ -300,7 +300,7 @@ function mount(app, { requireAuth, wrap, audit }) {
     if (s.status !== "draft") throw fail(409, "A served response is part of the case record and can't be deleted.");
     if (!LAWYER(req.user.role)) throw fail(403, "Only an attorney can delete a discovery response.");
     if (s.event_id && s.status !== "sent") await q("DELETE FROM events WHERE id=$1 AND done = false", [s.event_id]);
-    await q("DELETE FROM discovery_sets WHERE id=$1", [s.id]); await audit(req, "discovery_set_deleted", { set: s.id });
+    await q("DELETE FROM discovery_sets WHERE id=$1", [s.id]); await audit(req, "discovery_set_deleted", { case: s.case_id, set: s.id, title: s.title });
     res.json({ ok: true });
   }));
 

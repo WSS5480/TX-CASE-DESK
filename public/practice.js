@@ -640,7 +640,7 @@
     const groups = [...new Set(rules.map(x => x.group))];
     const back = titleOf(tab);
     if (hub.id !== id) { hub.id = id; hub.sec = "overview"; }
-    const SECS = [["overview", "Overview"], ["talk", "Conversations", cv.convos.length], ["dates", "Dates", r.events.filter(e => e.date >= t && !e.done).length], ["people", "People", r.contacts.length], ["tasks", "Tasks", r.tasks.filter(x => !x.done).length], ["docs", "Documents", r.documents.length], ["discovery", "Discovery", dsc.sets.filter(x => x.status !== "sent").length || null]];
+    const SECS = [["overview", "Overview"], ["talk", "Conversations", cv.convos.length], ["activity", "Activity log"], ["dates", "Dates", r.events.filter(e => e.date >= t && !e.done).length], ["people", "People", r.contacts.length], ["tasks", "Tasks", r.tasks.filter(x => !x.done).length], ["docs", "Documents", r.documents.length], ["discovery", "Discovery", dsc.sets.filter(x => x.status !== "sent").length || null]];
     if (isLawyer()) SECS.push(["law", "Case law"], ["billing", "Time & billing"]);
     const st = c.status || "Open", stCls = /closed|dismiss|dispos/i.test(st) ? "k" : /new/i.test(st) ? "n" : "g";
     const up = r.events.filter(e => e.date >= t && !e.done), nextH = up.find(e => e.kind === "hearing");
@@ -702,6 +702,12 @@
           <div class="err"></div><div class="row" style="margin-top:8px"><button class="btn sm" id="cvSave">Save</button><button type="button" class="btn sm ghost" id="cvCancel">Cancel</button></div></form>
         <div class="grid cvfilt" style="margin-top:12px"><div><label for="cvFk">Type</label><select id="cvFk"><option value="">All types</option></select></div><div><label for="cvFw">With</label><select id="cvFw"><option value="">Everyone</option></select></div><div class="full"><label for="cvFq">Search</label><input id="cvFq" type="search" placeholder="Words in the notes or a name" data-nomic></div></div>
         <div class="cvlist" id="cvList" style="margin-top:10px"></div></div>
+      <div class="card" data-sec="activity"><h3 style="margin:0">Activity log</h3>
+        <p class="mute" style="margin:6px 0 0">Everything on this case in one place: conversations, court emails, documents, tasks, dates${isLawyer() ? ", time and invoices" : ""}, discovery and case changes.</p>
+        <div class="grid" style="margin-top:12px"><div class="full"><label for="acQ">Search</label><input id="acQ" type="search" placeholder="Words, a name, a document…" data-nomic></div>
+          <div><label for="acSort">Sort</label><select id="acSort"><option value="new">Newest first</option><option value="old">Oldest first</option><option value="cat">By category</option><option value="who">By person</option></select></div></div>
+        <div class="acchips" id="acChips" role="group" aria-label="Show"></div>
+        <div id="acList" class="aclist"><div class="mute">Loading…</div></div></div>
       <div class="card" data-sec="tasks"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Tasks</h3><button class="btn sm" id="hbTk">+ Task</button></div>
         <form id="hbTkF" hidden style="margin-top:8px"><div class="grid"><div class="full"><label>Task</label><input name="title" required></div><div><label>Due</label><input type="date" name="due_date"></div><div><label>For</label><select name="assignee">${peopleOptions(ps, c.user_id || me.id)}</select></div></div><button class="btn sm">Add</button></form>
         ${r.tasks.map(x => `<label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0;font-size:15px;color:var(--ink)"><input type="checkbox" data-task="${x.id}" ${x.done ? "checked" : ""} style="width:auto;margin-top:3px"><span style="${x.done ? "text-decoration:line-through;color:var(--mute)" : ""}">${esc(x.title)}<br><span class="mute" style="${!x.done && x.due_date && d10(x.due_date) < t ? "color:var(--bad)" : ""}">${x.due_date ? "Due " + niceDate(x.due_date) : ""}${x.assignee_name ? " · " + esc(x.assignee_name) : ""}</span></span></label>`).join("") || `<div class="mute" style="margin-top:6px">No tasks.</div>`}</div>
@@ -810,8 +816,43 @@
         cvF.hidden = true; cvF.id.value = ""; cvDraw(); if (!notes.length) toast(id ? "Saved" : link.time_id || link.task_id ? `Logged${link.time_id ? ", billed" : ""}${link.task_id ? ", follow-up set" : ""}` : "Conversation logged"); }
       catch (er) { err.textContent = er.message; } finally { btn.disabled = false; } };
     cvDraw();
+    // activity log: one timeline, filter buttons by category, search, sort
+    const ACAT = [["conversations", "Conversations"], ["court", "Court emails"], ["documents", "Documents"], ["tasks", "Tasks"], ["dates", "Dates"], ["billing", "Billing"], ["discovery", "Discovery"], ["changes", "Case changes"]];
+    const ACN = Object.fromEntries(ACAT);
+    const ac = { items: null, cat: "", seq: 0 };
+    const acDay = iso => new Date(iso).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+    const acTime = iso => new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+    const acRow = (x, i) => { const tap = x.go && !x.go.doc; return `<div class="acrow${tap ? " go" : ""}"${tap ? ` data-ac="${i}" role="button" tabindex="0"` : ""}><div class="ach"><span class="tag ${x.cat === "court" ? "r" : x.cat === "conversations" ? "n" : x.cat === "billing" ? "g" : "k"}">${esc(ACN[x.cat] || x.cat)}</span><span class="mute">${esc(acTime(x.at))}</span>${x.by ? `<span class="mute">· ${esc(x.by)}</span>` : ""}</div>
+      <div class="act">${x.go && x.go.doc ? `<a class="link" href="/api/documents/${x.go.doc}" target="_blank" rel="noopener">${esc(x.title)}</a>` : esc(x.title)}</div>${x.detail ? `<div class="acd mute">${esc(x.detail)}</div>` : ""}</div>`; };
+    const acTop = () => { const el = $(".secnav") && getComputedStyle($(".secnav")).display !== "none" ? $(".secnav") : $("#secSel"); el && el.scrollIntoView({ block: "start" }); };
+    const acDraw = () => {
+      if (!ac.items || !$("#acList")) return;
+      const qy = $("#acQ").value.trim().toLowerCase(), so = $("#acSort").value;
+      const counts = {}; ac.items.forEach(x => counts[x.cat] = (counts[x.cat] || 0) + 1); if (ac.cat && !counts[ac.cat]) ac.cat = "";
+      const hadFocus = document.activeElement && document.activeElement.closest && document.activeElement.closest("#acChips");
+      $("#acChips").innerHTML = [["", "All", ac.items.length], ...ACAT.filter(([k]) => counts[k]).map(([k, v]) => [k, v, counts[k]])]
+        .map(([k, v, n]) => `<button type="button" class="chip" data-acc="${k}" aria-pressed="${ac.cat === k}">${esc(v)} <span>${n}</span></button>`).join("");
+      $$("#acChips [data-acc]").forEach(b => b.onclick = () => { ac.cat = b.dataset.acc; acDraw(); });
+      if (hadFocus) { const f = $(`#acChips [data-acc="${ac.cat}"]`); f && f.focus(); }
+      let L = ac.items.map((x, i) => ({ ...x, i })).filter(x => (!ac.cat || x.cat === ac.cat) && (!qy || (x.title + " " + x.detail + " " + (x.by || "") + " " + (ACN[x.cat] || "")).toLowerCase().includes(qy)));
+      if (so === "old") L.reverse();
+      let html = "";
+      if (so === "cat" || so === "who") {
+        const key = x => so === "cat" ? ACN[x.cat] || x.cat : x.by || "No person (court, sync or system)";
+        const groups = {}; L.forEach(x => (groups[key(x)] = groups[key(x)] || []).push(x));
+        const order = so === "cat" ? ACAT.map(([, v]) => v).filter(v => groups[v]) : Object.keys(groups).sort((a, b) => groups[b].length - groups[a].length || a.localeCompare(b));
+        html = order.map(g => `<h4 class="acday">${esc(g)} <span class="mute">(${groups[g].length})</span></h4>` + groups[g].map(x => acRow(x, x.i).replace('<span class="mute">' + esc(acTime(x.at)), '<span class="mute">' + esc(acDay(x.at) + " " + acTime(x.at)))).join("")).join("");
+      } else { let day = ""; html = L.map(x => { const d = acDay(x.at), h = d !== day ? `<h4 class="acday">${esc(d)}</h4>` : ""; day = d; return h + acRow(x, x.i); }).join(""); }
+      $("#acList").innerHTML = html || `<div class="empty">${ac.items.length ? "Nothing matches." : "No activity yet."}</div>`;
+      $$("#acList [data-ac]").forEach(el => { const go = ac.items[+el.dataset.ac].go; const open = e => { if (e.target.closest("a")) return;
+        if (go.sec) { setSec(go.sec); acTop(); } else if (go.email) { tab = "inbox"; renderNav(); emailView(go.email); } };
+        el.onclick = open; el.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(e); } }; });
+    };
+    const acLoad = async () => { const mine = ++ac.seq, view = viewSeq; const gone = () => mine !== ac.seq || view !== viewSeq || hub.id !== c.id || !$("#acList");   // left the case, or a newer load
+      try { const d = await api(`/api/cases/${c.id}/activity`); if (gone()) return; ac.items = d.items; acDraw(); } catch (e) { if (!gone()) $("#acList").innerHTML = `<div class="err">${esc(e.message)}</div>`; } };
+    $("#acQ").oninput = acDraw; $("#acSort").onchange = acDraw;
     // sections: tabs on desktop, a dropdown on phones
-    const setSec = k => { hub.sec = k; $$("#app [data-sec]").forEach(s => s.hidden = s.dataset.sec !== k); $$(".secnav [data-sec-go]").forEach(b => b.dataset.secGo === k ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")); $("#secSel").value = k; };
+    const setSec = k => { hub.sec = k; if (k === "activity") acLoad(); $$("#app [data-sec]").forEach(s => s.hidden = s.dataset.sec !== k); $$(".secnav [data-sec-go]").forEach(b => b.dataset.secGo === k ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")); $("#secSel").value = k; };
     setSec(SECS.some(([k]) => k === hub.sec) ? hub.sec : "overview");
     $$("#app [data-sec-go]").forEach(b => b.onclick = () => { setSec(b.dataset.secGo); if (!b.closest(".secnav")) $(".secnav").scrollIntoView({ block: "start" }); });
     $("#secSel").onchange = e => setSec(e.target.value);

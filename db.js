@@ -521,8 +521,44 @@ ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS direction TEXT;          -- in 
 ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS minutes INT;             -- how long it took
 ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS time_id INT REFERENCES time_entries(id) ON DELETE SET NULL;   -- billed as time
 ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS task_id INT REFERENCES tasks(id) ON DELETE SET NULL;         -- follow-up task
+-- Activity log: case changes (stage, court status, court, type, style, cause #, lead attorney) are recorded by the database itself,
+-- whoever or whatever made them (a person, a court email, a portal sync). The app fills in "by" for changes a person made.
+ALTER TABLE case_changes ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS done_by INT REFERENCES users(id) ON DELETE SET NULL;   -- who checked it off
+CREATE INDEX IF NOT EXISTS case_changes_case ON case_changes(case_id, at DESC);
+CREATE OR REPLACE FUNCTION tcd_case_log() RETURNS trigger AS $$
+DECLARE uid INT := NULLIF(current_setting('tcd.uid', true), '')::int;   -- set by the app when a person made the change
+BEGIN
+  IF NEW.stage IS DISTINCT FROM OLD.stage THEN INSERT INTO case_changes(case_id, field, old_value, new_value, user_id) VALUES (NEW.id, 'stage', OLD.stage, NEW.stage, uid); END IF;
+  IF NEW.status IS DISTINCT FROM OLD.status THEN INSERT INTO case_changes(case_id, field, old_value, new_value, user_id) VALUES (NEW.id, 'status', OLD.status, NEW.status, uid); END IF;
+  IF NEW.court IS DISTINCT FROM OLD.court THEN INSERT INTO case_changes(case_id, field, old_value, new_value, user_id) VALUES (NEW.id, 'court', OLD.court, NEW.court, uid); END IF;
+  IF NEW.case_type IS DISTINCT FROM OLD.case_type THEN INSERT INTO case_changes(case_id, field, old_value, new_value, user_id) VALUES (NEW.id, 'case_type', OLD.case_type, NEW.case_type, uid); END IF;
+  IF NEW.style IS DISTINCT FROM OLD.style THEN INSERT INTO case_changes(case_id, field, old_value, new_value, user_id) VALUES (NEW.id, 'style', OLD.style, NEW.style, uid); END IF;
+  IF NEW.cause_no IS DISTINCT FROM OLD.cause_no THEN INSERT INTO case_changes(case_id, field, old_value, new_value, user_id) VALUES (NEW.id, 'cause_no', OLD.cause_no, NEW.cause_no, uid); END IF;
+  IF NEW.user_id IS DISTINCT FROM OLD.user_id THEN INSERT INTO case_changes(case_id, field, old_value, new_value, user_id) VALUES (NEW.id, 'attorney', OLD.user_id::text, NEW.user_id::text, uid); END IF;
+  RETURN NULL;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS tcd_case_log ON cases;
+CREATE TRIGGER tcd_case_log AFTER UPDATE ON cases FOR EACH ROW EXECUTE FUNCTION tcd_case_log();
 `;
 
 async function migrate() { await pool.query(SCHEMA); }
+// Larger indexes are built in the background after start (CONCURRENTLY: never blocks the app writing to these tables).
+const LATE_INDEXES = [
+  ["audit_case", `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_case ON audit_log(firm_id, (COALESCE(detail->>'case', detail->>'case_id')), at DESC) WHERE action IN ('case_team_added','case_team_removed','convo_edit','convo_delete','document_shared','document_deleted','event_deleted','task_deleted','discovery_set_deleted')`],
+  ["audit_case_added", `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_case_added ON audit_log(firm_id, (detail->>'id')) WHERE action='case_added'`],
+  ["tasks_case", `CREATE INDEX CONCURRENTLY IF NOT EXISTS tasks_case ON tasks(case_id)`],
+  ["events_case", `CREATE INDEX CONCURRENTLY IF NOT EXISTS events_case ON events(case_id)`],
+  ["time_case", `CREATE INDEX CONCURRENTLY IF NOT EXISTS time_case ON time_entries(case_id)`],
+  ["documents_case", `CREATE INDEX CONCURRENTLY IF NOT EXISTS documents_case ON documents(case_id)`],
+];
+async function lateIndexes() {
+  for (const [name, sql] of LATE_INDEXES) {
+    try {   // a build that was interrupted leaves an unusable index under the same name: drop it and build again
+      if ((await pool.query("SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE c.relname=$1 AND NOT i.indisvalid", [name])).rowCount) await pool.query(`DROP INDEX CONCURRENTLY IF EXISTS ${name}`);
+      await pool.query(sql);
+    } catch (e) { console.warn("[db] index", name + ":", e.message); }
+  }
+}
 
-module.exports = { pool, migrate, q: (text, params) => pool.query(text, params) };
+module.exports = { pool, migrate, lateIndexes, q: (text, params) => pool.query(text, params) };

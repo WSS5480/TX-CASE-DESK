@@ -165,7 +165,8 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     if (b.confirm && rowCount) await audit(req, "deadline_confirmed", { event: +req.params.id });
     res.json({ ok: rowCount > 0 });
   }));
-  R.delete("/events/:id", requireAuth, wrap(async (req, res) => { if (!(await eventOk(req, req.params.id))) return res.status(404).json({ error: "Not found" }); await q("DELETE FROM events WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true }); }));
+  R.delete("/events/:id", requireAuth, wrap(async (req, res) => { if (!(await eventOk(req, req.params.id))) return res.status(404).json({ error: "Not found" }); const ev = (await q("DELETE FROM events WHERE id=$1 AND firm_id=$2 RETURNING case_id, kind, title, on_date", [+req.params.id, req.user.firm_id])).rows[0];
+    if (ev && ev.case_id) await audit(req, "event_deleted", { case: ev.case_id, kind: ev.kind, title: ev.title, on: String(ev.on_date instanceof Date ? ev.on_date.toISOString() : ev.on_date).slice(0, 10) }); res.json({ ok: true }); }));
 
   // ---- Texas deadline calculator
   R.get("/deadlines/rules", requireAuth, (req, res) => res.json({ rules: deadlines.list() }));
@@ -298,7 +299,8 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
           ORDER BY received_at DESC LIMIT 50`, [String(c.cause_no).toUpperCase(), req.user.firm_id, c.id, c.county || "", req.user.id]).catch(() => ({ rows: [] }))
     ]);
     const events = await calendarItems(req.user.firm_id, { from: addDays(today(), -365), to: addDays(today(), 1500), caseId: c.id });
-    res.json({ case: c, contacts: contacts.rows, tasks: tasks.rows, documents: docs.rows, time: time.rows, invoices: invoices.rows, emails: emails.rows, events,
+    const law = req.user.role !== "paralegal";   // billing stays with attorneys
+    res.json({ case: c, contacts: contacts.rows, tasks: tasks.rows, documents: docs.rows, time: law ? time.rows : [], invoices: law ? invoices.rows : [], emails: emails.rows, events,
       team: team.rows, can_team: access.seesFirm(req.user) || c.user_id === req.user.id });
   }));
   // case team: people added to a case beyond its lead attorney (they can then see it)
@@ -331,8 +333,9 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const d = await docOk(req, req.params.id); if (!d) return res.status(404).send("Not found");
     res.set({ "Content-Type": d.mime || "application/octet-stream", "Content-Disposition": dispo("attachment", d.name) }).send(d.data);
   }));
-  R.patch("/documents/:id", requireAuth, wrap(async (req, res) => { if (!(await docOk(req, req.params.id))) return res.status(404).json({ error: "Not found" }); await q("UPDATE documents SET shared=$3 WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id, !!req.body.shared]); res.json({ ok: true }); }));
-  R.delete("/documents/:id", requireAuth, wrap(async (req, res) => { if (!(await docOk(req, req.params.id))) return res.status(404).json({ error: "Not found" }); await q("DELETE FROM documents WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); await audit(req, "document_deleted", { id: +req.params.id }); res.json({ ok: true }); }));
+  R.patch("/documents/:id", requireAuth, wrap(async (req, res) => { const d = await docOk(req, req.params.id); if (!d) return res.status(404).json({ error: "Not found" }); await q("UPDATE documents SET shared=$3 WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id, !!req.body.shared]);
+    if (!!d.shared !== !!req.body.shared) await audit(req, "document_shared", { case: d.case_id, id: d.id, name: d.name, shared: !!req.body.shared }); res.json({ ok: true }); }));
+  R.delete("/documents/:id", requireAuth, wrap(async (req, res) => { const d = await docOk(req, req.params.id); if (!d) return res.status(404).json({ error: "Not found" }); await q("DELETE FROM documents WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); await audit(req, "document_deleted", { case: d.case_id, id: d.id, name: d.name }); res.json({ ok: true }); }));
 
   // ---- Word templates (drafts — the attorney reviews before filing)
   const templates = require("./templates");
@@ -371,14 +374,15 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   R.patch("/tasks/:id", requireAuth, wrap(async (req, res) => {
     if (!(await taskOk(req, req.params.id))) return res.status(404).json({ error: "Not found" });
     const b = req.body || {}, sets = [], p = [+req.params.id, req.user.firm_id];
-    if (b.done !== undefined) { p.push(!!b.done); sets.push(`done=$${p.length}, done_at=CASE WHEN $${p.length} THEN now() ELSE NULL END`); }
+    if (b.done !== undefined) { p.push(!!b.done); sets.push(`done=$${p.length}, done_at=CASE WHEN $${p.length} THEN now() ELSE NULL END, done_by=CASE WHEN $${p.length} THEN ${+req.user.id} ELSE NULL END`); }
     if (b.title) { p.push(clean(b.title, 300)); sets.push(`title=$${p.length}`); }
     if (b.due_date !== undefined) { p.push(isDate(b.due_date) ? b.due_date : null); sets.push(`due_date=$${p.length}`); }
     if (+b.assignee) { p.push(+b.assignee); sets.push(`assignee=$${p.length}`); }
     if (sets.length) await q(`UPDATE tasks SET ${sets.join(",")} WHERE id=$1 AND firm_id=$2`, p);
     res.json({ ok: true });
   }));
-  R.delete("/tasks/:id", requireAuth, wrap(async (req, res) => { if (!(await taskOk(req, req.params.id))) return res.status(404).json({ error: "Not found" }); await q("DELETE FROM tasks WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true }); }));
+  R.delete("/tasks/:id", requireAuth, wrap(async (req, res) => { if (!(await taskOk(req, req.params.id))) return res.status(404).json({ error: "Not found" }); const tk = (await q("DELETE FROM tasks WHERE id=$1 AND firm_id=$2 RETURNING case_id, title", [+req.params.id, req.user.firm_id])).rows[0];
+    if (tk && tk.case_id) await audit(req, "task_deleted", { case: tk.case_id, title: tk.title }); res.json({ ok: true }); }));
   R.get("/firm/task-templates", requireAuth, wrap(async (req, res) => { if (!req.devView) await seedTemplates(req.user.firm_id); /* developer view only reads */ res.json({ templates: (await q("SELECT * FROM task_templates WHERE firm_id=$1 ORDER BY case_type, sort, id", [req.user.firm_id])).rows }); }));
   R.post("/firm/task-templates", requireAuth, requireAdmin, wrap(async (req, res) => {
     const title = clean(req.body.title, 300); if (!title) return res.status(400).json({ error: "Task is required." });

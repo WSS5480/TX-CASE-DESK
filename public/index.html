@@ -530,6 +530,18 @@ body.devv .shell{min-height:calc(100vh - var(--devh,44px))}
 .cvb .rtv p{margin:0 0 6px}
 .cvx{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .cvf{font-size:12.5px;margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center}
+.acchips{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 4px}
+.acchips .chip{margin:0;min-height:44px;gap:6px;padding:0 14px}
+.acchips .chip span{color:var(--mute);font-size:12px}
+.acchips .chip[aria-pressed=true]{background:var(--navy);border-color:var(--navy);color:#fff;font-weight:600}
+.acchips .chip[aria-pressed=true] span{color:#fff;opacity:.85}
+.acday{margin:16px 0 4px;font-size:13px;font-weight:600;letter-spacing:.02em;color:var(--ink2);border-bottom:1px solid var(--line);padding-bottom:4px}
+.acrow{padding:8px 6px;border-radius:8px}
+.acrow.go{cursor:pointer}
+.acrow.go:hover{background:var(--chip)}
+.ach{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;font-size:13px}
+.act{font-weight:600;font-size:14.5px;margin-top:2px;overflow-wrap:anywhere}
+.acd{font-size:13.5px;margin-top:2px;overflow-wrap:anywhere}
 .dhead{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;font-size:14px}
 .dhead .mute{font-size:13px}
 .ddot{width:10px;height:10px;border-radius:50%;background:var(--bad);animation:micp 1.4s ease-in-out infinite;flex:none}
