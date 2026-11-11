@@ -1,7 +1,7 @@
 // TX Case Desk User Agreement (terms of service + privacy). Bump VERSION when the text changes:
 // everyone is asked to accept the new version at their next sign-in.
-const VERSION = "2026-11-08";
-const UPDATED = "November 8, 2026";
+const VERSION = "2026-11-11";
+const UPDATED = "November 11, 2026";
 
 const SECTIONS = [
   ["What TX Case Desk is", `
@@ -52,7 +52,7 @@ const SECTIONS = [
       <li>Anthropic processes this to produce the draft only. Under its commercial terms it does not use your data to train its models.</li>
       <li>An AI draft is never used or sent on its own. An attorney reviews, edits and approves every item first, and nothing is served until the attorney confirms the recipients. You remain responsible for everything you file or serve.</li>
       <li>AI can be wrong. Drafts mark facts that are missing from the file as [CONFIRM] or [CLIENT TO PROVIDE]; check them.</li>
-      <li>Dictation (the microphone in text boxes) uses your browser's own speech service (for example Google in Chrome or Apple in Safari), not TX Case Desk.</li>
+      <li>Dictation (the microphone in text boxes) uses your browser's own speech service (for example Google in Chrome or Apple in Safari) to turn speech into text. When you stop, the text you dictated is sent to Anthropic to fix grammar and punctuation. You see the cleaned text and choose to insert it, insert it as spoken, or discard it. We don't keep a copy.</li>
     </ul>`],
   ["Other services we use", `
     <p>To run TX Case Desk we rely on: Render (hosting and database), Microsoft, Google and your email provider (email connection), CourtListener by the Free Law Project (public court opinions), Postmark (receiving forwarded court emails), Anthropic (AI drafting, described above), and Stripe (if you take card payments from clients). Each handles only what it needs for its part, under its own terms.</p>

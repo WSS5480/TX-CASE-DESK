@@ -519,6 +519,27 @@ body.devv .shell{min-height:calc(100vh - var(--devh,44px))}
 .mic.rec{background:var(--bad);color:#fff;border-color:var(--bad);animation:micp 1.4s ease-in-out infinite}
 @keyframes micp{0%,100%{box-shadow:0 0 0 0 rgba(180,35,24,.45)}50%{box-shadow:0 0 0 7px rgba(180,35,24,0)}}
 @media (prefers-reduced-motion:reduce){.mic.rec{animation:none}}
+.dpane{position:fixed;left:50%;transform:translateX(-50%);bottom:12px;z-index:58;width:min(640px,calc(100vw - 20px));background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 28px rgba(23,34,59,.22);padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.dpane[hidden]{display:none}
+.cvrow{border-top:1px solid var(--line);padding:10px 0}
+.cvrow:first-child{border-top:0}
+.cvh{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;font-size:14px}
+.cvh b{font-weight:600}
+.cvh .mute{font-size:13px}
+.cvb{margin-top:4px;overflow-wrap:anywhere;font-size:14.5px}
+.cvb .rtv p{margin:0 0 6px}
+.cvx{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.cvf{font-size:12.5px;margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center}
+.dhead{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;font-size:14px}
+.dhead .mute{font-size:13px}
+.ddot{width:10px;height:10px;border-radius:50%;background:var(--bad);animation:micp 1.4s ease-in-out infinite;flex:none}
+.dtext{max-height:30vh;overflow-y:auto;overflow-wrap:anywhere;white-space:pre-wrap;font-size:15px;line-height:1.45}
+.dedit{width:100%;max-height:40vh;min-height:90px;resize:vertical;font:inherit;font-size:15px;line-height:1.45;padding:8px 10px;border:1px solid var(--field);border-radius:8px;box-sizing:border-box}
+.dbtns{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.dbtns .btn{flex:1 1 auto;min-width:110px}
+@media (prefers-reduced-motion:reduce){.ddot{animation:none}}
+@media (max-width:999px){.dpane{bottom:calc(var(--tabs) + 8px + var(--safe))}}
+body.dpaneon .toast{bottom:auto;top:calc(72px + env(safe-area-inset-top,0px))}   /* the dictation panel owns the bottom of the screen */
 input.hasmic,textarea.hasmic{padding-right:44px}
 .closedb{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin:8px 0 0;padding:8px 10px;border-radius:8px;background:#ecebe6;font-size:14px;color:var(--ink2)}
 

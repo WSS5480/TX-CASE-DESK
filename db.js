@@ -503,6 +503,24 @@ DO $$ BEGIN
   END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS audit_firm ON audit_log(firm_id, at DESC);
+-- Conversations: a dated log on each case of calls, meetings, emails and texts (who, how, what was said), Word-style notes
+CREATE TABLE IF NOT EXISTS case_convos (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  case_id INT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  at TIMESTAMPTZ NOT NULL DEFAULT now(),   -- when the conversation happened
+  kind TEXT NOT NULL DEFAULT 'call',       -- call | meeting | voicemail | email | text | court | note
+  contact_id INT REFERENCES contacts(id) ON DELETE SET NULL,
+  with_name TEXT,                          -- who it was with (kept even if the contact is removed)
+  body TEXT,                               -- Word-style (cleaned HTML)
+  user_id INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ, updated_by INT REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS case_convos_case ON case_convos(case_id, at DESC);
+ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS direction TEXT;          -- in | out (who reached out)
+ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS minutes INT;             -- how long it took
+ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS time_id INT REFERENCES time_entries(id) ON DELETE SET NULL;   -- billed as time
+ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS task_id INT REFERENCES tasks(id) ON DELETE SET NULL;         -- follow-up task
 `;
 
 async function migrate() { await pool.query(SCHEMA); }

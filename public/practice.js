@@ -634,13 +634,13 @@
   async function caseHub(id) {
     const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
     subView = true; if (window.leaveMail) leaveMail(); else document.body.classList.remove("mailmode"); window.scrollTo(0, 0); $("#app").innerHTML = `<div class="card mute">Loading case…</div>`;
-    let r, cs, tpl, ps, dsc; try { [r, cs, tpl, ps, dsc] = await Promise.all([api(`/api/cases/${id}/hub`), loadCases(), api("/api/templates"), loadPeople(), api(`/api/cases/${id}/discovery`).catch(() => ({ sets: [] }))]); if (!rules) rules = (await api("/api/deadlines/rules")).rules; } catch (e) { return fail(e); }
+    let r, cs, tpl, ps, dsc, cv; try { [r, cs, tpl, ps, dsc, cv] = await Promise.all([api(`/api/cases/${id}/hub`), loadCases(), api("/api/templates"), loadPeople(), api(`/api/cases/${id}/discovery`).catch(() => ({ sets: [] })), api(`/api/cases/${id}/convos`).catch(() => ({ convos: [], kinds: [] }))]); if (!rules) rules = (await api("/api/deadlines/rules")).rules; } catch (e) { return fail(e); }
     const c = r.case, t = todayStr();
     const unbilled = r.time.filter(x => x.billable && !x.invoice_id).reduce((s, x) => s + (x.amount != null ? Number(x.amount) : x.minutes / 60 * x.rate), 0);
     const groups = [...new Set(rules.map(x => x.group))];
     const back = titleOf(tab);
     if (hub.id !== id) { hub.id = id; hub.sec = "overview"; }
-    const SECS = [["overview", "Overview"], ["dates", "Dates", r.events.filter(e => e.date >= t && !e.done).length], ["people", "People", r.contacts.length], ["tasks", "Tasks", r.tasks.filter(x => !x.done).length], ["docs", "Documents", r.documents.length], ["discovery", "Discovery", dsc.sets.filter(x => x.status !== "sent").length || null]];
+    const SECS = [["overview", "Overview"], ["talk", "Conversations", cv.convos.length], ["dates", "Dates", r.events.filter(e => e.date >= t && !e.done).length], ["people", "People", r.contacts.length], ["tasks", "Tasks", r.tasks.filter(x => !x.done).length], ["docs", "Documents", r.documents.length], ["discovery", "Discovery", dsc.sets.filter(x => x.status !== "sent").length || null]];
     if (isLawyer()) SECS.push(["law", "Case law"], ["billing", "Time & billing"]);
     const st = c.status || "Open", stCls = /closed|dismiss|dispos/i.test(st) ? "k" : /new/i.test(st) ? "n" : "g";
     const up = r.events.filter(e => e.date >= t && !e.done), nextH = up.find(e => e.kind === "hearing");
@@ -666,6 +666,7 @@
           <div style="flex:1;min-width:200px"><div style="font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--mute)">Next court date</div><div style="font-weight:600;font-size:16px">${esc(nextH.title)} · ${esc(niceDate(nextH.date))}${nextH.time ? " " + esc(nextH.time) : ""}</div><div class="mute">${esc(nextH.location || c.court || "")}${c.watch_dates ? " · checked every hour" : ""}</div></div></section>` : ""}
         <section class="box"><div class="bh"><h2>Coming up</h2><button type="button" class="lk" data-sec-go="dates">All dates</button></div><div class="dayb">${up.slice(0, 4).map(e => itemRow(e, { date: true, noCase: true })).join("") || `<div class="mute" style="padding:0 0 14px">No upcoming dates.</div>`}</div></section>
         <section class="box"><div class="bh"><h2>Notes</h2><span class="mute" id="hbNotesSt" style="font-size:13px"></span></div><div style="padding:0 18px 16px">${richEditor("notes", c.notes || "", "Case notes")}<div class="row" style="margin-top:8px"><button type="button" class="btn sm" id="hbNotesSave">Save notes</button></div></div></section>
+        <section class="box"><div class="bh"><h2>Conversations</h2><button type="button" class="lk" id="cvQuick">+ Log</button></div><div class="cvlist" id="cvRecent" style="padding:0 18px 12px"></div></section>
         <section class="box"><div class="bh"><h2>Open tasks</h2><button type="button" class="lk" data-sec-go="tasks">All tasks</button></div>${openTasks.slice(0, 4).map(tkRow).join("") || `<div class="empty">No open tasks.</div>`}</section>
       </div><div class="cside">
         <section class="box"><div class="bh"><h2>People</h2><button type="button" class="lk" data-sec-go="people">Manage</button></div><div style="padding:0 18px 8px">${r.contacts.slice(0, 5).map(x => `<div style="padding:10px 0;border-top:1px solid var(--line2)"><div class="mute" style="font-size:12px">${esc(cap(x.role))}</div><div style="font-weight:600">${esc(x.name)}</div>${x.company ? `<div class="mute">${esc(x.company)}</div>` : ""}${x.role === "client" && (x.phone || x.email) ? `<div class="row" style="gap:14px;font-size:14px;margin-top:2px">${x.phone ? `<a href="tel:${esc(x.phone)}">Call</a><a href="sms:${esc(x.phone)}">Text</a>` : ""}${x.email ? `<a href="mailto:${esc(x.email)}">Email</a>` : ""}</div>` : ""}</div>`).join("") || `<div class="mute" style="padding:0 0 10px">Add the client and the other side; every name is checked for conflicts.</div>`}</div></section>
@@ -684,6 +685,23 @@
         <div id="hbPpBox" hidden style="margin-top:8px"><label>Existing contact</label><input id="ppSearch" placeholder="Type a name"><div id="ppRes"></div>
           <details style="margin-top:8px"><summary class="mute">Or a new person</summary><form id="ppNew" style="margin-top:6px">${contactFields()}<label>Role on this case</label><select name="role"><option value="client">Client</option><option value="opposing party">Opposing party</option><option value="opposing counsel">Opposing counsel</option><option value="witness">Witness</option><option value="other">Other</option></select><div class="cfOut"></div><div class="err"></div><button class="btn sm">Add</button></form></details></div>
         ${r.contacts.map(p => `<div style="border-top:1px solid var(--line);padding:6px 0"><div class="row"><a class="link" data-ct="${p.id}">${esc(p.name)}</a><span class="tag ${p.role === "client" ? "g" : /opposing/.test(p.role) ? "r" : "n"}">${esc(p.role)}</span>${Number(p.trust) && isLawyer() ? `<span class="tag y">Trust ${usd(p.trust)}</span>` : ""}<button class="btn sm ghost" data-ppdel="${p.id}" style="margin-left:auto">Remove</button></div><div class="mute">${[p.company, p.phone, p.email].filter(Boolean).map(esc).join(" · ")}</div></div>`).join("") || `<div class="mute" style="margin-top:6px">Add the client and the other side — every name is checked for conflicts.</div>`}</div>
+      <div class="card" data-sec="talk"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Conversations</h3><button class="btn sm" id="cvNew">+ Log conversation</button></div>
+        <p class="mute" style="margin:6px 0 0">Calls, meetings, voicemails, emails and texts on this case — who, when and what was said.</p>
+        <form id="cvF" hidden style="margin-top:10px"><input type="hidden" name="id"><div class="grid">
+          <div><label for="cvKind">Type</label><select id="cvKind" name="kind">${[["call", "Call"], ["meeting", "Meeting"], ["voicemail", "Voicemail"], ["email", "Email"], ["text", "Text message"], ["court", "Court / clerk"], ["note", "Note to file"]].map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></div>
+          <div><label for="cvAt">When</label><input id="cvAt" type="datetime-local" name="at" required></div>
+          <div><label for="cvWho">With</label><select id="cvWho" name="contact_id"><option value="">Someone else / no one</option>${r.contacts.map(p => `<option value="${p.id}">${esc(p.name)} (${esc(p.role)})</option>`).join("")}</select></div>
+          <div id="cvOtherW"><label for="cvOther">Name (if not on the case)</label><input id="cvOther" name="with_name" maxlength="200" placeholder="e.g. adjuster, clerk"></div>
+          <div><label for="cvDir">Direction</label><select id="cvDir" name="direction"><option value="">—</option><option value="in">Incoming (they reached us)</option><option value="out">Outgoing (we reached them)</option></select></div>
+          <div><label for="cvMin">Minutes</label><input id="cvMin" name="minutes" type="number" min="0" max="1440" step="1" inputmode="numeric" placeholder="e.g. 12"><div class="mute" id="cvMinNote" hidden style="font-size:12.5px;margin-top:4px">Already billed: change the time entry under Time &amp; billing.</div></div>
+          <div class="full">${richEditor("body", "", "What was said", "Type or dictate what was said…")}</div>
+          ${isLawyer() ? `<div class="full" id="cvBillW"><label class="chk"><input type="checkbox" id="cvBill"> Add the minutes to billing (time entry on this case)</label>
+            <div id="cvBdW" hidden style="margin-top:6px"><label for="cvBd">Billing description (prints on the invoice — the notes above never do)</label><input id="cvBd" maxlength="300"></div></div>` : ""}
+          <div id="cvFuW"><label for="cvFu">Follow up by</label><input id="cvFu" type="date"></div>
+          <div id="cvFuTW"><label for="cvFuT">Follow-up task</label><input id="cvFuT" maxlength="300" placeholder="e.g. Send the records request"></div></div>
+          <div class="err"></div><div class="row" style="margin-top:8px"><button class="btn sm" id="cvSave">Save</button><button type="button" class="btn sm ghost" id="cvCancel">Cancel</button></div></form>
+        <div class="grid cvfilt" style="margin-top:12px"><div><label for="cvFk">Type</label><select id="cvFk"><option value="">All types</option></select></div><div><label for="cvFw">With</label><select id="cvFw"><option value="">Everyone</option></select></div><div class="full"><label for="cvFq">Search</label><input id="cvFq" type="search" placeholder="Words in the notes or a name" data-nomic></div></div>
+        <div class="cvlist" id="cvList" style="margin-top:10px"></div></div>
       <div class="card" data-sec="tasks"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Tasks</h3><button class="btn sm" id="hbTk">+ Task</button></div>
         <form id="hbTkF" hidden style="margin-top:8px"><div class="grid"><div class="full"><label>Task</label><input name="title" required></div><div><label>Due</label><input type="date" name="due_date"></div><div><label>For</label><select name="assignee">${peopleOptions(ps, c.user_id || me.id)}</select></div></div><button class="btn sm">Add</button></form>
         ${r.tasks.map(x => `<label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0;font-size:15px;color:var(--ink)"><input type="checkbox" data-task="${x.id}" ${x.done ? "checked" : ""} style="width:auto;margin-top:3px"><span style="${x.done ? "text-decoration:line-through;color:var(--mute)" : ""}">${esc(x.title)}<br><span class="mute" style="${!x.done && x.due_date && d10(x.due_date) < t ? "color:var(--bad)" : ""}">${x.due_date ? "Due " + niceDate(x.due_date) : ""}${x.assignee_name ? " · " + esc(x.assignee_name) : ""}</span></span></label>`).join("") || `<div class="mute" style="margin-top:6px">No tasks.</div>`}</div>
@@ -725,6 +743,73 @@
     const nNow = () => { syncRte(nb); return nb.querySelector("input[name=notes]").value; };
     nEd.addEventListener("input", () => { nSt.textContent = nNow() !== nSaved ? "Not saved yet" : ""; });
     $("#hbNotesSave").onclick = async () => { const v = nNow(); try { const r = await api(`/api/cases/${c.id}`, { method: "PATCH", body: { notes: v } }); nSaved = v; c.notes = r.case.notes || null; nSt.textContent = "Saved"; toast("Notes saved"); } catch (e) { fail(e); } };
+    // conversations: log, list (newest first), edit/delete by the person who logged it or an attorney
+    const CVK = { call: "Call", meeting: "Meeting", voicemail: "Voicemail", email: "Email", text: "Text", court: "Court / clerk", note: "Note to file" };
+    const pad = n => String(n).padStart(2, "0"), localDT = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const when = v => { const d = new Date(v); return isNaN(d) ? "" : d.toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", year: d.getFullYear() !== new Date().getFullYear() ? "numeric" : undefined, hour: "numeric", minute: "2-digit" }); };
+    const DIR = { in: "Incoming", out: "Outgoing" }, hrs = m => (Math.round(m / 6) / 10).toFixed(1) + " h";
+    const cvRow = (x, full) => `<div class="cvrow" data-cv="${x.id}"><div class="cvh"><span class="tag ${x.kind === "court" ? "k" : x.kind === "note" ? "k" : "n"}">${esc(CVK[x.kind] || x.kind)}</span>${x.direction ? `<span class="mute">${DIR[x.direction]}</span>` : ""}${x.with_name ? `<b>${esc(x.with_name)}</b>` : ""}<span class="mute">${esc(when(x.at))}${x.minutes ? " · " + x.minutes + " min" : ""}</span></div>
+      <div class="cvb">${full ? renderNotes(x.body) : esc(clip(txt(x.body), 160))}</div>
+      ${full && (x.time_id || x.task_id) ? `<div class="cvx">${x.time_id && isLawyer() ? `<span class="tag g">Billed ${hrs(x.billed_minutes || 0)}${x.billed_invoice ? " · invoiced" : ""}</span>` : ""}${x.task_id ? `<span class="tag ${x.follow_done ? "k" : "n"}">Follow-up${x.follow_due ? " " + esc(niceDate(x.follow_due)) : ""}${x.follow_done ? " · done" : ""}</span>` : ""}</div>` : ""}
+      ${full ? `<div class="cvf mute">Logged by ${esc(x.logged_by || "—")}${x.created_at && Math.abs(new Date(x.created_at) - new Date(x.at)) > 864e5 ? ` on ${esc(when(x.created_at))}` : ""}${x.edited_by ? ` · edited by ${esc(x.edited_by)}` : ""}${x.can_edit ? ` <button type="button" class="lk" data-cv-edit="${x.id}">Edit</button> <button type="button" class="lk" data-cv-del="${x.id}">Delete</button>` : ""}</div>` : ""}</div>`;
+    const clip = (t, n) => (t = String(t).replace(/\s+/g, " ").trim()).length > n ? t.slice(0, n - 1) + "…" : t;
+    const cvF = $("#cvF"); wireRte(cvF);
+    const txt = h => !h ? "" : /<\w/.test(h) ? new DOMParser().parseFromString(h, "text/html").body.textContent : String(h);
+    const cvDraw = () => { const L = cv.convos;
+      const fk = $("#cvFk").value, fw = $("#cvFw").value, fq = $("#cvFq").value.trim().toLowerCase();
+      const kinds = [...new Set(L.map(x => x.kind))], names = [...new Set(L.map(x => x.with_name).filter(Boolean))].sort();
+      $("#cvFk").innerHTML = `<option value="">All types</option>` + kinds.map(k => `<option value="${esc(k)}"${k === fk ? " selected" : ""}>${esc(CVK[k] || k)}</option>`).join("");
+      $("#cvFw").innerHTML = `<option value="">Everyone</option>` + names.map(n => `<option${n === fw ? " selected" : ""}>${esc(n)}</option>`).join("");
+      $(".cvfilt").hidden = L.length < 4;
+      const F = L.filter(x => (!fk || x.kind === fk) && (!fw || x.with_name === fw) && (!fq || (txt(x.body) + " " + (x.with_name || "") + " " + (x.logged_by || "")).toLowerCase().includes(fq)));
+      $("#cvList").innerHTML = F.map(x => cvRow(x, true)).join("") || `<div class="empty">${L.length ? "Nothing matches." : "No conversations logged yet."}</div>`;
+      $("#cvRecent").innerHTML = L.slice(0, 3).map(x => cvRow(x, false)).join("") + (L.length ? `<button type="button" class="lk" data-sec-go="talk" style="margin-top:6px">All ${L.length}</button>` : `<div class="mute">None logged yet.</div>`);
+      $$(".secnav [data-sec-go=talk] span").forEach(e => e.textContent = L.length); const o = $("#secSel option[value=talk]"); if (o) o.textContent = `Conversations (${L.length})`;
+      $$("#cvRecent [data-sec-go]").forEach(b => b.onclick = () => { setSec("talk"); $(".secnav").scrollIntoView({ block: "start" }); });
+      $$("#cvList [data-cv-edit]").forEach(b => b.onclick = () => cvOpen(cv.convos.find(x => x.id === +b.dataset.cvEdit)));
+      $$("#cvList [data-cv-del]").forEach(b => b.onclick = async () => { if (!confirm("Delete this conversation entry? Its time entry and follow-up task stay (delete those separately if needed).")) return; try { await api(`/api/convos/${b.dataset.cvDel}`, { method: "DELETE" }); cv.convos = cv.convos.filter(x => x.id !== +b.dataset.cvDel); cvDraw(); toast("Deleted"); } catch (e) { fail(e); } });
+    };
+    const cvOther = () => { $("#cvOtherW").hidden = !!$("#cvWho").value; };
+    const cvOpen = x => { cvF.reset(); cvF.id.value = x ? x.id : ""; $("#cvKind").value = x ? x.kind : "call"; $("#cvAt").value = $("#cvAt").dataset.dflt = localDT(x ? new Date(x.at) : new Date());
+      $("#cvWho").value = x && x.contact_id && r.contacts.some(p => p.id === x.contact_id) ? x.contact_id : ""; $("#cvOther").value = x && !$("#cvWho").value ? x.with_name || "" : ""; cvOther();
+      const ed = cvF.querySelector(".rta"); ed.innerHTML = x && x.body ? (isRichText(x.body) ? safeHtml(x.body) : esc(x.body).replace(/\n/g, "<br>")) : ""; syncRte(cvF);
+      $("#cvDir").value = x ? x.direction || "" : ""; $("#cvMin").value = x && x.minutes != null ? x.minutes : "";
+      if ($("#cvBillW")) { $("#cvBillW").hidden = !!(x && (x.time_id || x.user_id !== me.id)); $("#cvBill").checked = false; delete $("#cvBd").dataset.edited; billSync(); }   // only your own entry can be billed (in your name and rate)
+      $("#cvMinNote").hidden = !(x && x.time_id);
+      $("#cvFuW").hidden = $("#cvFuTW").hidden = !!(x && x.task_id); $("#cvFu").value = ""; $("#cvFuT").value = "";
+      cvF.querySelector(".err").textContent = ""; $("#cvSave").textContent = x ? "Save changes" : "Save"; cvF.hidden = false; setSec("talk"); cvF.scrollIntoView({ block: "nearest" }); ed.focus(); };
+    $("#cvWho").onchange = cvOther;
+    const BILLD = { call: "Telephone conference", meeting: "Conference", voicemail: "Voicemail", email: "Email correspondence", text: "Text message correspondence", court: "Communication with court/clerk", note: "Case file review" };
+    const billDflt = () => { const w = $("#cvWho").value ? (r.contacts.find(p => p.id === +$("#cvWho").value) || {}).name : $("#cvOther").value.trim(); return (BILLD[$("#cvKind").value] || "Conference") + (w && $("#cvKind").value !== "note" ? " with " + w : ""); };
+    const billSync = () => { if (!$("#cvBill")) return; $("#cvBdW").hidden = !$("#cvBill").checked; if (!$("#cvBd").dataset.edited) $("#cvBd").value = billDflt(); };
+    if ($("#cvBill")) { $("#cvBill").onchange = billSync; $("#cvBd").oninput = () => { $("#cvBd").dataset.edited = 1; }; ["#cvKind", "#cvOther"].forEach(k => $(k).addEventListener("input", billSync)); $("#cvKind").addEventListener("change", billSync); $("#cvWho").addEventListener("change", billSync); }
+    $("#cvMin").oninput = () => { if ($("#cvBill") && !$("#cvBillW").hidden) { $("#cvBill").checked = +$("#cvMin").value > 0; billSync(); } };
+    ["#cvFk", "#cvFw"].forEach(k => $(k).onchange = cvDraw); $("#cvFq").oninput = cvDraw;
+    $("#cvNew").onclick = () => cvOpen();
+    $("#cvQuick").onclick = () => { cvOpen(); $(".secnav").scrollIntoView({ block: "start" }); cvF.querySelector(".rta").focus(); };
+    $("#cvCancel").onclick = () => { cvF.hidden = true; cvF.id.value = ""; };
+    cvF.onsubmit = async e => { e.preventDefault(); syncRte(cvF); const err = cvF.querySelector(".err"); err.textContent = "";
+      const id = cvF.id.value, untouched = $("#cvAt").value === $("#cvAt").dataset.dflt;
+      const d = untouched ? (id ? null : new Date()) : new Date($("#cvAt").value);   // time left as is: a new entry gets the exact time now, an edit keeps its own
+      const mins = $("#cvMin").value === "" ? null : Math.round(+$("#cvMin").value);
+      if (d && isNaN(d)) { err.textContent = "Check the date and time."; return; }
+      const body = { kind: $("#cvKind").value, ...(d ? { at: d.toISOString() } : {}), contact_id: $("#cvWho").value ? +$("#cvWho").value : null, with_name: $("#cvWho").value ? null : $("#cvOther").value,
+        direction: $("#cvDir").value, minutes: mins, body: cvF.querySelector("input[name=body]").value };
+      if (!body.body) { err.textContent = "Write what was said."; return; }
+      const bill = $("#cvBill") && !$("#cvBillW").hidden && $("#cvBill").checked, fu = !$("#cvFuW").hidden && $("#cvFu").value;
+      if (bill && !(mins > 0)) { err.textContent = "Enter the minutes to bill."; return; }
+      const btn = $("#cvSave"); btn.disabled = true;
+      try { let x = (await api(id ? `/api/convos/${id}` : `/api/cases/${c.id}/convos`, { method: id ? "PATCH" : "POST", body })).convo;
+        // billing and the follow-up are separate records; the entry links to them
+        const who = x.with_name ? ` with ${x.with_name}` : "", link = {}, notes = [];
+        if (bill) try { const te = (await api("/api/time", { method: "POST", body: { case_id: c.id, minutes: mins, on_date: localDT(new Date(x.at)).slice(0, 10), description: clip($("#cvBd").value.trim() || billDflt(), 300) } })).entry; link.time_id = te.id; r.time = [te, ...(r.time || [])]; } catch (e2) { notes.push("time wasn't added (" + e2.message + ")"); }
+        if (fu) try { const tk = (await api("/api/tasks", { method: "POST", body: { case_id: c.id, title: $("#cvFuT").value.trim() || `Follow up: ${(CVK[x.kind] || "conversation").toLowerCase()}${who}`, due_date: $("#cvFu").value } })).task; link.task_id = tk.id; } catch (e2) { notes.push("follow-up task wasn't added (" + e2.message + ")"); }
+        if (Object.keys(link).length) try { x = (await api(`/api/convos/${x.id}`, { method: "PATCH", body: link })).convo; } catch (e3) { x = { ...x, ...link }; notes.push("link to it wasn't saved (" + e3.message + ")"); }
+        if (notes.length) toast("Saved, but the " + notes.join(" and the "));
+        cv.convos = [x, ...cv.convos.filter(y => y.id !== x.id)].sort((a, b) => new Date(b.at) - new Date(a.at) || b.id - a.id);
+        cvF.hidden = true; cvF.id.value = ""; cvDraw(); if (!notes.length) toast(id ? "Saved" : link.time_id || link.task_id ? `Logged${link.time_id ? ", billed" : ""}${link.task_id ? ", follow-up set" : ""}` : "Conversation logged"); }
+      catch (er) { err.textContent = er.message; } finally { btn.disabled = false; } };
+    cvDraw();
     // sections: tabs on desktop, a dropdown on phones
     const setSec = k => { hub.sec = k; $$("#app [data-sec]").forEach(s => s.hidden = s.dataset.sec !== k); $$(".secnav [data-sec-go]").forEach(b => b.dataset.secGo === k ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")); $("#secSel").value = k; };
     setSec(SECS.some(([k]) => k === hub.sec) ? hub.sec : "overview");

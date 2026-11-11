@@ -675,56 +675,141 @@ const syncRte = root => (root || document).querySelectorAll(".rte").forEach(w =>
 
 // ---------------- Dictation: a mic on whatever you're typing in ----------------
 // Uses the browser's own speech recognition (Chrome, Edge, Safari). Phones also have the keyboard's mic.
+// What's said shows in a panel at the bottom while you talk. When you tap stop, AI fixes the grammar and punctuation
+// (basic cleanup if AI isn't on); you then choose Insert, Insert as spoken, Copy or Discard. Nothing goes in on its own.
+// Pure helpers (also used by the tests)
+const DICT = {
+  words: t => String(t || "").replace(/\s*\b(period|full stop)\b/gi, ".").replace(/\s*\bcomma\b/gi, ",").replace(/\s*\bquestion mark\b/gi, "?").replace(/\s*\bsemicolon\b/gi, ";").replace(/\s*\bcolon\b/gi, ":")
+    .replace(/\s*\bnew paragraph\b\s*/gi, "\n\n").replace(/\s*\bnew line\b\s*/gi, "\n"),
+  // without AI: drop fillers and stutters, capitalize sentences and "I", end with a period
+  basic(t) {
+    let x = String(t || "").replace(/\r/g, "");
+    x = x.replace(/(^|[\s,])(um+|uh+|er+m?|ah+|hmm+|mm+)(?=[\s,.?!;:]|$)[,]?/gi, "$1");
+    x = x.replace(/\b([A-Za-z]+)(\s+\1\b)+/gi, (m, w) => /^(had|that)$/i.test(w) ? m : w);   // stutters (words only: "11 11" stays); "had had" can be right
+    x = x.split("\n").map(l => l.replace(/[ \t]+/g, " ").replace(/\s+([.,?!;:])/g, "$1").replace(/([,?!;:]|\.(?![a-z]\.))(?=[A-Za-z])/g, "$1 ").replace(/,\s*([.?!])/g, "$1").trim()).join("\n");
+    x = x.replace(/\bi\b(?!\.)/g, "I").replace(/\bi'(m|ve|ll|d)\b/gi, (m, e) => "I'" + e.toLowerCase());
+    x = x.replace(/(^|[.?!]\s+|\n\s*)([a-z])/g, (m, p, c, at, all) => /\b(i\.e|e\.g|vs?|no|mr|mrs|ms|dr|st|etc)\.\s*$/i.test(all.slice(0, at + p.length)) ? m : p + c.toUpperCase());   // not after "e.g." or "v."
+    x = x.replace(/\n{3,}/g, "\n\n").trim();
+    return x.split(/\n\n/).map(p => p && !/[.?!:;,]$/.test(p) && !/\n- /.test("\n" + p) ? p + "." : p).join("\n\n");
+  },
+};
 (function dictation() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition; if (!SR) return;
   const btn = document.createElement("button"); btn.type = "button"; btn.className = "mic"; btn.hidden = true;
   btn.setAttribute("aria-label", "Dictate"); btn.title = "Dictate (tap again to stop)";
   btn.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a1 1 0 1 1 2 0 7 7 0 0 1-6 6.92V21h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2.08A7 7 0 0 1 5 12a1 1 0 1 1 2 0 5 5 0 0 0 10 0Z"/></svg>`;
+  const pane = document.createElement("div"); pane.className = "dpane"; pane.hidden = true; pane.setAttribute("data-nomic", ""); pane.setAttribute("role", "region"); pane.setAttribute("aria-label", "Dictation");
   const ok = el => el && !el.disabled && !el.readOnly && !el.closest("[data-nomic]") && ((el.classList && el.classList.contains("rta")) || el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && /^(text|search)$/i.test(el.getAttribute("type") || "text")));
-  let field = null, rec = null, on = false, raf = 0, told = false;
-  const gone = () => { if (field && !document.body.contains(field)) { stop(); btn.hidden = true; field = null; return true; } return false; };
+  let field = null, rec = null, on = false, raf = 0;
+  let target = null, range = null, said = [], base = [], fin = [], heard = "", spoken = "", busy = false, run = 0;   // this dictation: where it goes, what was said
+  const gone = () => { if (field && !document.body.contains(field)) { if (on) stop(); btn.hidden = true; field = null; return true; } return false; };
   const place = () => { if (gone() || !field || btn.hidden) return; const r = field.getBoundingClientRect(), multi = field.tagName !== "INPUT";
     if (r.bottom < 0 || r.top > innerHeight) { btn.style.visibility = "hidden"; return; } btn.style.visibility = "";
     btn.style.top = Math.round(scrollY + r.top + (multi ? 6 : Math.max(0, (r.height - 32) / 2))) + "px"; btn.style.left = Math.round(scrollX + r.right - 38) + "px"; };
   const replace = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(place); };
   const cap = (t, before) => /(^|[.!?]\s*|\n\s*)$/.test(before) ? t.replace(/^\s*\w/, c => c.toUpperCase()) : t;
-  function words(t) { return t.replace(/\s*\b(period|full stop)\b/gi, ".").replace(/\s*\bcomma\b/gi, ",").replace(/\s*\bquestion mark\b/gi, "?").replace(/\s*\bcolon\b/gi, ":").replace(/\s*\bsemicolon\b/gi, ";")
-    .replace(/\s*\bnew paragraph\b\s*/gi, "\n\n").replace(/\s*\bnew line\b\s*/gi, "\n"); }
-  function insert(raw) {
-    if (!field || !document.body.contains(field)) return stop();
-    let t = words(raw.trim()); if (!t) return;
-    if (field.tagName === "INPUT" || field.tagName === "TEXTAREA") {
-      if (field.tagName === "INPUT") t = t.replace(/\n+/g, " ");
-      const a = field.selectionStart ?? field.value.length, b = field.selectionEnd ?? a, before = field.value.slice(0, a);
+  const raw = () => DICT.words(said.join(" ")).replace(/[ \t]+/g, " ").trim();
+  // some phones send everything said so far again as each new piece: keep the longest, drop exact repeats
+  // (whole words only, and only on Android, so "No" then "nothing was filed" keeps both)
+  const AND = /Android/i.test(navigator.userAgent), pre = (a, b) => a.startsWith(b) && (a.length === b.length || /\s/.test(a[b.length]));
+  const dedupe = a => !AND ? a : a.reduce((o, v) => { const l = o[o.length - 1], lv = v.toLowerCase(), ll = l && l.toLowerCase();
+    if (l && pre(lv, ll)) o[o.length - 1] = v; else if (!(l && pre(ll, lv))) o.push(v); return o; }, []);
+  function insert(t, el) {
+    if (!el || !document.body.contains(el)) return false;
+    t = String(t || "").trim(); if (!t) return true;
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      if (el.tagName === "INPUT") t = t.replace(/\s*\n+\s*/g, " ");
+      const a = el.selectionStart ?? el.value.length, b = el.selectionEnd ?? a, before = el.value.slice(0, a);
       t = cap(t, before); if (before && !/[\s\n]$/.test(before) && !/^[.,?:;\n]/.test(t)) t = " " + t;
-      field.setRangeText(t, a, b, "end"); field.dispatchEvent(new Event("input", { bubbles: true }));
+      el.setRangeText(t, a, b, "end"); el.focus(); el.dispatchEvent(new Event("input", { bubbles: true }));
     } else {
-      field.focus(); const parts = t.split(/(\n+)/); let brk = false;
+      el.focus(); const sel = getSelection();
+      if (range && el.contains(range.startContainer)) { sel.removeAllRanges(); sel.addRange(range); }
+      else { const r = document.createRange(); r.selectNodeContents(el); r.collapse(false); sel.removeAllRanges(); sel.addRange(r); }
+      const parts = t.split(/(\n+)/); let brk = false;
       for (const p of parts) { if (!p) continue; if (/^\n\n/.test(p)) { document.execCommand("insertParagraph"); brk = true; } else if (/^\n/.test(p)) { document.execCommand("insertLineBreak"); brk = true; } else {
-        const sel = getSelection(), pre = brk ? "" : sel && sel.anchorNode && sel.anchorNode.nodeType === 3 ? String(sel.anchorNode.textContent || "").slice(0, sel.anchorOffset) : "";
+        const s2 = getSelection(), pre = brk ? "" : s2 && s2.anchorNode && s2.anchorNode.nodeType === 3 ? String(s2.anchorNode.textContent || "").slice(0, s2.anchorOffset) : "";
         let q = cap(p.trim(), brk ? "\n" : pre); if (pre && !/\s$/.test(pre) && !/^[.,?:;]/.test(q)) q = " " + q; document.execCommand("insertText", false, q); brk = false; } }
-      field.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("input", { bubbles: true }));
     }
+    return true;
   }
+  const keep = el => { el.addEventListener("pointerdown", e => { if (e.target.closest("button")) e.preventDefault(); }); };   // buttons don't steal the cursor
+  keep(pane);
+  const vv = window.visualViewport, lift = () => { if (pane.hidden || !vv) return; const kb = Math.max(0, innerHeight - vv.height - vv.offsetTop); pane.style.bottom = kb > 60 ? kb + 8 + "px" : ""; };
+  if (vv) { vv.addEventListener("resize", lift); vv.addEventListener("scroll", lift); }
+  function show(state, text, note) {
+    pane.hidden = false; pane.dataset.state = state; document.body.classList.add("dpaneon"); lift();
+    if (state === "listen" && pane.dataset.built === "listen") { const d = pane.querySelector(".dtext"); if (text) d.textContent = text; else d.innerHTML = `<span class="mute">Start talking.</span>`; return; }
+    pane.dataset.built = state;
+    if (state === "listen") pane.innerHTML = `<div class="dhead"><span class="ddot" aria-hidden="true"></span><b>Listening…</b> <span class="mute">Tap Stop when you're done. Grammar is cleaned up before anything goes in.</span></div>
+      <div class="dtext" aria-live="polite">${esc(text) || `<span class="mute">Start talking.</span>`}</div>
+      <div class="dbtns"><button type="button" class="btn" data-d="stop">Stop</button><button type="button" class="btn ghost" data-d="discard">Discard</button></div>`;
+    else if (state === "work") pane.innerHTML = `<div class="dhead"><b>Cleaning up grammar…</b></div><div class="dtext">${esc(text)}</div>
+      <div class="dbtns"><button type="button" class="btn ghost" data-d="asis">Insert as spoken</button><button type="button" class="btn ghost" data-d="discard">Discard</button></div>`;
+    else pane.innerHTML = `<div class="dhead"><b>${note ? "Basic cleanup" : "Cleaned up"}</b> <span class="mute">${note ? esc(note) + " " : ""}Check it, edit if needed, then insert.</span></div>
+      <textarea class="dedit" rows="4" aria-label="Cleaned-up text" data-nomic>${esc(text)}</textarea>
+      <div class="dbtns">${target && document.body.contains(target) ? `<button type="button" class="btn" data-d="insert">Insert</button><button type="button" class="btn ghost" data-d="asis">Insert as spoken</button>` : `<span class="mute">The box you were typing in has closed.</span>`}<button type="button" class="btn ghost" data-d="copy">Copy</button><button type="button" class="btn ghost" data-d="discard">Discard</button></div>`;
+  }
+  let ending = null;   // a recognizer that was told to stop and may still hand over words
+  const drop = () => { if (ending) { ending.onresult = ending.onend = ending.onerror = null; try { ending.abort(); } catch (e) {} ending = null; } };
+  const close = () => { drop(); pane.hidden = true; pane.innerHTML = ""; pane.dataset.built = ""; document.body.classList.remove("dpaneon"); said = []; base = []; fin = []; heard = ""; spoken = ""; target = null; range = null; busy = false; run++; };
+  async function finish() {
+    const r = raw(); spoken = r; if (!r) return close();
+    busy = true; const mine = ++run; show("work", r);
+    let out = null, note = "";
+    if (me && me.dev_view) note = "(AI cleanup is off in developer view.)";
+    else try { out = (await api("/api/dictation/cleanup", { method: "POST", body: { text: r } })).text; }
+      catch (e) { note = e.status === 503 ? "(AI cleanup isn't switched on yet.)" : e.status === 429 || e.status === 400 ? "(" + e.message + ")" : "(AI cleanup didn't answer.)"; }
+    if (mine !== run) return;   // discarded or inserted while waiting
+    busy = false; show("done", out || DICT.basic(r), out ? "" : note);
+  }
+  pane.addEventListener("click", async e => {
+    const b = e.target.closest("[data-d]"); if (!b) return; const d = b.dataset.d;
+    if (d === "stop") return stop();
+    if (d === "discard") { if (on) stop(true); return close(); }
+    if (d === "asis") { const t = spoken || raw(); if (!insert(t, target)) return toast("The box you were typing in has closed. Use Copy."); toast("Inserted as spoken."); return close(); }
+    const ta = pane.querySelector(".dedit"); const t = ta ? ta.value : "";
+    if (d === "insert") { if (!insert(t, target)) return toast("The box you were typing in has closed. Use Copy."); return close(); }
+    if (d === "copy") { try { await navigator.clipboard.writeText(t); toast("Copied."); } catch (er) { ta && ta.select(); toast("Select the text and copy it."); } }
+  });
   function start() {
-    if (!told) { told = true; toast("Dictating — speak, then tap the mic to stop. Say \"period\", \"comma\", \"new line\" or \"new paragraph\"."); }
+    if (busy || ending || (!pane.hidden && pane.dataset.state === "done")) { pane.querySelector(".dedit") && pane.querySelector(".dedit").focus(); return toast("Insert or discard the last dictation first."); }
     try { rec = new SR(); } catch (e) { return toast("Dictation isn't available in this browser."); }
-    rec.lang = navigator.language || "en-US"; rec.continuous = true; rec.interimResults = false;
-    rec.onresult = ev => { for (let i = ev.resultIndex; i < ev.results.length; i++) if (ev.results[i].isFinal) insert(ev.results[i][0].transcript); };
+    target = field; said = []; heard = ""; range = null;
+    if (target && target.classList.contains("rta")) { const s = getSelection(); if (s && s.rangeCount && target.contains(s.getRangeAt(0).startContainer)) range = s.getRangeAt(0).cloneRange(); }
+    rec.lang = navigator.language || "en-US"; rec.continuous = true; rec.interimResults = true;
+    base = []; fin = [];
+    rec.onresult = ev => { heard = "";
+      for (let i = 0; i < ev.results.length; i++) { const t = ev.results[i][0].transcript; if (ev.results[i].isFinal) fin[i] = t.trim(); else heard += t; }
+      said = base.concat(dedupe(fin.filter(Boolean)));
+      if (on) show("listen", (raw() + (heard ? " " + DICT.words(heard) : "")).trim()); };
     rec.onerror = ev => { if (/not-allowed|service-not-allowed|audio-capture/.test(ev.error)) { toast(ev.error === "audio-capture" ? "No microphone found." : "The microphone is blocked. Allow it for this site in your browser settings, then tap the mic again."); stop(); } };
-    let restarts = []; rec.onend = () => { if (!on) return; if (gone()) return;   // keeps listening until you tap stop (but gives up if it keeps failing)
+    let restarts = []; rec.onend = () => { if (!on) return;   // keeps listening until you tap stop (but gives up if it keeps failing)
       const now = Date.now(); restarts = restarts.filter(t => now - t < 15000); restarts.push(now);
       if (restarts.length > 4) { stop(); return toast("Dictation stopped. Tap the mic to try again."); }
+      base = said.slice(); fin = [];   // the browser starts a new list of results after a restart
       setTimeout(() => { if (on && rec) { try { rec.start(); } catch (e) { stop(); } } }, 250); };
-    try { rec.start(); on = true; btn.classList.add("rec"); btn.setAttribute("aria-pressed", "true"); btn.title = "Stop dictating"; } catch (e) { stop(); }
+    try { rec.start(); on = true; btn.classList.add("rec"); btn.setAttribute("aria-pressed", "true"); btn.title = "Stop dictating"; show("listen", ""); } catch (e) { stop(true); close(); }
   }
-  function stop() { on = false; btn.classList.remove("rec"); btn.setAttribute("aria-pressed", "false"); btn.title = "Dictate (tap again to stop)"; try { rec && rec.stop(); } catch (e) {} rec = null; }
+  function stop(quiet) {
+    const was = on; on = false; btn.classList.remove("rec"); btn.setAttribute("aria-pressed", "false"); btn.title = "Dictate (tap again to stop)";
+    const r = rec; rec = null;
+    if (target && target.classList.contains("rta")) { const s = getSelection(); if (s && s.rangeCount && target.contains(s.getRangeAt(0).startContainer)) range = s.getRangeAt(0).cloneRange(); }
+    if (!r) return; if (quiet || !was) { try { r.abort(); } catch (e) {} return; }
+    // let the browser hand over the last words it heard, then clean up (unless Discard was tapped meanwhile)
+    const tok = run; ending = r; let done = false;
+    const go = () => { if (done) return; done = true; r.onresult = r.onend = r.onerror = null; if (ending === r) ending = null; if (tok !== run) return;
+      if (heard.trim()) { said.push(DICT.words(heard).trim()); heard = ""; } finish(); };
+    r.onend = go; setTimeout(go, 1200);
+    try { r.stop(); } catch (e) { go(); }
+  }
   btn.addEventListener("pointerdown", e => e.preventDefault()); btn.addEventListener("mousedown", e => e.preventDefault());   // the text box keeps the cursor
   btn.onclick = () => on ? stop() : start();
-  document.addEventListener("focusin", e => { const t = e.target; if (t === btn) return; if (ok(t)) { if (on && t !== field) stop(); field = t; field.classList.add("hasmic"); btn.hidden = false; place(); } else if (!on) btn.hidden = true; });
+  document.addEventListener("focusin", e => { const t = e.target; if (t === btn || pane.contains(t)) return; if (ok(t)) { if (on && t !== field) stop(); field = t; field.classList.add("hasmic"); btn.hidden = false; place(); } else if (!on) btn.hidden = true; });
   document.addEventListener("focusout", e => { const t = e.target; setTimeout(() => { if (!on && document.activeElement !== field) { btn.hidden = true; if (t && t.classList) t.classList.remove("hasmic"); } }, 120); });
   addEventListener("scroll", replace, true); addEventListener("resize", replace); document.addEventListener("input", replace, true);
-  const ready = () => { document.body.appendChild(btn); const a = document.getElementById("app"); if (a) new MutationObserver(() => gone()).observe(a, { childList: true }); }; document.body ? ready() : addEventListener("DOMContentLoaded", ready);
+  const ready = () => { document.body.appendChild(btn); document.body.appendChild(pane); const a = document.getElementById("app"); if (a) new MutationObserver(() => gone()).observe(a, { childList: true }); }; document.body ? ready() : addEventListener("DOMContentLoaded", ready);
 })();
 
 async function casesView() {
