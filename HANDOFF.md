@@ -91,7 +91,14 @@ David's question 4 (where it runs) is already answered by the app: it's a web ap
 - Server: `server.js` (routes), `db.js` (schema, all `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE … IF NOT EXISTS`, so migrations run on boot), `practice.js`, `mail.js`, `mailbox.js`, `inbound.js`, `discovery.js`, `analysis.js`, `lawdb.js`, `courtlistener.js`, `deadlines.js`, `activity.js`, `convos.js`, `access.js`, `dictate.js`, `crypto-box.js`, `myapps.js`, `terms.js`.
 - Front end: `public/index.html`, `public/app.js`, `public/practice.js`, `public/mail.js`, service worker `public/sw.js`.
 - GitHub Actions: `hourly.yml` (the free hourly court-date ping), `load-texas.yml` (case-law load).
-- _To fill in by the build session:_ deploy steps and whether Render auto-deploys from `main`, how to test locally, the developer PIN location, where the Decision Log lives in code, the review-agent routine.
+- **Deploy:** pushing to `main` auto-deploys on Render (service `srv-dbinok49v7es7384ckr0`, workspace `tea-dbinoeflk1mc73f873f0`). Put `[skip render]` in the commit message for docs-only commits. After a push, confirm with Render `list_deploys` (status `live`, matching commit) and `list_logs` (no errors). The repo is **public**: never commit secrets, PINs, keys or Decision Log content.
+- **Database:** Render Postgres `dpg-dbinogtg1s2s73dopoog-a` (free, **deleted Nov 30, 2026** unless upgraded). Its IP allowlist is empty, so it can't be queried from outside; check things through the app or the logs.
+- **Migrations:** run on boot from `db.js` SCHEMA (idempotent). Big indexes go in `LATE_INDEXES` (built CONCURRENTLY after start). One-time data moves use the `tcd_once` table.
+- **Email sending:** free Render web services block SMTP ports 25/465/587, so IMAP/SMTP mailboxes (David's) can't send until the app server is on Starter. Microsoft/Google mailboxes send over HTTPS and aren't affected.
+- **Local testing:** Postgres 16 at `/tmp/pg/data` (start: `su postgres -c "/usr/lib/postgresql/16/bin/pg_ctl -D /tmp/pg/data -l /tmp/pg/log start"`), database `txcd4`. Run the server on port 3999 with `DATABASE_URL=postgres://postgres@localhost/txcd4 PGSSLMODE=disable SESSION_SECRET=… CRED_KEY=$(cat /tmp/ck) DEVELOPER_PIN=dev-pin-12345` (a test-only PIN). Mocks: mail `/tmp/mailmock/restart.sh` (run from another directory), discovery AI `/tmp/disc/aimock.js` (:4777), dictation AI `/tmp/dictmock/mock.js` (:4778). Playwright suites in `/tmp/uitest/` (`activity.js`, `convo.js`, `dict.js`, `closed.js`, `disc.js`), phone and desktop. Sign-ups are rate-limited (20 per 15 min): restart the server between suites. These live in the session VM, not the repo; a new session recreates them.
+- **Developer PIN:** a Render environment variable (`DEVELOPER_PIN`). Steve knows it; never write it in the repo or chat logs.
+- **Decision Log:** a Claude artifact database, slug `ededf58c-76dd-4b49-ad62-7e7aa9f2c388`. Write with `db_write`, path `decisions/<date>-<topic>`, fields `{date, ts, area, decision, why, by}`. Never record secrets.
+- **Review routine (every change, before shipping):** snapshot the working tree (`md5sum` of changed files, `git rev-parse HEAD`, stash count), then run an independent **read-only** review agent covering security, legal soundness, phone and desktop. Afterwards, verify the snapshot is unchanged and report any reviewer that broke protocol. Fix the findings, re-run the tests, and run a short verification review for anything non-trivial. Then commit, push and confirm the deploy.
 
 ## 4. Change log
 
@@ -100,7 +107,13 @@ David's question 4 (where it runs) is already answered by the app: it's a web ap
 | Nov 13, 2026 | HANDOFF.md started. David's Nov 6 / Nov 12 notes added under `docs/david-notes/`. No app code changed. |
 | Nov 13, 2026 | Steve answered questions A–G (section 1). No app code changed. |
 
-_To fill in by the build session: earlier history._
+Earlier (newest first):
+
+| Date | Change |
+|---|---|
+| Nov 11, 2026 | Activity log tab (one timeline, category filter buttons, search, sort); database trigger records case changes and who made them; deletions/sharing audited; paralegals never get billing data. |
+| Nov 11, 2026 | Conversations log on every case (type, who, direction, minutes, notes, optional billing with a neutral description, follow-up task); dictation now cleans up grammar with AI before inserting (User Agreement 2026-11-11). |
+| Nov 8, 2026 | Court settings emails put hearings on every attorney's calendar; discovery responses (split, AI draft, attorney approves, one-click serve); auto-close on final disposition with a Closed cases view; case stages with PRE- numbers; Word-style notes; dictation mic; password-only sign-in for David (`MFA_OFF_EMAILS`); email provider dropdown and full-history email scan. |
 
 ## 5. Decisions
 
@@ -111,4 +124,6 @@ The Decision Log in the app is the record. Nov 13: Steve's answers A–G (sectio
 - [x] Get answers to questions A–G (Steve, Nov 13).
 - [ ] Build David's notes (section 1) to those answers.
 - [ ] Render upgrade: app server to Starter, database to Basic-256mb. Free database expires **Nov 30, 2026**.
-- [ ] Fill in the "to fill in" parts of sections 3 and 4.
+- [x] Fill in sections 3 and 4 (Nov 13).
+- [ ] Offered, not yet accepted: export the Activity log (PDF/Excel); Client box on the Add case form (now covered by David's notes); read hearing dates from PDF orders; detect discovery requests in incoming email.
+- [ ] Anthropic API key (`ANTHROPIC_API_KEY`) not yet set in Render: AI drafting and dictation cleanup fall back until it is.
