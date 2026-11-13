@@ -55,11 +55,21 @@
       vs.hidden = !(V.on && t) && !note; vs.dataset.state = state;
       el("#asVsT").textContent = note || t || ""; el("#asVsEnd").hidden = !V.on;
     }
+    // the voices this device has: English first (US first), then the rest; names differ per device
+    V.list = () => { if (!syn) return []; const all = syn.getVoices() || [], en = all.filter(v => /^en/i.test(v.lang));
+      return (en.length ? en : all).slice().sort((a, b) => (/^en[-_]US/i.test(b.lang) - /^en[-_]US/i.test(a.lang)) || a.name.localeCompare(b.name)); };
+    const pref = k => (me && me.prefs || {})[k];
+    V.rate = () => { const r = +pref("assistant_voice_rate"); return r >= 0.7 && r <= 1.5 ? r : 1.03; };
+    V.chosen = () => { const n = pref("assistant_voice_name"); return n ? V.list().find(v => v.name === n) || null : null; };
     function pick() {
+      const c = V.chosen(); if (c) return c;
       if (voice || !syn) return voice; const all = syn.getVoices().filter(v => /^en[-_]US/i.test(v.lang));
       return voice = all.find(v => /natural|neural|premium|enhanced/i.test(v.name)) || all.find(v => /Google US English|Samantha|Aria|Jenny/i.test(v.name)) || all.find(v => v.localService) || all[0] || null;
     }
-    if (syn && syn.addEventListener) syn.addEventListener("voiceschanged", () => { voice = null; });
+    let vkey = "";   // redraw the menu only when the voice list really changed, and never while someone is using it (an open phone picker would close)
+    if (syn && syn.addEventListener) syn.addEventListener("voiceschanged", () => { voice = null;
+      const k = V.list().map(v => v.name).join("|"); if (k === vkey) return; vkey = k;
+      const m = el("#asVm"); if (panel && m && !m.hidden && !m.contains(document.activeElement)) V.menu(true); });
     // what is read aloud: no markdown, case links read as the case name, list items as sentences
     V.plain = (text, links) => { const L = new Map((links || []).map(l => [+l.id, l.label]));
       return String(text || "").replace(/\[\[case:(\d{1,9})\]\]/g, (m, id) => L.get(+id) || "").replace(/\*\*/g, "").replace(/^\s*[-•*]\s+(.*?)[.;:]?\s*$/gm, "$1.")
@@ -83,7 +93,7 @@
         if (V.replaying) { V.replaying = false; draw(); }
         if (thenListen && V.on && S.open) { const g = gen; setTimeout(() => g === gen && V.on && listen(), 250); } else if (!V.on) ui("idle"); };
       V.q = [];   // kept referenced: Chrome can drop an unreferenced piece and never say it finished
-      parts.forEach((p, i) => { const u = new SpeechSynthesisUtterance(p); const v = pick(); if (v) u.voice = v; u.lang = v ? v.lang : "en-US"; u.rate = 1.03;
+      parts.forEach((p, i) => { const u = new SpeechSynthesisUtterance(p); const v = pick(); if (v) u.voice = v; u.lang = v ? v.lang : "en-US"; u.rate = V.rate();
         if (i === parts.length - 1) u.onend = u.onerror = done;
         V.q.push(u); syn.speak(u); });
       // backup in case the browser never reports the end (about 90 ms a character, plus slack)
@@ -131,11 +141,36 @@
     // the on/off switch: per person, remembered on every device (off = no mic, no speaker buttons, nothing read aloud)
     V.enabled = () => !(me && me.prefs && me.prefs.assistant_voice === false);
     V.paint = () => { const t = el("#asVoice"), m = el("#asMic"), on = V.enabled();
-      if (t) { t.innerHTML = `${SPK}<span><span class="vw">Voice </span>${on ? "on" : "off"}</span>`; t.setAttribute("aria-pressed", String(on)); t.classList.toggle("on", on);
-        t.setAttribute("aria-label", on ? "Voice is on. Turn it off" : "Voice is off. Turn it on"); }
+      if (t) { t.innerHTML = `${SPK}<span><span class="vw">Voice </span>${on ? "on" : "off"}</span>`; t.classList.toggle("on", on);
+        t.setAttribute("aria-label", `Voice settings (voice is ${on ? "on" : "off"})`); t.setAttribute("aria-expanded", String(!el("#asVm").hidden)); }
       if (m) m.hidden = !on; };
-    V.set = on => { if (!on) V.end(); if (me) me.prefs = { ...(me.prefs || {}), assistant_voice: !!on };
-      api("/api/assistant/prefs", { method: "PUT", body: { voice: !!on } }).catch(() => {}); draw(); toast(on ? "Voice on: tap the mic to talk." : "Voice off."); };
+    const save = (body, local) => { if (me) me.prefs = { ...(me.prefs || {}), ...local }; api("/api/assistant/prefs", { method: "PUT", body }).catch(() => {}); };
+    V.set = on => { if (!on) V.end(); save({ voice: !!on }, { assistant_voice: !!on }); draw(); V.menu(true); };
+    // the Voice menu: on/off, which voice, how fast, hear a sample. Remembered per person on every device;
+    // a voice another device doesn't have falls back to the best one it does have.
+    const RATES = [[0.85, "Slower"], [1.03, "Normal"], [1.15, "Faster"], [1.3, "Fastest"]];
+    V.menu = keep => {
+      const m = el("#asVm"); if (!m) return;
+      if (!keep) { m.hidden = !m.hidden; if (m.hidden) { V.paint(); return; } } else if (m.hidden) return;
+      const on = V.enabled(), list = V.list(), want = pref("assistant_voice_name"), have = V.chosen(), r = V.rate();
+      vkey = list.map(v => v.name).join("|"); const fid = m.contains(document.activeElement) && document.activeElement.id;
+      const rateNow = RATES.reduce((a, b) => Math.abs(b[0] - r) < Math.abs(a[0] - r) ? b : a)[0];
+      m.innerHTML = `<label class="asvrow"><input type="checkbox" id="asVOn" ${on ? "checked" : ""}> <span><b>Talk and hear answers</b><br><span class="ashint">${V.ok ? "Mic to ask out loud; answers are read to you." : "Answers can be read to you."}</span></span></label>
+        ${V.canSay ? `<label class="asvf"><span>Voice</span><select id="asVSel" ${on ? "" : "disabled"}><option value="">Automatic (best on this device)</option>
+          ${list.map(v => `<option value="${esc(v.name)}" ${have && have.name === v.name ? "selected" : ""}>${esc(v.name.replace(/^(Microsoft|Google)\s+/, ""))} · ${esc(v.lang)}</option>`).join("")}</select></label>
+        ${want && !have ? `<div class="ashint asvmiss">Your chosen voice (${esc(want)}) isn't on this device, so the best one here is used.</div>` : ""}
+        ${!list.length ? `<div class="ashint">This device hasn't listed its voices yet. The best one is used automatically.</div>` : ""}
+        <label class="asvf"><span>Speed</span><select id="asVRate" ${on ? "" : "disabled"}>${RATES.map(([v, n]) => `<option value="${v}" ${v === rateNow ? "selected" : ""}>${n}</option>`).join("")}</select></label>` : ""}
+        <div class="row" style="gap:8px;margin-top:4px">${V.canSay ? `<button type="button" class="btn sm ghost" id="asVTry" ${on ? "" : "disabled"}>Hear a sample</button>` : ""}<button type="button" class="btn sm" id="asVDone">Done</button></div>`;
+      m.querySelector("#asVOn").onchange = e => V.set(e.target.checked);
+      const sel = m.querySelector("#asVSel"); if (sel) sel.onchange = () => { voice = null; save({ voice_name: sel.value }, { assistant_voice_name: sel.value }); V.sample(); m.querySelectorAll(".asvmiss").forEach(x => x.remove()); };
+      const rt = m.querySelector("#asVRate"); if (rt) rt.onchange = () => { save({ voice_rate: +rt.value }, { assistant_voice_rate: +rt.value }); V.sample(); };
+      const tr = m.querySelector("#asVTry"); if (tr) tr.onclick = () => V.sample();
+      m.querySelector("#asVDone").onclick = () => { m.hidden = true; V.paint(); el("#asVoice")?.focus(); };
+      if (fid) { const f = m.querySelector("#" + fid); if (f) f.focus(); }   // keep the keyboard / screen reader where it was
+      V.paint();
+    };
+    V.sample = () => { if (!V.canSay || !V.enabled()) return; V.replayIdx = -1; V.end(); V.say("This is how the Case Desk Assistant will sound when it reads your answers.", [], false); };
     V.ui = ui;
     return V;
   })();
@@ -145,10 +180,11 @@
     panel = document.createElement("aside"); panel.id = "asPanel"; panel.className = "asp"; panel.hidden = true;
     panel.setAttribute("role", "dialog"); panel.setAttribute("aria-label", NAME);
     panel.innerHTML = `<div class="ash"><h2><span class="asfull">Case Desk </span>Assistant</h2>
-        ${VOICE.ok || VOICE.canSay ? `<button type="button" class="btn sm ghost asvt" id="asVoice" aria-pressed="false" title="Turn talking to the assistant on or off"></button>` : ""}
+        ${VOICE.ok || VOICE.canSay ? `<button type="button" class="btn sm ghost asvt" id="asVoice" aria-expanded="false" aria-controls="asVm" title="Voice: on/off, which voice, speed"></button>` : ""}
         <button type="button" class="btn sm ghost" id="asNew" title="Start a new conversation">New</button>
         <button type="button" class="btn sm ghost" id="asHist" title="Saved conversations">History</button>
         <button type="button" class="iconb" id="asX" aria-label="Close the assistant">${ic("close", 20, 2)}</button></div>
+      <div class="asvm" id="asVm" hidden role="group" aria-label="Voice settings"></div>
       <div class="asctx" id="asCtx"></div>
       <div class="asbody" id="asBody" aria-live="polite"></div>
       <div class="asvs" id="asVs" hidden aria-live="polite"><span class="ddot" aria-hidden="true"></span><span id="asVsT"></span><button type="button" class="btn sm ghost" id="asVsEnd">End</button></div>
@@ -159,13 +195,15 @@
     document.body.appendChild(panel);
     panel.querySelector("#asX").onclick = () => setOpen(false);
     const mic = panel.querySelector("#asMic"); if (mic) mic.onclick = () => VOICE.tap();
-    const vt = panel.querySelector("#asVoice"); if (vt) vt.onclick = () => VOICE.set(!VOICE.enabled());
+    const vt = panel.querySelector("#asVoice"); if (vt) vt.onclick = () => VOICE.menu();
     panel.querySelector("#asVsEnd").onclick = () => VOICE.end();
     panel.querySelector("#asNew").onclick = () => { VOICE.end(); S.thread = null; S.threadCase = assistCtx.case_id; S.msgs = []; S.view = "chat"; draw(); panel.querySelector("#asIn").focus(); };
     panel.querySelector("#asHist").onclick = () => { VOICE.end(); S.view = S.view === "hist" ? "chat" : "hist"; draw(); };
     panel.querySelector("#asF").onsubmit = e => { e.preventDefault(); VOICE.end(); send(); };
     panel.querySelector("#asIn").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && wide()) { e.preventDefault(); VOICE.end(); send(); } });
-    document.addEventListener("keydown", e => { if (e.key === "Escape" && S.open && !wide()) setOpen(false); });
+    document.addEventListener("keydown", e => { if (e.key !== "Escape" || !S.open) return;
+      const vm = panel.querySelector("#asVm"); if (vm && !vm.hidden && panel.contains(document.activeElement)) { vm.hidden = true; VOICE.paint(); panel.querySelector("#asVoice")?.focus(); return; }
+      if (!wide()) setOpen(false); });
   }
   function drawCtx() {
     const c = panel.querySelector("#asCtx"), x = ctxNow();
@@ -232,7 +270,7 @@
   }
   function setOpen(on, quiet) {
     if (!panel) build();
-    if (!on) VOICE.end();
+    if (!on) { VOICE.end(); const vm = panel.querySelector("#asVm"); if (vm) vm.hidden = true; VOICE.paint(); }
     S.open = !!on; panel.hidden = !on; document.body.classList.toggle("ason", !!on);
     const b = $("#asBtn"); if (b) b.setAttribute("aria-expanded", String(!!on));
     if (on) { S.view = "chat"; follow(); if (wide()) setTimeout(() => panel.querySelector("#asIn").focus({ preventScroll: true }), 50); }

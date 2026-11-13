@@ -275,6 +275,8 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const b = req.body || {}, set = {};   // only what was sent changes (open/closed, voice on/off), merged in the database so two quick saves can't undo each other
     if (typeof b.open === "boolean") set.assistant_open = b.open;
     if (typeof b.voice === "boolean") set.assistant_voice = b.voice;
+    if (typeof b.voice_name === "string") set.assistant_voice_name = b.voice_name.replace(/[\u0000-\u001f]/g, "").slice(0, 120);   // "" = automatic
+    if (typeof b.voice_rate === "number" && b.voice_rate >= 0.7 && b.voice_rate <= 1.5) set.assistant_voice_rate = Math.round(b.voice_rate * 100) / 100;
     const r = await q("UPDATE users SET prefs=COALESCE(prefs,'{}'::jsonb) || $2::jsonb WHERE id=$1 RETURNING prefs", [req.user.id, JSON.stringify(set)]);
     res.json({ prefs: r.rows[0].prefs });
   }));
