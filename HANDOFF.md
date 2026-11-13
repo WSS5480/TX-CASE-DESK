@@ -138,5 +138,6 @@ Full plan (Claude Doc): https://claude.ai/artifact/Vr8G8HVskMUGGaiMBHCtSp . Deci
 - Every tool filters by firm and by `access.js` visibility. No SSNs to AI. No assistant in developer view. Court email text is passed as data, never instructions.
 - Firm Settings "AI (Claude)": admin enters/replaces the firm key, encrypted with `crypto-box.js`, masked, Test key, audited. One key per firm; usage logged per person with optional limits. Dictation and discovery move to the firm key. No key = no AI (no fallback to Steve's key).
 - Demo firm on Steve's key: sample data only, per-visitor and monthly caps, 24-hour reset per visitor, Sign up button.
+- Floating assistant button on every page (phone first): on/off remembered per attorney, opens with the current page as context, never covers tabs/buttons/cards. Named as TX Case Desk's own (e.g. "Case Desk Assistant"), not "Claude Duet"; check Anthropic's brand rules before any "powered by Claude" wording. Decision Log `2026-11-13-assistant-button`.
 - Models: Haiku 5.5 for email reading, Sonnet 5.5 for chat/brief/proposals, Opus 5.5 for drafting (switchable).
 - Phases: 0 Render upgrade, 1 firm key + Approvals + audit, 2 chat + brief + Demo firm, 3 proposals, 4 drafting, 5 case-law research, 6 limits/subscription. New User Agreement version naming Anthropic before phase 2 ships.
