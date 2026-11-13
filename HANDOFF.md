@@ -2,7 +2,7 @@
 
 Start here. Read this before touching anything.
 
-> **Status of this file:** started Nov 13, 2026 by a side session whose only job was to pass along David's notes. It did **not** change any app code. The build session should fill in the sections marked "to fill in" from its own history, then keep this file updated in the same commit as every change (Steve's standing rule).
+> **Status of this file:** complete as of Nov 13, 2026. Steve answered David's questions (section 1), and the build session filled in sections 3 and 4. **Next:** build section 1 to those answers. Keep this file updated in the same commit as every change (Steve's standing rule).
 
 ## 1. Incoming work: David's case-management notes (handed off Nov 13, 2026)
 
