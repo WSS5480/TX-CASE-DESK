@@ -457,8 +457,8 @@ app.get("/api/users/:id/bar-card", requireAuth, wrap(async (req, res) => {
 const TODAY_CARDS = ["brief", "court", "deadlines", "mail", "next", "timer", "tasks", "glance", "caseload"];
 app.put("/api/me/prefs", requireAuth, wrap(async (req, res) => {
   const hidden = (Array.isArray(req.body?.today_hidden) ? req.body.today_hidden : []).filter(k => TODAY_CARDS.includes(k));
-  const prefs = { ...(req.user.prefs || {}), today_hidden: [...new Set(hidden)] };
-  await q("UPDATE users SET prefs=$2 WHERE id=$1", [req.user.id, prefs]); res.json({ prefs });
+  const r = await q("UPDATE users SET prefs=COALESCE(prefs,'{}'::jsonb) || $2::jsonb WHERE id=$1 RETURNING prefs", [req.user.id, JSON.stringify({ today_hidden: [...new Set(hidden)] })]);   // merged, so it can't undo a setting saved at the same moment
+  res.json({ prefs: r.rows[0].prefs });
 }));
 app.put("/api/firm/kind", requireAuth, requireAdmin, wrap(async (req, res) => {
   const kind = req.body?.kind === "solo" ? "solo" : "firm";

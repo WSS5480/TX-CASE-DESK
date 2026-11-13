@@ -173,6 +173,7 @@ async function pageContext(user, ctx) {
     const c = await caseFor(user, ctx.case_id);
     if (c) { caseId = c.id; lines.push(`They have this case open (when they say "this case", they mean it):`, JSON.stringify(ai.scrubDeep(await runTool(user, "get_case", { case_id: c.id })))); }
   }
+  if (ctx && ctx.voice === true) lines.push("They asked by voice and your answer will be read out loud: answer in 1 to 4 short spoken sentences, no lists or symbols, unless they ask for the details. Still name cases with [[case:ID]].");
   if (ctx && +ctx.event_id) {
     const p = [+ctx.event_id, user.firm_id, user.id];
     const e = (await q(`SELECT e.title, e.kind, e.on_date, e.at_time, e.case_id FROM events e LEFT JOIN cases c ON c.id=e.case_id WHERE e.id=$1 AND e.firm_id=$2 AND (e.user_id=$3 OR e.created_by=$3 OR (e.case_id IS NOT NULL AND ${access.caseCond(user, "c", p)}))`, p)).rows[0];
@@ -271,8 +272,11 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   R.get("/status", wrap(async (req, res) => res.json({ name: NAME, available: await ai.available(req.user), demo: !!req.user.demo_until, open: !!(req.user.prefs || {}).assistant_open,
     message: (await ai.available(req.user)) ? null : req.user.demo_until ? ai.MSG.noDemoKey : ai.MSG.noKey })));
   R.put("/prefs", wrap(async (req, res) => {
-    const prefs = { ...(req.user.prefs || {}), assistant_open: !!(req.body && req.body.open) };
-    await q("UPDATE users SET prefs=$2 WHERE id=$1", [req.user.id, prefs]); res.json({ prefs });
+    const b = req.body || {}, set = {};   // only what was sent changes (open/closed, voice on/off), merged in the database so two quick saves can't undo each other
+    if (typeof b.open === "boolean") set.assistant_open = b.open;
+    if (typeof b.voice === "boolean") set.assistant_voice = b.voice;
+    const r = await q("UPDATE users SET prefs=COALESCE(prefs,'{}'::jsonb) || $2::jsonb WHERE id=$1 RETURNING prefs", [req.user.id, JSON.stringify(set)]);
+    res.json({ prefs: r.rows[0].prefs });
   }));
   R.get("/threads", wrap(async (req, res) => {
     const p = [req.user.id, req.user.firm_id]; let w = "t.user_id=$1 AND t.firm_id=$2";

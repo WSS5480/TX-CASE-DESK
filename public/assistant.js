@@ -35,25 +35,136 @@
     : e.code === "NO_KEY" && me && me.role === "admin" && !me.demo ? `<div class="row" style="margin-top:8px"><button type="button" class="btn sm ghost" data-asfirm>Open Firm Settings → AI (Claude)</button></div>` : ""}`;
   window.assistErrHtml = errHtml; window.assistWire = wireLinks; window.assistRender = render;
 
+  // ---------- talking to the assistant: speak, it sends when you stop, the answer is read out loud, then it listens again ----------
+  // Uses the phone's or browser's own speech (nothing extra is recorded or kept). Hands-free until End, a typed question,
+  // closing the panel, or a turn where nothing is said.
+  const MIC = `<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a1 1 0 1 1 2 0 7 7 0 0 1-6 6.92V21h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2.08A7 7 0 0 1 5 12a1 1 0 1 1 2 0 5 5 0 0 0 10 0Z"/></svg>`;
+  const SPK = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M4 9v6h4l5 4V5L8 9H4Zm12.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4ZM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6Z"/></svg>`;
+  const STOP = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>`;
+  const VOICE = (() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition, syn = window.speechSynthesis;
+    const V = { ok: !!SR, canSay: !!(syn && window.SpeechSynthesisUtterance), on: false, state: "idle" };
+    let rec = null, gen = 0, voice = null;
+    const el = id => panel && panel.querySelector(id);
+    function ui(state, note) {
+      V.state = state; const m = el("#asMic"), vs = el("#asVs"); if (!m || !vs) return;
+      m.classList.toggle("rec", state === "listen"); m.classList.toggle("talk", state === "speak");
+      m.innerHTML = state === "speak" ? STOP : MIC;
+      m.setAttribute("aria-label", state === "listen" ? "Stop listening and send" : state === "speak" ? "Stop talking and listen" : state === "think" ? "Stop the voice conversation" : "Talk to the assistant");
+      const t = { listen: "Listening… just talk. It sends when you stop.", think: "Looking that up…", speak: "Answering out loud. Tap ■ to cut in." }[state];
+      vs.hidden = !(V.on && t) && !note; vs.dataset.state = state;
+      el("#asVsT").textContent = note || t || ""; el("#asVsEnd").hidden = !V.on;
+    }
+    function pick() {
+      if (voice || !syn) return voice; const all = syn.getVoices().filter(v => /^en[-_]US/i.test(v.lang));
+      return voice = all.find(v => /natural|neural|premium|enhanced/i.test(v.name)) || all.find(v => /Google US English|Samantha|Aria|Jenny/i.test(v.name)) || all.find(v => v.localService) || all[0] || null;
+    }
+    if (syn && syn.addEventListener) syn.addEventListener("voiceschanged", () => { voice = null; });
+    // what is read aloud: no markdown, case links read as the case name, list items as sentences
+    V.plain = (text, links) => { const L = new Map((links || []).map(l => [+l.id, l.label]));
+      return String(text || "").replace(/\[\[case:(\d{1,9})\]\]/g, (m, id) => L.get(+id) || "").replace(/\*\*/g, "").replace(/^\s*[-•*]\s+(.*?)[.;:]?\s*$/gm, "$1.")
+        .replace(/\s*\n+\s*/g, " ").replace(/\s{2,}/g, " ").replace(/\s+([.,;:?!])/g, "$1").trim(); };
+    // long answers are read in short pieces (Chrome stops one piece after ~15 seconds). Split only at a period followed by a space,
+    // so "§ 16.003" and "$1,250.50" stay whole; very long sentences break at a comma or space. (No lookbehind: older iOS can't parse it.)
+    const chunks = t => t.replace(/([.!?]+["')\]]*)\s+/g, "$1\n").split("\n")
+      .flatMap(s => { s = s.trim(); const o = []; while (s.length > 200) { let k = s.lastIndexOf(", ", 200); if (k < 80) k = s.lastIndexOf(" ", 200); if (k < 1) k = 200; o.push(s.slice(0, k + 1).trim()); s = s.slice(k + 1).trim(); } if (s) o.push(s); return o; })
+      .reduce((o, s) => { const l = o[o.length - 1]; if (l && (l + " " + s).length < 220) o[o.length - 1] = l + " " + s; else o.push(s); return o; }, []);
+    window.assistChunks = chunks;   // pure; used by the tests
+    let backup = 0;
+    const hush = () => { clearTimeout(backup); if (syn && (syn.speaking || syn.pending)) try { syn.cancel(); } catch (e) {} };
+    V.replaying = false;
+    V.say = (text, links, thenListen) => {
+      if (!V.canSay) return thenListen && V.on ? V.end("This browser can't read answers out loud; the answer is on screen.") : undefined;
+      if (!thenListen && V.on) V.end();   // a replay ends the hands-free conversation (and gives back a half-typed question)
+      const my = ++gen; stopRec(); hush();
+      const parts = chunks(V.plain(text, links)); if (!parts.length) return thenListen && V.on ? listen() : ui("idle");
+      V.replaying = !thenListen; ui(thenListen ? "speak" : "idle"); if (!thenListen) draw();
+      const done = () => { if (my !== gen) return; gen++; clearTimeout(backup); V.q = [];
+        if (V.replaying) { V.replaying = false; draw(); }
+        if (thenListen && V.on && S.open) { const g = gen; setTimeout(() => g === gen && V.on && listen(), 250); } else if (!V.on) ui("idle"); };
+      V.q = [];   // kept referenced: Chrome can drop an unreferenced piece and never say it finished
+      parts.forEach((p, i) => { const u = new SpeechSynthesisUtterance(p); const v = pick(); if (v) u.voice = v; u.lang = v ? v.lang : "en-US"; u.rate = 1.03;
+        if (i === parts.length - 1) u.onend = u.onerror = done;
+        V.q.push(u); syn.speak(u); });
+      // backup in case the browser never reports the end (about 90 ms a character, plus slack)
+      const check = () => { if (my !== gen) return; if (syn.speaking || syn.pending) backup = setTimeout(check, 5000); else done(); };   // still reading: check again in 5 s
+      backup = setTimeout(check, parts.join(" ").length * 90 + 3000);
+    };
+    V.hushReplay = () => { gen++; hush(); V.replaying = false; draw(); };
+    function stopRec() { clearTimeout(V.quiet); if (rec) { const r = rec; rec = null; r.onresult = r.onend = r.onerror = null; try { r.abort(); } catch (e) {} } }
+    let draft = "";
+    function listen(keepUnlock) {
+      if (!V.on || !panel) return;
+      if (S.busy) return V.end("Wait for the answer to finish, then tap the mic.");
+      stopRec(); if (keepUnlock) clearTimeout(backup); else hush(); if (V.replaying) { V.replaying = false; draw(); }   // don't cancel the silent unlock word on the first tap
+      const inp = el("#asIn"), my = ++gen; if (inp.value.trim()) draft = inp.value; inp.value = "";
+      const r = rec = new SR(); r.lang = "en-US"; r.interimResults = true; r.continuous = false; r.maxAlternatives = 1;
+      let fin = "", err = null;
+      r.onresult = e => { let f = "", t = ""; for (let i = 0; i < e.results.length; i++) { const x = e.results[i][0].transcript; if (e.results[i].isFinal) f += x; else t += x; }
+        fin = f; inp.value = (f + t).replace(/\s+/g, " ").trim();
+        // some phones (iOS) keep listening after you go quiet: 1.5 seconds with no new words sends it
+        clearTimeout(V.quiet); if (inp.value) V.quiet = setTimeout(() => { if (rec === r) try { r.stop(); } catch (x) {} }, 1500); };
+      r.onerror = e => { err = e.error; };
+      r.onend = () => { if (rec !== r || my !== gen) return; rec = null; clearTimeout(V.quiet);
+        const text = (fin || inp.value).replace(/\s+/g, " ").trim();
+        if (err === "not-allowed" || err === "service-not-allowed") return V.end("Allow the microphone for this site in your browser settings, then tap the mic.");
+        if (err === "audio-capture") return V.end("No microphone found. Plug one in or check your settings, then tap the mic.");
+        if (err === "network") return V.end("Speech recognition needs an internet connection. Tap the mic to try again.");
+        if (!text) return V.end("Didn't hear anything. Tap the mic to talk.");
+        draft = ""; inp.value = text; ui("think"); send(true); };
+      try { r.start(); ui("listen"); } catch (e) { rec = null; V.end("The microphone didn't start. Tap the mic to try again."); }
+    }
+    V.tap = () => {
+      if (!V.ok) return toast("Talking to the assistant needs Chrome, Edge or Safari.");
+      if (!V.enabled()) return;
+      if (V.state === "listen" && rec) { try { rec.stop(); } catch (e) {} return; }      // done talking: send now
+      if (V.state === "think") return V.end();                                          // waiting on an answer: stop the conversation
+      // phones only allow reading aloud after a tap: a silent word now lets the answer be read later
+      let first = false;
+      if (V.canSay && !V.unlocked) { try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; syn.speak(u); } catch (e) {} V.unlocked = first = true; }
+      V.on = true; listen(first && V.state !== "speak" && !V.replaying);                                                             // start, or cut in while it's talking
+    };
+    V.end = note => { const was = V.on; V.on = false; gen++; stopRec(); hush(); V.replaying = false; ui("idle", note);
+      const inp = el("#asIn"); if (was && draft && inp && !inp.value.trim()) inp.value = draft; draft = ""; };
+    // phone locked or app switched: stop (reading can pause there and never finish)
+    document.addEventListener("visibilitychange", () => { if (document.hidden && (V.on || V.replaying)) { V.end(); if (panel) draw(); } });
+    // the on/off switch: per person, remembered on every device (off = no mic, no speaker buttons, nothing read aloud)
+    V.enabled = () => !(me && me.prefs && me.prefs.assistant_voice === false);
+    V.paint = () => { const t = el("#asVoice"), m = el("#asMic"), on = V.enabled();
+      if (t) { t.innerHTML = `${SPK}<span><span class="vw">Voice </span>${on ? "on" : "off"}</span>`; t.setAttribute("aria-pressed", String(on)); t.classList.toggle("on", on);
+        t.setAttribute("aria-label", on ? "Voice is on. Turn it off" : "Voice is off. Turn it on"); }
+      if (m) m.hidden = !on; };
+    V.set = on => { if (!on) V.end(); if (me) me.prefs = { ...(me.prefs || {}), assistant_voice: !!on };
+      api("/api/assistant/prefs", { method: "PUT", body: { voice: !!on } }).catch(() => {}); draw(); toast(on ? "Voice on: tap the mic to talk." : "Voice off."); };
+    V.ui = ui;
+    return V;
+  })();
+
   // ---------- the panel ----------
   function build() {
     panel = document.createElement("aside"); panel.id = "asPanel"; panel.className = "asp"; panel.hidden = true;
     panel.setAttribute("role", "dialog"); panel.setAttribute("aria-label", NAME);
-    panel.innerHTML = `<div class="ash"><h2>${NAME}</h2>
+    panel.innerHTML = `<div class="ash"><h2><span class="asfull">Case Desk </span>Assistant</h2>
+        ${VOICE.ok || VOICE.canSay ? `<button type="button" class="btn sm ghost asvt" id="asVoice" aria-pressed="false" title="Turn talking to the assistant on or off"></button>` : ""}
         <button type="button" class="btn sm ghost" id="asNew" title="Start a new conversation">New</button>
         <button type="button" class="btn sm ghost" id="asHist" title="Saved conversations">History</button>
         <button type="button" class="iconb" id="asX" aria-label="Close the assistant">${ic("close", 20, 2)}</button></div>
       <div class="asctx" id="asCtx"></div>
       <div class="asbody" id="asBody" aria-live="polite"></div>
-      <form class="asf" id="asF"><label for="asIn" class="sr-only" style="position:absolute;left:-9999px">Ask the assistant</label>
+      <div class="asvs" id="asVs" hidden aria-live="polite"><span class="ddot" aria-hidden="true"></span><span id="asVsT"></span><button type="button" class="btn sm ghost" id="asVsEnd">End</button></div>
+      <form class="asf" id="asF" data-nomic><label for="asIn" class="sr-only" style="position:absolute;left:-9999px">Ask the assistant</label>
         <textarea id="asIn" rows="2" placeholder="Ask about your cases, deadlines, to-dos…" maxlength="4000"></textarea>
+        ${VOICE.ok ? `<button type="button" class="asmic" id="asMic" aria-label="Talk to the assistant" title="Talk: it answers out loud">${MIC}</button>` : ""}
         <button class="btn" id="asGo">Send</button></form>`;
     document.body.appendChild(panel);
     panel.querySelector("#asX").onclick = () => setOpen(false);
-    panel.querySelector("#asNew").onclick = () => { S.thread = null; S.threadCase = assistCtx.case_id; S.msgs = []; S.view = "chat"; draw(); panel.querySelector("#asIn").focus(); };
-    panel.querySelector("#asHist").onclick = () => { S.view = S.view === "hist" ? "chat" : "hist"; draw(); };
-    panel.querySelector("#asF").onsubmit = e => { e.preventDefault(); send(); };
-    panel.querySelector("#asIn").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && wide()) { e.preventDefault(); send(); } });
+    const mic = panel.querySelector("#asMic"); if (mic) mic.onclick = () => VOICE.tap();
+    const vt = panel.querySelector("#asVoice"); if (vt) vt.onclick = () => VOICE.set(!VOICE.enabled());
+    panel.querySelector("#asVsEnd").onclick = () => VOICE.end();
+    panel.querySelector("#asNew").onclick = () => { VOICE.end(); S.thread = null; S.threadCase = assistCtx.case_id; S.msgs = []; S.view = "chat"; draw(); panel.querySelector("#asIn").focus(); };
+    panel.querySelector("#asHist").onclick = () => { VOICE.end(); S.view = S.view === "hist" ? "chat" : "hist"; draw(); };
+    panel.querySelector("#asF").onsubmit = e => { e.preventDefault(); VOICE.end(); send(); };
+    panel.querySelector("#asIn").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && wide()) { e.preventDefault(); VOICE.end(); send(); } });
     document.addEventListener("keydown", e => { if (e.key === "Escape" && S.open && !wide()) setOpen(false); });
   }
   function drawCtx() {
@@ -61,16 +172,19 @@
     c.innerHTML = x.case_id ? `Looking at: <b>${esc(assistCtx.case_label || "this case")}</b>` : `Screen: <b>${esc(x.screen || "")}</b>`;
   }
   function draw() {
-    if (!panel) return; drawCtx();
+    if (!panel) return; drawCtx(); VOICE.paint();
     const body = panel.querySelector("#asBody");
     panel.querySelector("#asF").hidden = S.view !== "chat";
     panel.querySelector("#asHist").textContent = S.view === "hist" ? "Back" : "History";
     if (S.view === "hist") return drawHist(body);
     body.innerHTML = (S.msgs.length ? "" : `<div class="ashint">${assistCtx.case_id ? `Ask about this case: what's due, the last conversation, who opposing counsel is, new court emails.`
-      : `Ask about your cases: "what's due this week?", "which cases have no next court date?", "any new court emails?". I can only read your data; I can't change or send anything.`}</div>`)
-      + S.msgs.map(m => m.role === "user" ? `<div class="asm asu">${esc(m.text)}</div>` : m.role === "error" ? `<div class="asm ase">${m.html}</div>` : `<div class="asm asa">${render(m.text, m.links)}</div>`).join("")
+      : `Ask about your cases: "what's due this week?", "which cases have no next court date?", "any new court emails?". I can only read your data; I can't change or send anything.`}${VOICE.ok && VOICE.enabled() ? ` Or tap the mic and just talk: it answers out loud.` : ""}</div>`)
+      + S.msgs.map((m, i) => m.role === "user" ? `<div class="asm asu">${esc(m.text)}</div>` : m.role === "error" ? `<div class="asm ase">${m.html}</div>` : `<div class="asm asa">${VOICE.canSay && VOICE.enabled() ? (VOICE.replaying && VOICE.replayIdx === i ? `<button type="button" class="assay on" data-asay="${i}" aria-label="Stop reading" title="Stop reading">${STOP}</button>` : `<button type="button" class="assay" data-asay="${i}" aria-label="Read this answer out loud" title="Read out loud">${SPK}</button>`) : ""}${render(m.text, m.links)}</div>`).join("")
       + (S.busy ? `<div class="asm asa busy ashint">Looking that up…</div>` : "");
-    wireLinks(body); body.scrollTop = body.scrollHeight;
+    wireLinks(body);
+    body.querySelectorAll("[data-asay]").forEach(b => b.onclick = () => { if (VOICE.replaying && +b.dataset.asay === VOICE.replayIdx) return VOICE.hushReplay();
+      const m = S.msgs[+b.dataset.asay]; if (m) { VOICE.replayIdx = +b.dataset.asay; VOICE.say(m.text, m.links, false); } });
+    body.scrollTop = body.scrollHeight;
   }
   async function drawHist(body) {
     body.innerHTML = `<div class="ashint">Loading…</div>`;
@@ -102,19 +216,23 @@
   }
   window.assistFollow = () => { if (S.open) follow(); };
   window.assistOpen = () => { if (!me || me.dev_view) return; if (S.open) follow(); else setOpen(true); };
-  async function send() {
+  async function send(voice) {
     const inp = panel.querySelector("#asIn"), text = inp.value.trim();
     if (!text || S.busy) return;
+    let said = null; const conv = S.msgs;
     S.busy = true; S.msgs.push({ role: "user", text }); inp.value = ""; draw();
     try {
-      const r = await api("/api/assistant/chat", { method: "POST", body: { message: text, thread_id: S.thread, context: ctxNow() } });
+      const r = await api("/api/assistant/chat", { method: "POST", body: { message: text, thread_id: S.thread, context: { ...ctxNow(), voice: !!voice } } });
+      if (S.msgs !== conv) { S.busy = false; draw(); return; }   // they started another conversation while waiting; this answer stays saved in its own
       S.thread = r.thread_id; if (S.threadCase == null) S.threadCase = assistCtx.case_id || null;
-      S.msgs.push({ role: "assistant", text: r.reply, links: r.links });
-    } catch (e) { S.msgs.push({ role: "error", html: errHtml(e) }); if (!inp.value) inp.value = text; }
+      S.msgs.push({ role: "assistant", text: r.reply, links: r.links }); if (voice) said = r;
+    } catch (e) { if (S.msgs !== conv) { S.busy = false; draw(); return; } S.msgs.push({ role: "error", html: errHtml(e) }); if (!inp.value) inp.value = text; if (voice) VOICE.end("The assistant didn't answer. Tap the mic to try again."); }
     S.busy = false; draw();
+    if (said && VOICE.on) VOICE.say(said.reply, said.links, true);
   }
   function setOpen(on, quiet) {
     if (!panel) build();
+    if (!on) VOICE.end();
     S.open = !!on; panel.hidden = !on; document.body.classList.toggle("ason", !!on);
     const b = $("#asBtn"); if (b) b.setAttribute("aria-expanded", String(!!on));
     if (on) { S.view = "chat"; follow(); if (wide()) setTimeout(() => panel.querySelector("#asIn").focus({ preventScroll: true }), 50); }
@@ -123,7 +241,7 @@
   // called by app.js when the signed-in shell shows (off = signed out)
   window.assistShell = off => {
     const b = $("#asBtn"); if (!b) return;
-    if (off || !me || me.dev_view) { b.hidden = true; if (panel) { panel.hidden = true; document.body.classList.remove("ason"); } S.open = false; S.thread = null; S.msgs = []; return; }
+    if (off || !me || me.dev_view) { VOICE.end(); b.hidden = true; if (panel) { panel.hidden = true; document.body.classList.remove("ason"); } S.open = false; S.thread = null; S.msgs = []; return; }
     b.hidden = false;
     b.onclick = () => setOpen(!S.open);
     // remembered per person: the side panel reopens on desktop (a phone always starts on the page, not a full-screen sheet)

@@ -611,6 +611,19 @@ body.ason .wrap{padding-right:400px}
 .asp .asm .caselink{font-weight:600}
 .asp .asf{border-top:1px solid var(--line);padding:10px 12px calc(10px + var(--safe));display:flex;gap:8px;align-items:flex-end;background:#fff}
 .asp .asf textarea{flex:1;min-height:44px;max-height:160px;resize:vertical}
+.asp .asmic{flex:none;width:44px;height:44px;border-radius:50%;border:1px solid var(--line);background:var(--card);color:var(--acc);display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+.asp .asmic:hover{background:var(--chip)}
+.asp .asmic.rec{background:var(--bad);color:#fff;border-color:var(--bad);animation:micp 1.4s ease-in-out infinite}
+.asp .asmic.talk{background:var(--navy,#1f3a5f);color:#fff;border-color:transparent}
+.asp .asvs{display:flex;align-items:center;gap:8px;padding:8px 16px;border-top:1px solid var(--line2);font-size:13px;color:var(--ink2);background:#fbfaf7}
+.asp .asvs[hidden]{display:none}.asp .asvs span:nth-child(2){flex:1;min-width:0}
+.asp .asvs:not([data-state=listen]) .ddot{visibility:hidden}
+.asp .asvt{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;color:var(--mute)}.asp .asvt.on{color:var(--acc);border-color:var(--acc)}
+.asp .ash .asfull{display:none}
+@media (max-width:420px){.asp .asvt .vw{display:none}.asp .asvt{padding-left:8px;padding-right:8px}}.asp .asvt:not(.on) svg{opacity:.45}
+.asp .asm.asa{position:relative}.asp .asm.asa .assay{float:right;margin:-10px -10px 0 6px;width:44px;height:44px;border:0;border-radius:50%;background:transparent;color:var(--mute);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.asp .asm.asa .assay:hover,.asp .asm.asa .assay.on{background:var(--chip);color:var(--acc)}
+@media (prefers-reduced-motion:reduce){.asp .asmic.rec{animation:none}}
 .asp .ashint{font-size:13px;color:var(--mute)}
 .asp .asth{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line2);padding:8px 0}
 .asp .asth button.lk{flex:1;min-width:0;text-align:left;background:none;border:0;padding:4px 0;cursor:pointer;font:inherit;color:var(--ink);overflow-wrap:anywhere}
