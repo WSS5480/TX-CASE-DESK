@@ -75,7 +75,7 @@ David's question 4 (where it runs) is already answered by the app: it's a web ap
 
 - He writes short and informal, often by voice. Give concise, practical answers with the reasoning.
 - End every reply with only the app link: https://tx-case-desk.onrender.com (not the repo, Render or demo links).
-- In every update, remind him the Render upgrade is still pending: app server to Starter and database to Basic-256mb. **The free database expires Nov 30, 2026.** He wants to do it once the build is complete.
+- Render upgrade: **done Nov 13, 2026** (app server Starter, database Basic-256mb). No more reminders needed.
 - Keep a Decision Log of every decision with date and reason, so nothing gets built against an earlier decision. It must update itself from code (no manual republish) and be easy to copy, text or email.
 - Independent agents double-check all work before anything ships: every screen on phone and desktop, the code, the features. No regressions on the live app.
 - Review agents may change code only if they tell the main session and it verifies before shipping. Reviewers never push. After each review, check whether the reviewer changed anything and tell Steve if a reviewer broke that protocol.
@@ -93,9 +93,9 @@ David's question 4 (where it runs) is already answered by the app: it's a web ap
 - Front end: `public/index.html`, `public/app.js`, `public/practice.js`, `public/mail.js`, service worker `public/sw.js`.
 - GitHub Actions: `hourly.yml` (the free hourly court-date ping), `load-texas.yml` (case-law load).
 - **Deploy:** pushing to `main` auto-deploys on Render (service `srv-dbinok49v7es7384ckr0`, workspace `tea-dbinoeflk1mc73f873f0`). Put `[skip render]` in the commit message for docs-only commits. After a push, confirm with Render `list_deploys` (status `live`, matching commit) and `list_logs` (no errors). The repo is **public**: never commit secrets, PINs, keys or Decision Log content.
-- **Database:** Render Postgres `dpg-dbinogtg1s2s73dopoog-a` (free, **deleted Nov 30, 2026** unless upgraded). Its IP allowlist is empty, so it can't be queried from outside; check things through the app or the logs.
+- **Database:** Render Postgres `dpg-dbinogtg1s2s73dopoog-a` (Basic-256mb since Nov 13, 2026). Its IP allowlist is empty, so it can't be queried from outside; check things through the app or the logs.
 - **Migrations:** run on boot from `db.js` SCHEMA (idempotent). Big indexes go in `LATE_INDEXES` (built CONCURRENTLY after start). One-time data moves use the `tcd_once` table.
-- **Email sending:** free Render web services block SMTP ports 25/465/587, so IMAP/SMTP mailboxes (David's) can't send until the app server is on Starter. Microsoft/Google mailboxes send over HTTPS and aren't affected.
+- **Email sending:** free Render web services block SMTP ports 25/465/587; the app server is on Starter since Nov 13, so IMAP/SMTP mailboxes (David's) can send. Microsoft/Google mailboxes send over HTTPS and aren't affected.
 - **Local testing:** Postgres 16 at `/tmp/pg/data` (start: `su postgres -c "/usr/lib/postgresql/16/bin/pg_ctl -D /tmp/pg/data -l /tmp/pg/log start"`), database `txcd4`. Run the server on port 3999 with `DATABASE_URL=postgres://postgres@localhost/txcd4 PGSSLMODE=disable SESSION_SECRET=… CRED_KEY=$(cat /tmp/ck) DEVELOPER_PIN=dev-pin-12345` (a test-only PIN). Mocks: mail `/tmp/mailmock/restart.sh` (run from another directory), discovery AI `/tmp/disc/aimock.js` (:4777), dictation AI `/tmp/dictmock/mock.js` (:4778). Playwright suites in `/tmp/uitest/` (`activity.js`, `convo.js`, `dict.js`, `closed.js`, `disc.js`), phone and desktop. Sign-ups are rate-limited (20 per 15 min): restart the server between suites. These live in the session VM, not the repo; a new session recreates them.
 - **Developer PIN:** a Render environment variable (`DEVELOPER_PIN`). Steve knows it; never write it in the repo or chat logs.
 - **Decision Log:** a Claude artifact database, slug `ededf58c-76dd-4b49-ad62-7e7aa9f2c388`. Write with `db_write`, path `decisions/<date>-<topic>`, fields `{date, ts, area, decision, why, by}`. Never record secrets.
@@ -125,7 +125,7 @@ The Decision Log in the app is the record. Nov 13: Steve's answers A–G (sectio
 
 - [x] Get answers to questions A–G (Steve, Nov 13).
 - [ ] Build David's notes (section 1) to those answers.
-- [ ] Render upgrade: app server to Starter, database to Basic-256mb. Free database expires **Nov 30, 2026**.
+- [x] Render upgrade done Nov 13, 2026: app server on Starter, database on Basic-256mb (no expiry). Stop reminding Steve about it.
 - [x] Fill in sections 3 and 4 (Nov 13).
 - [ ] Offered, not yet accepted: export the Activity log (PDF/Excel); Client box on the Add case form (now covered by David's notes); read hearing dates from PDF orders; detect discovery requests in incoming email.
 - [ ] **AI (Claude) setup page** in Firm Settings (assistant plan, Phase 1): firm key entry (encrypted, masked, Test key, plain errors, audited). It must show the estimated monthly cost per active attorney, exactly: daily brief (22 workdays) $1; questions, to-dos, case updates (about 10 a day) $5 to $8; reading court emails under $0.50; drafts (about 10 motions or letters) $5 to $10; **total $12 to $20**; "These are estimates before real usage; a light user runs about $5. Reusing the case file between questions (prompt caching) keeps repeat questions cheap." **Build every assistant call with prompt caching** (cache the system prompt, tools and case file with `cache_control`) so that last sentence is true (Steve, Nov 13).
