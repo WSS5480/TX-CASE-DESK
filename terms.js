@@ -1,7 +1,7 @@
 // TX Case Desk User Agreement (terms of service + privacy). Bump VERSION when the text changes:
 // everyone is asked to accept the new version at their next sign-in.
-const VERSION = "2026-11-11";
-const UPDATED = "November 11, 2026";
+const VERSION = "2026-11-13";
+const UPDATED = "November 13, 2026";
 
 const SECTIONS = [
   ["What TX Case Desk is", `
@@ -25,7 +25,7 @@ const SECTIONS = [
     <ul>
       <li><b>It's yours.</b> You own everything you put in or connect. We use it only to run TX Case Desk for you. We don't sell it, don't use it for advertising, and don't use it to train artificial intelligence.</li>
       <li><b>Confidentiality.</b> We treat your data as confidential client information. You remain responsible for your duties under the Texas Disciplinary Rules of Professional Conduct, including deciding whether a cloud service is appropriate for each matter and getting any client consent you need.</li>
-      <li><b>Security.</b> Data is sent over encrypted connections. Email passwords, saved court-portal passwords and Microsoft keys you give us are stored encrypted. Sign-ins require two-factor codes. Sign-ins and important account events are recorded in an activity log.</li>
+      <li><b>Security.</b> Data is sent over encrypted connections. Email passwords, saved court-portal passwords, Microsoft keys and your firm's Claude key you give us are stored encrypted. Sign-ins require two-factor codes. Sign-ins and important account events are recorded in an activity log.</li>
       <li><b>Where it lives.</b> The app and its database are hosted in the United States by our hosting provider (Render).</li>
       <li><b>Export and deletion.</b> Your firm's admin can export your cases, contacts, calendar, tasks, time, invoices and trust records while your account is active (Firm settings → Export). If your plan ends or you close your account, ask us and we'll send you an export. On request we'll delete your firm's data, except what we must keep by law.</li>
       <li><b>Legal requests.</b> If we're legally required to disclose your data (for example, by subpoena), we'll tell you first when the law allows, so you can object.</li>
@@ -46,16 +46,18 @@ const SECTIONS = [
       <li>A firm can connect one shared court inbox; notices from it go to the attorney on the case or wait for the people the admin picks to assign them.</li>
       <li>You can disconnect at any time; we then stop reading that account. Court notices already saved to your cases stay with your cases.</li>
     </ul>`],
-  ["AI drafting", `
+  ["AI: drafting, dictation and the Case Desk Assistant", `
     <ul>
-      <li>Some features prepare first drafts with AI, for example answers and objections to discovery requests. To do that, the request and the parts of your case file it needs (case details, parties, your notes, the names of documents on the case, answers you already approved) are sent to Anthropic, which runs the Claude AI model.</li>
-      <li>Anthropic processes this to produce the draft only. Under its commercial terms it does not use your data to train its models.</li>
-      <li>An AI draft is never used or sent on its own. An attorney reviews, edits and approves every item first, and nothing is served until the attorney confirms the recipients. You remain responsible for everything you file or serve.</li>
-      <li>AI can be wrong. Drafts mark facts that are missing from the file as [CONFIRM] or [CLIENT TO PROVIDE]; check them.</li>
-      <li>Dictation (the microphone in text boxes) uses your browser's own speech service (for example Google in Chrome or Apple in Safari) to turn speech into text. When you stop, the text you dictated is sent to Anthropic to fix grammar and punctuation. You see the cleaned text and choose to insert it, insert it as spoken, or discard it. We don't keep a copy.</li>
+      <li><b>Who provides the AI.</b> TX Case Desk's AI features run on Claude, an AI model provided by <b>Anthropic, PBC</b> ("Anthropic"). When you use an AI feature, the information it needs is sent to Anthropic, which processes it to produce the answer or draft and sends it back. Under Anthropic's commercial terms it does not use this data to train its models. Numbers shaped like social security numbers are removed before anything is sent to the AI provider, by every AI feature.</li>
+      <li><b>Your firm's own key.</b> Your firm's admin adds the firm's own Claude API key (from the Anthropic Console) in Firm settings. AI use is billed by Anthropic to that key, and the app shows what each person's AI use cost this month. Without a key, AI features are off. In the demo, a demo key is used with spending limits.</li>
+      <li><b>Case Desk Assistant.</b> The assistant answers questions about your cases and writes a daily brief. To do that, it reads the cases, court dates, deadlines, tasks, conversations, court emails, document names and contacts that you can already see in the app, and sends what a question needs to Anthropic. It can only read: it can't change, send, file or delete anything. Social security numbers are removed before anything is sent to the AI provider. It never gets billing information for paralegals, and it is not available in developer view. Your conversations with it are saved to your sign-in so it keeps context; your firm can delete them.</li>
+      <li><b>Discovery drafting.</b> To prepare first drafts of answers and objections, the request and the parts of your case file it needs (case details, parties, your notes, the names of documents on the case, answers you already approved) are sent to Anthropic.</li>
+      <li><b>Dictation.</b> The microphone in text boxes uses your browser's own speech service (for example Google in Chrome or Apple in Safari) to turn speech into text. When you stop, the text you dictated is sent to Anthropic to fix grammar and punctuation. You see the cleaned text and choose to insert it, insert it as spoken, or discard it. We don't keep a copy.</li>
+      <li><b>An attorney decides.</b> AI answers and drafts are never used or sent on their own. An attorney reviews, edits and approves every item first, and nothing is served until the attorney confirms the recipients. You remain responsible for everything you file, serve or rely on.</li>
+      <li><b>AI can be wrong.</b> Check every answer against the case file. Drafts mark facts that are missing from the file as [CONFIRM] or [CLIENT TO PROVIDE]; check them.</li>
     </ul>`],
   ["Other services we use", `
-    <p>To run TX Case Desk we rely on: Render (hosting and database), Microsoft, Google and your email provider (email connection), CourtListener by the Free Law Project (public court opinions), Postmark (receiving forwarded court emails), Anthropic (AI drafting, described above), and Stripe (if you take card payments from clients). Each handles only what it needs for its part, under its own terms.</p>
+    <p>To run TX Case Desk we rely on: Render (hosting and database), Microsoft, Google and your email provider (email connection), CourtListener by the Free Law Project (public court opinions), Postmark (receiving forwarded court emails), Anthropic (the Claude AI model behind drafting, dictation cleanup and the Case Desk Assistant, described above), and Stripe (if you take card payments from clients). Each handles only what it needs for its part, under its own terms.</p>
     <p>County and state court websites: if you give TX Case Desk your own court-portal login, it signs in as you only to read your cases. It stops at any human-verification check (such as a CAPTCHA) and never tries to get around one.</p>`],
   ["Trial, plans and payment", `
     <ul>

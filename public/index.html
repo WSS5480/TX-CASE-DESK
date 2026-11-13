@@ -572,6 +572,56 @@ input.hasmic,textarea.hasmic{padding-right:44px}
 .objs{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.objs label{display:inline-flex;align-items:center;gap:6px;margin:0;padding:6px 10px;border:1px solid var(--line);border-radius:999px;font-size:13px;color:var(--ink);cursor:pointer;background:var(--card)}
 .objs input{width:auto;margin:0}.objs label:has(input:checked){border-color:var(--acc);background:#f7ecec}
 .dsconf{margin-top:8px;padding:8px 12px;border:1px solid #f1dfa4;background:#fdf6e3;border-radius:8px;font-size:14px}.dsconf ul{margin:4px 0 0;padding-left:1.2em}
+
+/* ---------- AI (Claude) settings tables: headers over their columns (text left, numbers right); cards on phones ---------- */
+.rtab{width:100%;border-collapse:collapse;font-size:14px;margin:6px 0 10px}
+.rtab th,.rtab td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line2);vertical-align:top}
+.rtab th{font-size:12px;font-weight:600;color:var(--mute)}
+.rtab .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.rtab tr.tot td{font-weight:700;border-top:2px solid var(--line);border-bottom:0}
+.aikey{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:6px 0}
+.aires{font-weight:600}.aires.g{color:var(--ok)}.aires.r{color:var(--bad)}
+@media (max-width:999px){
+  .rtab thead{display:none}
+  .rtab,.rtab tbody,.rtab tr,.rtab td{display:block;width:100%}
+  .rtab tr{border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:0 0 8px;background:#fff}
+  .rtab td{border:0;padding:3px 0;display:flex;justify-content:space-between;gap:12px;text-align:left}
+  .rtab td.num{text-align:right}
+  .rtab td[data-l]::before{content:attr(data-l);color:var(--mute);font-size:13px;font-weight:500;text-align:left;flex:none}
+  .rtab td:not([data-l]){font-weight:600}
+  .rtab tr.tot td{border:0}
+}
+/* ---------- Case Desk Assistant: the button sits in the top bar (its own space, so it never covers tabs, buttons or cards) ---------- */
+.asb{display:inline-flex;align-items:center;gap:6px;height:40px;padding:0 14px 0 12px;border-radius:20px;border:1px solid var(--acc);background:var(--acc-t);color:var(--acc);font-weight:600;font-size:14px;cursor:pointer;flex:none}
+.asb:hover{background:#efdcda}.asb[aria-expanded=true]{background:var(--acc);color:#fff}
+.asp{position:fixed;z-index:35;top:62px;right:0;bottom:0;width:400px;background:#fff;border-left:1px solid var(--line);box-shadow:-8px 0 28px rgba(23,34,59,.10);display:flex;flex-direction:column;min-width:0}
+body.devv .asp{top:calc(62px + var(--devh,44px))}
+body.ason .wrap{padding-right:400px}
+@media (min-width:1000px) and (max-width:1199px){ body.ason .wrap{padding-right:0} .asp{box-shadow:-12px 0 32px rgba(23,34,59,.22)} }   /* narrow desktops: the panel sits over the page instead of squeezing it */
+.asp .ash{display:flex;align-items:center;gap:6px;padding:10px 10px 10px 16px;border-bottom:1px solid var(--line);min-width:0}
+.asp .ash h2{margin:0;font-size:16px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.asp .asctx{padding:8px 16px;border-bottom:1px solid var(--line2);font-size:13px;color:var(--mute);overflow-wrap:anywhere}
+.asp .asctx b{color:var(--ink2)}
+.asp .asbody{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:12px;min-height:0}
+.asp .asm{max-width:100%;padding:10px 12px;border-radius:12px;font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.asp .asm.asu{align-self:flex-end;background:var(--navy-t);max-width:88%;white-space:pre-wrap}
+.asp .asm.asa{align-self:stretch;background:#fbfaf7;border:1px solid var(--line)}
+.asp .asm.asa ul{margin:4px 0;padding-left:18px}.asp .asm.asa p{margin:0 0 6px}.asp .asm.asa p:last-child{margin:0}
+.asp .asm.ase{background:var(--bad-t,#fbeaea);border:1px solid #f0c9c9;color:var(--ink)}
+.asp .asm .caselink{font-weight:600}
+.asp .asf{border-top:1px solid var(--line);padding:10px 12px calc(10px + var(--safe));display:flex;gap:8px;align-items:flex-end;background:#fff}
+.asp .asf textarea{flex:1;min-height:44px;max-height:160px;resize:vertical}
+.asp .ashint{font-size:13px;color:var(--mute)}
+.asp .asth{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line2);padding:8px 0}
+.asp .asth button.lk{flex:1;min-width:0;text-align:left;background:none;border:0;padding:4px 0;cursor:pointer;font:inherit;color:var(--ink);overflow-wrap:anywhere}
+.brief{padding:4px 18px 14px;font-size:14px;line-height:1.55;overflow-wrap:anywhere}.brief ul{margin:2px 0 8px;padding-left:18px}.brief p{margin:6px 0}
+@media (max-width:999px){
+  .asb{width:40px;padding:0;justify-content:center;border-radius:20px}.asb .asl{display:none}
+  .asp{top:0;left:0;width:auto;z-index:55;border-left:0;box-shadow:none;padding-top:env(safe-area-inset-top,0px)}
+  body.devv .asp{top:var(--devh,44px)}   /* the demo / developer banner stays visible above the sheet */
+  body.ason .wrap{padding-right:0}
+  body.ason{overflow:hidden}
+}
 </style>
 </head>
 <body class="out">
@@ -590,6 +640,7 @@ input.hasmic,textarea.hasmic{padding-right:44px}
       <div class="tact" id="tact" hidden>
         <button type="button" class="tpill" id="tpill" hidden></button>
         <button type="button" class="btn" id="newBtn"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>New</button>
+        <button type="button" class="asb" id="asBtn" hidden aria-label="Case Desk Assistant" aria-expanded="false" aria-controls="asPanel"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"></path><path d="M8.5 9.5h7M8.5 12.5h4"></path></svg><span class="asl">Assistant</span></button>
         <button type="button" class="iconb phone-only" id="qBtn" aria-label="Search"><svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"></circle><path d="M20 20l-4.2-4.2"></path></svg></button>
         <button type="button" class="avb phone-only" id="avBtn" aria-label="Account"></button>
       </div>
@@ -607,5 +658,6 @@ input.hasmic,textarea.hasmic{padding-right:44px}
 <script src="/app.js"></script>
 <script src="/practice.js"></script>
 <script src="/mail.js"></script>
+<script src="/assistant.js"></script>
 </body>
 </html>

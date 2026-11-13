@@ -789,8 +789,10 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     await audit(req, "import_matters", { added, skipped }); res.json({ added, skipped });
   }));
 
+  Object.assign(SHARED, { calendarItems, contactCond });   // the assistant's read-only tools use the same access rules
   app.use("/api", R);
 }
+const SHARED = {};
 
 // ---------- small standalone pages (invoice / pay / portal) ----------
 function page(title, body) {
@@ -823,4 +825,4 @@ function invoiceHtml(inv, { pay, print, note } = {}) {
   ${print ? `<p class="noprint mute">To save a PDF: use your browser's Print, then choose Save as PDF.</p>` : ""}`);
 }
 
-module.exports = { mount, onCaseCreated, parseSetting };
+module.exports = { mount, onCaseCreated, parseSetting, SHARED };

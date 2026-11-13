@@ -454,7 +454,7 @@ app.get("/api/users/:id/bar-card", requireAuth, wrap(async (req, res) => {
   if (!r) return res.status(404).send("No bar card on file");
   res.set({ "Content-Type": r.bar_card_mime, "Content-Disposition": `inline; filename="bar-card-${String(r.name).replace(/[^\w]+/g, "-")}.${r.bar_card_mime === "application/pdf" ? "pdf" : r.bar_card_mime === "image/png" ? "png" : "jpg"}"`, "Cache-Control": "private, no-store", "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; object-src 'self'" }).send(r.bar_card);
 }));
-const TODAY_CARDS = ["court", "deadlines", "mail", "next", "timer", "tasks", "glance", "caseload"];
+const TODAY_CARDS = ["brief", "court", "deadlines", "mail", "next", "timer", "tasks", "glance", "caseload"];
 app.put("/api/me/prefs", requireAuth, wrap(async (req, res) => {
   const hidden = (Array.isArray(req.body?.today_hidden) ? req.body.today_hidden : []).filter(k => TODAY_CARDS.includes(k));
   const prefs = { ...(req.user.prefs || {}), today_hidden: [...new Set(hidden)] };
@@ -1164,6 +1164,8 @@ require("./discovery").mount(app, { requireAuth, wrap, audit });   // discovery 
 require("./dictate").mount(app, { requireAuth, wrap });   // dictation: AI fixes grammar, the person chooses to insert it
 require("./convos").mount(app, { requireAuth, wrap, audit });   // conversation log on each case
 require("./activity").mount(app, { requireAuth, wrap });   // activity log: everything on a case in one timeline
+require("./ai").mount(app, { requireAuth, requireAdmin, wrap, audit });   // Firm Settings → AI (Claude): the firm's key, Test key, usage per person, limits
+require("./assistant").mount(app, { requireAuth, requireAdmin, wrap, audit });   // Case Desk Assistant (read-only) and the daily brief
 demo.mount(app, { wrap, audit, terms: TERMS });   // "Try the demo": a sample firm per visitor, nothing leaves the app
 
 // ---------- static + errors ----------
@@ -1173,6 +1175,7 @@ app.use((err, req, res, next) => {
   if (err instanceof cl.CLError) return res.status(err.status || 502).json({ error: err.message });
   if (err && (err.type === "entity.parse.failed" || err.type === "entity.too.large")) { console.warn(`[http] ${err.type} on ${req.method} ${req.path}`); return res.status(err.status || 400).json({ error: "Bad request" }); }
   if (err && err.status >= 400 && err.status < 500 && err.message && !err.type) return res.status(err.status).json({ error: err.message });   // a plain-English refusal raised on purpose
+  if (err && err.status === 503 && err.message && !err.type) return res.status(503).json({ error: err.message, code: err.code });   // "AI isn't on" and similar, raised on purpose
   console.error(err);
   res.status(500).json({ error: "Server error" });
 });

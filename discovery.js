@@ -3,6 +3,7 @@
 // then one click builds the Texas-format response (Word) and serves it from the attorney's own mailbox.
 // Nothing leaves the app until an attorney has approved every item and confirmed the recipients.
 const { q } = require("./db");
+const ai = require("./ai");   // every AI call: the firm's own key, usage recorded, plain errors, prompt caching
 const access = require("./access");
 const rt = require("./richtext");
 const T = require("./templates");
@@ -115,21 +116,14 @@ Rules:
 - Keep answers concise. Plain text; separate paragraphs with a blank line; lists with "- ".
 Return ONLY a JSON array, one object per item, in the same order: {"id": <item id>, "objections": [keys], "answer": "...", "confirm": ["fact the attorney must confirm", ...]}`;
 
-async function callClaude(payload) {
-  const key = (process.env.ANTHROPIC_API_KEY || "").trim();
-  if (!key) throw fail(503, "AI drafting isn't switched on yet: add ANTHROPIC_API_KEY in Render. You can still write and approve the answers by hand.");
-  const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), 240e3);
-  try {
-    const r = await fetch(process.env.AI_URL || "https://api.anthropic.com/v1/messages", { method: "POST", signal: ctl.signal,
-      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({ model: process.env.AI_MODEL || "claude-sonnet-5-5", max_tokens: 16000, system: SYSTEM, messages: [{ role: "user", content: JSON.stringify(payload) }] }) });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw fail(502, `The AI service said: ${(j.error && j.error.message) || r.status}`);
-    const text = (j.content || []).filter(x => x.type === "text").map(x => x.text).join("");
-    const a = text.indexOf("["), b = text.lastIndexOf("]");
-    if (j.stop_reason === "max_tokens" || a < 0 || b < a) throw fail(502, "The AI reply was cut short or came back in the wrong shape");
-    try { return JSON.parse(text.slice(a, b + 1)); } catch (e) { throw fail(502, "The AI reply came back in the wrong shape"); }
-  } finally { clearTimeout(timer); }
+// One batch of requests. The case file goes in its own block (cached), so the batches after the first reuse it cheaply.
+async function callClaude(user, caseBlock, payload) {
+  const j = await ai.call({ user, feature: "discovery", model: process.env.AI_MODEL || ai.MODELS.main, max_tokens: 16000, system: SYSTEM, timeoutMs: 240e3, cacheLast: false,
+    messages: [{ role: "user", content: [{ type: "text", text: JSON.stringify(ai.scrubDeep(caseBlock)), cache_control: { type: "ephemeral" } }, { type: "text", text: JSON.stringify(ai.scrubDeep(payload)) }] }] });
+  const text = ai.textOf(j);
+  const a = text.indexOf("["), b = text.lastIndexOf("]");
+  if (j.stop_reason === "max_tokens" || a < 0 || b < a) throw fail(502, "The AI reply was cut short or came back in the wrong shape");
+  try { return JSON.parse(text.slice(a, b + 1)); } catch (e) { throw fail(502, "The AI reply came back in the wrong shape"); }
 }
 const toHtml = s => String(s || "").trim().split(/\n{2,}/).map(p => {
   const ls = p.split("\n"); const esc = x => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -153,8 +147,9 @@ async function draftSet(user, set, c, onlyIds) {
     let failed = 0, lastErr = "";
     for (let i = 0; i < items.length; i += 20) {
       const batch = items.slice(i, i + 20);
-      let out; try { out = await callClaude({ case_file: caseFile, requests_title: set.title, allowed_objection_keys: OBJECTIONS.map(o => ({ key: o.k, meaning: o.t })),
-        items: batch.map(x => ({ id: x.id, kind: KINDS[x.kind], number: x.n, request: x.request })) }); } catch (e) { if (e.status === 503) throw e; failed += batch.length; lastErr = e.message; continue; }
+      let out; try { out = await callClaude(user, { case_file: caseFile, allowed_objection_keys: OBJECTIONS.map(o => ({ key: o.k, meaning: o.t })) },
+        { requests_title: set.title, items: batch.map(x => ({ id: x.id, kind: KINDS[x.kind], number: x.n, request: x.request })) }); }
+      catch (e) { if (e.plain && e.code !== "DOWN" && e.code !== "SLOW") throw e; failed += batch.length; lastErr = e.message; continue; }   // no key, bad key, no credit, limits: stop and say so
       for (const d of Array.isArray(out) ? out : []) {
         const it = batch.find(x => x.id === +d.id); if (!it) continue;
         const objs = [].concat(d.objections || []).map(String).filter(k => OBJ[k]).slice(0, 6);
@@ -243,7 +238,7 @@ function mount(app, { requireAuth, wrap, audit }) {
   const pub = (s, items) => ({ ...s, served_on: d10(s.served_on), due_on: d10(s.due_on),
     counts: items ? { total: items.length, approved: items.filter(i => i.approved_at).length, drafted: items.filter(i => i.answer).length } : undefined });
 
-  app.get("/api/discovery/meta", requireAuth, (req, res) => res.json({ kinds: KINDS, objections: OBJECTIONS.map(({ k, t, text }) => ({ k, t, text })), ai: !!(process.env.ANTHROPIC_API_KEY || "").trim() }));
+  app.get("/api/discovery/meta", requireAuth, wrap(async (req, res) => res.json({ kinds: KINDS, objections: OBJECTIONS.map(({ k, t, text }) => ({ k, t, text })), ai: !req.devView && await ai.available(req.user), ai_off: req.user.demo_until ? ai.MSG.noDemoKey : ai.MSG.noKey })));
 
   app.get("/api/cases/:id/discovery", requireAuth, wrap(async (req, res) => {
     const c = await caseFor(req.user, req.params.id);
@@ -275,7 +270,7 @@ function mount(app, { requireAuth, wrap, audit }) {
         [hasRfa ? "Includes requests for admission: unanswered requests are deemed admitted (TRCP 198.2(c))." : "", dueR.moved.length ? `Moved to the next court day: ${dueR.moved.join("; ")} (TRCP 4).` : ""].filter(Boolean).join(" ") || null, "TRCP 196.2, 197.2, 198.2; TRCP 4", req.user.id])).rows[0];
     await q("UPDATE discovery_sets SET event_id=$2 WHERE id=$1", [s.id, ev.id]);
     await audit(req, "discovery_set_created", { case: c.id, set: s.id, items: parsed.items.length });
-    if (b.draft !== false && !req.user.demo_until && parsed.items.length && (process.env.ANTHROPIC_API_KEY || "").trim()) draftSet(req.user, s, c).catch(() => {});   // starts drafting in the background
+    if (b.draft !== false && parsed.items.length && await ai.available(req.user)) draftSet(req.user, s, c).catch(() => {});   // starts drafting in the background (firm key; demo firms on the demo key, with caps)
     res.json({ set: pub(s, await itemsOf(s.id)) });
   }));
 
@@ -308,7 +303,7 @@ function mount(app, { requireAuth, wrap, audit }) {
   app.post("/api/discovery/:id/draft", requireAuth, wrap(async (req, res) => {
     const { s, c } = await setFor(req.user, req.params.id);
     if (s.status !== "draft") throw fail(409, "This response was already served.");
-    if (!(process.env.ANTHROPIC_API_KEY || "").trim()) throw fail(503, "AI drafting isn't switched on yet: add ANTHROPIC_API_KEY in Render. You can still write and approve the answers by hand.");
+    if (!(await ai.available(req.user))) throw fail(503, (req.user.demo_until ? ai.MSG.noDemoKey : ai.MSG.noKey) + " You can still write and approve the answers by hand.");
     const ids = Array.isArray((req.body || {}).items) ? req.body.items.map(Number) : null;
     draftSet(req.user, s, c, ids).catch(() => {});
     res.json({ ok: true, drafting: true });

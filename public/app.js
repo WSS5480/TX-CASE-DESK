@@ -240,12 +240,13 @@ const PRIMARY = [["today", "Today"], ["cases", "Cases"], ["calendar", "Calendar"
 function titleOf(k) { if (k === "account") return "Account"; for (const [, items] of navGroups()) for (const [kk, v] of items) if (kk === k) return v; return "TX Case Desk"; }
 function shellOff() {
   document.body.classList.add("out"); ["#side", "#tabs", "#fab", "#srch", "#tact"].forEach(s => $(s).hidden = true);
-  document.body.classList.remove("timing"); closeSheet();
+  document.body.classList.remove("timing"); closeSheet(); if (window.assistShell) assistShell(true);
   $("#ttl").innerHTML = `<span class="mark" aria-hidden="true">TX</span><span class="tname">TX Case Desk</span>`;
 }
 function shellOn() {
   document.body.classList.remove("out"); ["#side", "#tabs", "#fab", "#srch", "#tact"].forEach(s => $(s).hidden = false);
   $("#avBtn").textContent = initials(me.name);
+  if (window.assistShell) assistShell();   // Case Desk Assistant button (not in developer view)
 }
 function start() {
   if (me.must_change_pw) return changePwView(true);
@@ -276,7 +277,9 @@ function renderNav() {
   $("#moreBtn").onclick = moreSheet;
 }
 function nav(k) { tab = k; closeSheet(); closeSearch(); renderNav(); return show(); }
-function show() { subView = false; viewSeq++; clearTimeout(courtPoll); const v = VIEWS[tab] || ({ inbox: inboxView, cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab] || casesView; const r = v(); window.scrollTo(0, 0); return r; }
+function show() { subView = false; viewSeq++; clearTimeout(courtPoll); if (window.assistCtx) Object.assign(assistCtx, { case_id: null, case_label: null, event_id: null });
+  const v = VIEWS[tab] || ({ inbox: inboxView, cases: casesView, law: lawView, saved: savedView, counties: countiesView, court: courtView, firm: firmView, account: accountView })[tab] || casesView; const r = v(); window.scrollTo(0, 0);
+  dispatchEvent(new Event("tcd:screen")); return r; }
 
 // sheet: menus on desktop, bottom sheet on phones
 function openSheet(title, html, wire) {
@@ -777,9 +780,8 @@ const DICT = {
     busy = true; const mine = ++run; show("work", r);
     let out = null, note = "";
     if (me && me.dev_view) note = "(AI cleanup is off in developer view.)";
-    else if (me && me.demo) note = "(AI cleanup is off in the demo.)";
     else try { out = (await api("/api/dictation/cleanup", { method: "POST", body: { text: r } })).text; }
-      catch (e) { note = e.status === 503 ? "(AI cleanup isn't switched on yet.)" : e.status === 429 || e.status === 400 ? "(" + e.message + ")" : "(AI cleanup didn't answer.)"; }
+      catch (e) { note = e.status === 503 || e.status === 429 || e.status === 400 || e.code ? "(" + e.message + ")" : "(AI cleanup didn't answer.)"; }   // the same plain AI messages as everywhere else
     if (mine !== run) return;   // discarded or inserted while waiting
     busy = false; show("done", out || DICT.basic(r), out ? "" : note);
   }
@@ -1192,10 +1194,11 @@ async function firmView() {
    <fieldset id="nsBar" style="border:1px solid var(--line);border-radius:10px;padding:10px 14px 12px;margin:10px 0 0"><legend style="font-size:13px;font-weight:600;padding:0 6px">Bar card</legend><div class="grid">
      <div><label for="nsB">Texas Bar # (8 digits)</label><input id="nsB" name="bar" inputmode="numeric" maxlength="8"></div><div><label for="nsL">Date licensed</label><input id="nsL" name="licensed_on" type="date"></div>
      <div class="full"><label for="nsC">Bar card photo or PDF (optional)</label><input id="nsC" type="file" accept="image/png,image/jpeg,application/pdf"></div></div></fieldset>
-   <div class="err" id="aerr"></div><button class="btn">Add person and get sign-in</button></form><div id="temp"></div></div><div id="firmExtras"></div>`;
+   <div class="err" id="aerr"></div><button class="btn">Add person and get sign-in</button></form><div id="temp"></div></div><div class="card" data-fs="ai" id="aiSec"><h2>AI (Claude)</h2><div class="mute">Loading…</div></div><div id="firmExtras"></div>`;
   const setFs = k => { fsSec = k; $$("#app [data-fs]").forEach(s => s.hidden = s.dataset.fs !== k); $$("[data-fs-go]").forEach(b => b.dataset.fsGo === k ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")); $("#fsSel").value = k; };
   $$("[data-fs-go]").forEach(b => b.onclick = () => setFs(b.dataset.fsGo)); $("#fsSel").onchange = e => setFs(e.target.value);
-  setFs(fsSec); wireProfileCard(fp); wireCourtCard(ci);
+  if (window.fsSecGo) { fsSec = window.fsSecGo; window.fsSecGo = null; }
+  setFs(fsSec); wireProfileCard(fp); wireCourtCard(ci); aiSection($("#aiSec"));
   Promise.resolve(window.renderFirmExtras && renderFirmExtras(us)).then(() => setFs(fsSec));
   // the sign-in details are shown once: if the person already left this screen, show them in a sheet instead of losing them
   const showTemp = (name, email, pw, phone) => { const t = $("#temp");
@@ -1379,8 +1382,76 @@ function wireAccess(box) {
 }
 
 // ---------------- firm settings: sections + firm profile + logo ----------------
-const FS_SECS = [["profile", "Firm profile"], ["people", "People & sign-ins"], ["email", "Email & court notices"], ["money", "Payments & rates"], ["court", "Court days & checklists"], ["data", "Export"]];
+const FS_SECS = [["profile", "Firm profile"], ["people", "People & sign-ins"], ["email", "Email & court notices"], ["ai", "AI (Claude)"], ["money", "Payments & rates"], ["court", "Court days & checklists"], ["data", "Export"]];
 let fsSec = "profile";
+// ---------- Firm Settings → AI (Claude): the firm's key, Test key, cost estimate, usage per person, limits ----------
+const AI_EST = [["Daily brief, 22 workdays", "$1"], ["Questions, to-dos, case updates (about 10 a day)", "$5 to $8"], ["Reading court emails", "under $0.50"], ["Drafts (about 10 motions or letters)", "$5 to $10"]];
+const usd2 = n => "$" + Number(n || 0).toFixed(2);
+function aiEstimate() {
+  return `<h3 style="margin:16px 0 4px">Estimated monthly cost per active attorney</h3>
+    <table class="rtab"><thead><tr><th scope="col">One active attorney, per month</th><th scope="col" class="num">Estimated cost</th></tr></thead><tbody>
+    ${AI_EST.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num" data-l="Estimated cost">${esc(v)}</td></tr>`).join("")}
+    <tr class="tot"><td>Total</td><td class="num" data-l="Estimated cost">$12 to $20</td></tr></tbody></table>
+    <p class="mute" style="margin:0">These are estimates before real usage; a light user runs about $5. Reusing the case file between questions (prompt caching) keeps repeat questions cheap.</p>`;
+}
+async function aiSection(el, month) {
+  if (!el) return;
+  let st, us; try { [st, us] = await Promise.all([api("/api/ai/settings"), api("/api/ai/usage" + (month ? "?month=" + month : "")).catch(() => null)]); } catch (e) { el.innerHTML = `<h2>AI (Claude)</h2><p class="err">${esc(e.message)}</p>`; return; }
+  const keyPart = st.demo ? `<div class="aikey"><span class="tag n">Using the demo key</span><span class="secret" style="flex:none">••••••••</span><span class="mute">Read-only. In your own firm, the firm admin adds the firm's own Claude key here.</span></div>`
+    : st.has_key ? `<div class="aikey"><span class="tag g">Key saved</span><span class="secret" style="flex:none" id="aiMask">•••• ${esc(st.last4 || "")}</span>${st.saved_at ? `<span class="mute">Saved ${esc(new Date(st.saved_at).toLocaleString())}${st.saved_by ? " by " + esc(st.saved_by) : ""}</span>` : ""}</div>
+      ${st.can_change ? `<div class="row"><button type="button" class="btn sm" id="aiTest">Test key</button><button type="button" class="btn sm ghost" id="aiRep">Replace</button><button type="button" class="btn sm danger" id="aiDel">Remove</button><span class="aires" id="aiRes" role="status"></span></div>` : ""}`
+    : `<p style="margin:6px 0"><span class="tag y">No key yet</span> AI features (assistant, daily brief, dictation cleanup, discovery drafts) are off until the firm's Claude key is added.</p>`;
+  const form = st.can_change ? `<form id="aiF" ${st.has_key ? "hidden" : ""} style="margin-top:8px"><label for="aiKey">${st.has_key ? "New Claude API key" : "Your firm's Claude API key"}</label>
+      <input id="aiKey" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" data-nomic required>
+      <div class="err" id="aiErr"></div><div class="row"><button class="btn">Save key</button>${st.has_key ? `<button type="button" class="btn ghost" id="aiCancel">Cancel</button>` : ""}</div>
+      <p class="mute" style="font-size:13px;margin:6px 0 0">Get it from the Anthropic Console → API keys. It's stored encrypted and never shown again (only its last 4 characters). Every change is recorded in the audit log.</p></form>` : "";
+  const people = us ? us.people : null;
+  const usage = !people ? `<p class="mute">Your AI use this month: <b>${usd2(st.my_month_usd)}</b>${st.my_limit_usd != null ? ` of your ${usd2(st.my_limit_usd)} monthly limit` : ""}.</p>`
+    : `<h3 style="margin:18px 0 4px">AI spend this month, per person</h3><p class="mute" style="margin:0 0 8px">${esc(us.month)} · total ${usd2(us.total_usd)}. Tap a person to see their AI calls and set a monthly limit.</p>
+      <div class="tiles">${people.map(p => `<button type="button" class="tile" data-aiu="${p.id}"><span class="tl">${esc(p.name)}</span><span class="tv">${usd2(p.usd)}</span><span class="ts">${p.calls} call${p.calls === 1 ? "" : "s"}${p.limit_usd != null ? ` · limit ${usd2(p.limit_usd)}` : ""}</span></button>`).join("")}</div>`;
+  el.innerHTML = `<h2>AI (Claude)</h2><p class="mute" style="margin-top:0">One Claude key covers everyone in the firm: the Case Desk Assistant, the daily brief, dictation cleanup and discovery drafts. AI only reads and drafts; an attorney approves before anything is used or sent.</p>
+    ${keyPart}${form}${aiEstimate()}${usage}
+    ${st.admin ? `<details style="margin-top:14px"><summary>Assistant conversations</summary><p class="mute">Each person's conversations with the Case Desk Assistant are saved so it keeps context. You can delete every saved conversation in the firm.</p><button type="button" class="btn sm danger" id="aiWipe">Delete all assistant conversations</button></details>` : ""}`;
+  const res = (t, ok) => { const r = $("#aiRes"); if (r) { r.textContent = t; r.className = "aires " + (ok ? "g" : "r"); } };
+  if ($("#aiF")) $("#aiF").onsubmit = async e => { e.preventDefault(); const k = $("#aiKey").value.trim(); $("#aiErr").textContent = "";
+    try { await api("/api/ai/key", { method: "PUT", body: { key: k } }); $("#aiKey").value = ""; toast("Key saved"); await aiSection(el); const t = $("#aiTest"); if (t) t.click(); }
+    catch (x) { $("#aiErr").textContent = x.message; } };
+  if ($("#aiCancel")) $("#aiCancel").onclick = () => { $("#aiF").hidden = true; $("#aiKey").value = ""; };
+  if ($("#aiRep")) $("#aiRep").onclick = () => { $("#aiF").hidden = false; $("#aiKey").focus(); };
+  if ($("#aiTest")) $("#aiTest").onclick = async () => { const b = $("#aiTest"); b.disabled = true; res("Testing…", true);
+    try { const r = await api("/api/ai/key/test", { method: "POST" }); res(r.result, r.ok); } catch (x) { res(x.message, false); } b.disabled = false; };
+  if ($("#aiDel")) $("#aiDel").onclick = async () => { const b = $("#aiDel"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to remove"; return; }
+    try { await api("/api/ai/key", { method: "DELETE" }); toast("Key removed: AI is off for the firm"); aiSection(el); } catch (x) { res(x.message, false); } };
+  if ($("#aiWipe")) $("#aiWipe").onclick = async () => { const b = $("#aiWipe"); if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Tap again to delete them all"; return; }
+    try { const r = await api("/api/assistant/firm-conversations", { method: "DELETE" }); toast(`Deleted ${r.deleted} conversation${r.deleted === 1 ? "" : "s"}`); aiSection(el); } catch (x) { toast(x.message); } };
+  el.querySelectorAll("[data-aiu]").forEach(b => b.onclick = () => aiCalls(el, +b.dataset.aiu, us.month, st));
+}
+// one person's AI calls this month (drill-down from their tile), with a back button and their monthly limit
+async function aiCalls(el, uid, month, st) {
+  el.innerHTML = `<div class="mute">Loading…</div>`;
+  let r; try { r = await api(`/api/ai/usage/${uid}?month=${encodeURIComponent(month)}`); } catch (e) { el.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const p = ((await api("/api/ai/usage?month=" + encodeURIComponent(month)).catch(() => ({ people: [] }))).people || []).find(x => x.id === uid) || {};
+  const FEAT = { assistant: "Assistant", brief: "Daily brief", dictation: "Dictation cleanup", discovery: "Discovery draft", key_test: "Test key" };
+  const tok = n => Number(n || 0).toLocaleString();
+  el.innerHTML = `<button type="button" class="btn sm ghost" id="aiBack">← Back</button>
+    <h2 style="margin:10px 0 2px">${esc(r.person.name)}: AI calls</h2><p class="mute" style="margin:0 0 8px">${esc(r.month)} · ${r.calls.length} call${r.calls.length === 1 ? "" : "s"} · ${usd2(r.calls.reduce((s, c) => s + c.cost_usd, 0))}</p>
+    ${!st.demo ? `<form id="aiLimF" class="row" style="align-items:flex-end;margin-bottom:10px"><div><label for="aiLim">Monthly limit ($, blank = none)</label><input id="aiLim" inputmode="decimal" data-nomic value="${p.limit_usd != null ? esc(p.limit_usd) : ""}" style="max-width:160px"></div><button class="btn sm">Save limit</button><span class="err" id="aiLimErr"></span></form>` : ""}
+    ${r.calls.length ? `<table class="rtab"><thead><tr><th scope="col">When</th><th scope="col">What</th><th scope="col">Model</th><th scope="col" class="num">Tokens in</th><th scope="col" class="num">Tokens out</th><th scope="col" class="num">Cached</th><th scope="col" class="num">Cost</th></tr></thead><tbody>
+      ${r.calls.map(c => `<tr><td>${esc(new Date(c.at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }))}</td><td data-l="What">${esc(FEAT[c.feature] || c.feature)}${c.ok ? "" : ` <span class="tag r">${esc(c.error || "failed")}</span>`}</td><td data-l="Model">${esc(String(c.model).replace(/^claude-/, ""))}</td>
+        <td class="num" data-l="Tokens in">${tok(c.input_tokens)}</td><td class="num" data-l="Tokens out">${tok(c.output_tokens)}</td><td class="num" data-l="Cached">${tok(c.cache_read_tokens)}</td><td class="num" data-l="Cost">$${Number(c.cost_usd).toFixed(4)}</td></tr>`).join("")}</tbody></table>` : `<p class="mute">No AI calls this month.</p>`}`;
+  $("#aiBack").onclick = () => aiSection(el, month);
+  if ($("#aiLimF")) $("#aiLimF").onsubmit = async e => { e.preventDefault(); const v = $("#aiLim").value.trim().replace(/^\$/, "");
+    try { await api(`/api/ai/limits/${uid}`, { method: "PUT", body: { limit_usd: v === "" ? null : v } }); toast(v === "" ? "No limit" : "Limit saved"); } catch (x) { $("#aiLimErr").textContent = x.message; } };
+}
+// Account: everyone sees whether AI is on, and their own AI use this month
+async function aiStatusCard(el) {
+  let st; try { st = await api("/api/ai/settings"); } catch (e) { el.remove(); return; }
+  el.innerHTML = `<h3>AI (Claude)</h3><p style="margin:0">${st.demo ? `<span class="tag n">Using the demo key</span> AI works in the demo, with limits.` : st.has_key ? `<span class="tag g">On</span> Your firm's Claude key is set.` : `<span class="tag y">Off</span> Add your firm's Claude key in Firm Settings.${st.admin ? "" : " Ask your firm admin."}`}</p>
+    <p class="mute" style="margin:8px 0 0">Your AI use this month: <b>${usd2(st.my_month_usd)}</b>${st.my_limit_usd != null ? ` of your ${usd2(st.my_limit_usd)} monthly limit` : ""}.</p>
+    ${st.admin && !st.demo ? `<div class="row" style="margin-top:10px"><button type="button" class="btn sm ghost" id="acAi">Open Firm Settings → AI (Claude)</button></div>` : ""}`;
+  const b = el.querySelector("#acAi"); if (b) b.onclick = () => { window.fsSecGo = "ai"; nav("firm"); };
+}
+
 function secTabs(secs, cur, attr) {
   return `<nav class="secnav" aria-label="Sections">${secs.map(([k, v]) => `<button type="button" data-${attr}-go="${k}"${cur === k ? ' aria-current="page"' : ""}>${v}</button>`).join("")}</nav>
     <div class="secsel"><label for="${attr}Sel">Section</label><select id="${attr}Sel">${secs.map(([k, v]) => `<option value="${k}"${cur === k ? " selected" : ""}>${v}</option>`).join("")}</select></div>`;
@@ -1439,6 +1510,7 @@ function accountView() {
    <div class="card"><h2>Sign-in and security</h2><div class="kv"><div><b>Sign-in email</b>${esc(me.email)}</div><div><b>Firm</b>${esc(me.firm_name)}</div><div><b>Role</b>${role}</div><div><b>Two-factor</b>${me.totp_enabled ? "On" : "Off"}</div></div>
    <p class="mute">Your firm admin creates and manages sign-ins.</p>
    <div class="row" style="margin-top:12px"><button class="btn ghost" id="pw">Change password</button><button class="btn danger" id="out">Sign out</button></div></div>
+   ${me.dev_view ? "" : `<div class="card" id="acAiCard"><h3>AI (Claude)</h3><div class="mute">Loading…</div></div>`}
    <div class="card"><h3>Subscription</h3><div id="subInfo" class="mute">Loading…</div>
    <label for="sc" style="margin-top:10px">Have a free-time code?</label><div class="row"><input id="sc" placeholder="TXC-30D-…" style="flex:1"><button class="btn sm" id="scGo">Apply</button></div><div class="err" id="scErr"></div></div>`;
   let firm = { name: me.firm_name };
@@ -1453,6 +1525,7 @@ function accountView() {
   $("#mpF").onsubmit = async e => { e.preventDefault(); const f = e.target;
     try { const r = await api("/api/me/profile", { method: "PUT", body: Object.fromEntries(new FormData(f)) }); me = { ...me, ...r.user }; renderNav(); toast("Profile saved"); f.querySelector(".err").textContent = ""; }
     catch (x) { f.querySelector(".err").textContent = x.message; } };
+  if ($("#acAiCard")) aiStatusCard($("#acAiCard"));
   api("/api/subscription").then(r => { $("#subInfo").textContent = r.managed ? subLine(r) : "Active"; }).catch(() => {});
   $("#scGo").onclick = async () => { try { await api("/api/subscription/redeem", { method: "POST", body: { code: $("#sc").value } }); toast("Code applied"); accountView(); } catch (e) { $("#scErr").textContent = e.message; } };
   $("#pw").onclick = () => changePwView(false);

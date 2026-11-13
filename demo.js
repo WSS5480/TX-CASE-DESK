@@ -1,7 +1,8 @@
 // Demo firm: "Try the demo" on the sign-in page gives each visitor their own copy of a sample personal-injury firm.
-// Everything works on screen; nothing leaves the app (no email, no court portals, no AI calls, no logins for staff).
+// Everything works on screen; nothing leaves the app (no email, no court portals, no logins for staff). AI is the one outside
+// service the demo may use: on Steve's Render key (ANTHROPIC_API_KEY), only through ai.js, with caps ($50 a month for the whole
+// demo, $2 per demo firm per day, plus a rate limit; Decision Log 2026-11-13).
 // Each copy is deleted after HOURS hours (Decision Log 2026-11-13-demo-firm: reset after 24 hours). Demo firms never touch My Apps subscriptions.
-// AI stays off in the demo until the assistant ships with Steve's key and per-visitor / monthly caps (assistant plan, Phase 2).
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const rateLimit = require("express-rate-limit");
@@ -11,7 +12,7 @@ const HOURS = 24, MAX_ACTIVE = 300;
 const MSG = {
   send: "Demo firm: nothing is sent. In your own firm this goes out from your own email address.",
   connect: "Demo firm: email can't be connected. In your own firm you connect Outlook, Gmail or your email provider here.",
-  ai: "Demo firm: AI drafting is off. In your own firm, AI writes the first draft and an attorney approves every item.",
+  aikey: "Demo firm: the demo uses the demo key, so there's nothing to change here. In your own firm, an admin adds the firm's Claude key here.",
   court: "Demo firm: court portals, case-law research and case-law watching are off.",
   share: "Demo firm: client portal links and calendar subscriptions are off (nothing in a demo is published).",
   files: "Demo firm: imports, logos and bar cards are off. Documents up to 1 MB, 10 per demo.",
@@ -23,7 +24,7 @@ const MSG = {
 const BLOCK = [
   ["*", /^\/api\/mail\//, "connect"], ["*", /^\/api\/firm\/(mail|court-inbox|ms-keys|setup-help|stripe)(\/|$)/, "connect"],
   ["W", /^\/api\/mailx(\/|$)/, "send"], ["*", /^\/api\/discovery\/[^/]+\/send$/, "send"],
-  ["*", /^\/api\/discovery\/[^/]+\/draft$/, "ai"], ["*", /^\/api\/dictation(\/|$)/, "ai"],
+  ["W", /^\/api\/ai\/(key|limits)(\/|$)/, "aikey"],
   ["*", /^\/api\/law(\/|$)/, "court"], ["*", /^\/api\/admin(\/|$)/, "court"], ["*", /^\/api\/cases\/[^/]+\/(analyze|law-ack)$/, "court"], ["*", /^\/api\/court-logins(\/|$)/, "court"], ["*", /^\/api\/cases\/watch-all$/, "court"],
   ["*", /^\/api\/contacts\/[^/]+\/portal$/, "share"], ["*", /^\/api\/calendar\/feed$/, "share"],
   ["*", /^\/api\/(import\/|cases\/import$|firm\/logo$|firm\/users\/[^/]+\/bar-card$|users\/[^/]+\/bar-card$|me\/bar-card$)/, "files"],
@@ -48,12 +49,11 @@ function guard(req, res) {
   for (const [meth, re, k] of BLOCK) {
     if (!re.test(path) || !(meth === "*" || meth === m || (meth === "W" && w))) continue;
     if (m === "GET" && /text\/html/.test(req.get("accept") || "")) return res.redirect(303, "/?demo=" + k);
-    return res.status(k === "ai" && /^\/api\/dictation/.test(path) ? 503 : 403).json({ error: MSG[k], code: "DEMO" });
+    return res.status(403).json({ error: MSG[k], code: "DEMO" });
   }
   // the court-date and case-law watchers would reach outside sites: keep them off on demo cases
   if (w && req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
     if (/^\/api\/cases(\/[^/]+)?$/.test(path)) { delete req.body.watch_dates; delete req.body.law_watch; delete req.body.tracked; }
-    if (/^\/api\/cases\/[^/]+\/discovery$/.test(path)) req.body.draft = false;   // no AI drafting
     if (/^\/api\/firm\/users\/[^/]+$/.test(path)) { delete req.body.reset; delete req.body.email; }   // no passwords, no real addresses
   }
   return null;
@@ -230,6 +230,9 @@ function mount(app, { wrap, audit, terms }) {
   }));
   setTimeout(() => cleanup().catch(e => console.warn("[demo] cleanup:", e.message)), 30e3);
   setInterval(() => cleanup().catch(e => console.warn("[demo] cleanup:", e.message)), 3600e3);
+  // the same hourly sweep drops AI usage rows older than 13 months (ai.js)
+  const ai = require("./ai"); setTimeout(() => ai.prune().catch(e => console.warn("[ai] prune:", e.message)), 45e3);
+  setInterval(() => ai.prune().catch(e => console.warn("[ai] prune:", e.message)), 3600e3);
 }
 
 module.exports = { mount, guard, cleanup, uploadOk, uploadAfter, HOURS, _test: { seed, start, BLOCK, MSG } };

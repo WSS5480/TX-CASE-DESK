@@ -17,6 +17,8 @@ Pending cases by county + Texas case law for attorneys. Node/Express + Postgres,
    - `SESSION_SECRET` – long random string
    - `NODE_ENV` – `production`
    - `COURTLISTENER_TOKEN` – free token from courtlistener.com → Profile → API
+   - `ANTHROPIC_API_KEY` – **demo firms only** (the "Try the demo" copies). Real firms use only the key their admin saves in Firm Settings → AI (Claude) and never fall back to this one. Demo caps: `DEMO_AI_MONTH_USD` (default 50, all demo firms together), `DEMO_AI_DAY_USD` (default 2 per demo firm), `DEMO_AI_RATE` (default 20 calls per 10 minutes per demo firm). Blank or invalid values fall back to these defaults. Optional: `AI_MAX_TOOL_CHARS` (default 120000, the assistant's total lookup output per question).
+   - `CRED_KEY` – 32 random bytes, base64. Encrypts court passwords, mailbox passwords and each firm's Claude key. Never change it.
 4. Open the site → **Create firm account** → scan the 2FA QR.
 
 ## Notes

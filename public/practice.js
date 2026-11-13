@@ -81,7 +81,7 @@
   const ago = s => { const m = Math.round((Date.now() - new Date(s)) / 60000); return m < 60 ? `${Math.max(1, m)} min ago` : m < 1440 ? new Date(s).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : new Date(s).toLocaleDateString("en-US", { month: "short", day: "numeric" }); };
 
   // ===================== TODAY =====================
-  const TODAY_CARDS = [["court", "In court today"], ["deadlines", "Deadlines"], ["mail", "New from court email"], ["next", "Next 14 days"], ["timer", "Timer"], ["tasks", "My tasks"], ["glance", "At a glance (numbers)"], ["caseload", "Open cases by county"]];
+  const TODAY_CARDS = [["brief", "Daily brief (assistant)"], ["court", "In court today"], ["deadlines", "Deadlines"], ["mail", "New from court email"], ["next", "Next 14 days"], ["timer", "Timer"], ["tasks", "My tasks"], ["glance", "At a glance (numbers)"], ["caseload", "Open cases by county"]];
   VIEWS.today = async function todayView() {
     const __v = ++viewSeq;   // a slower, older screen load must not draw over this one
     $("#app").innerHTML = `<div class="card mute">Loading today…</div>`;
@@ -124,6 +124,7 @@
         <button type="button" class="btn ghost" id="tdCust">Customize</button></div></div>
       ${d.court_queue ? `<div class="banner"><span>${ic("inbox", 18)}<b>${d.court_queue} court notice${d.court_queue === 1 ? "" : "s"} need${d.court_queue === 1 ? "s" : ""} assigning</b><span class="mute">from the shared court inbox</span></span><button type="button" class="btn sm" data-court>Assign</button></div>` : ""}
       <div class="cols"><div class="cmain">
+        ${me.dev_view ? "" : `<section class="box" data-card="brief" id="tdBrief" aria-labelledby="tdBriefH"></section>`}
         <section class="box" data-card="court" aria-labelledby="tdCourt"><div class="bh"><h2 id="tdCourt">In court today</h2><a data-go="calendar">Open calendar</a></div>
           <ul style="list-style:none;margin:0;padding:0">${courtToday.map(courtRow).join("") || `<li class="empty">Nothing in court today.${nextCourt ? ` Next: <b>${esc(nextCourt.title)}</b> on ${esc(niceDate(nextCourt.date))}${nextCourt.time ? " at " + esc(nextCourt.time) : ""}${nextCourt.case ? " · " + caseLink(nextCourt.case) : ""}` : ""}</li>`}</ul>
           <div class="mute" style="padding:10px 18px;border-top:1px solid var(--line2)">Court dates on watched cases are checked every hour.</div></section>
@@ -145,6 +146,7 @@
           <details style="margin-top:6px"><summary class="mute">By court</summary>${bars(d.byCourt)}</details></div></section>
       </div></div>`;
     $$("#app [data-card]").forEach(el => { if (hid.has(el.dataset.card)) el.remove(); });
+    if ($("#tdBrief") && window.assistBrief) assistBrief($("#tdBrief"));
     if (!$("#app .cmain").children.length && !$("#app .cside").children.length) $("#app .cmain").innerHTML = `<div class="card mute">Everything is hidden. Tap Customize to choose what you see here.</div>`;
     $("#tdCust").onclick = () => openSheet("Choose what you see on Today", `<p class="mute" style="margin:0">Saved to your sign-in, so it's the same on your phone and computer.</p>
       <div style="display:flex;flex-direction:column">${TODAY_CARDS.filter(([k]) => k !== "timer" || isLawyer()).map(([k, v]) => `<label class="ck" style="margin:0;padding:6px 0;border-top:1px solid var(--line2)"><input type="checkbox" data-tc="${k}"${hid.has(k) ? "" : " checked"}>${v}</label>`).join("")}</div>
@@ -376,7 +378,9 @@
       ${i.case ? `<div><button type="button" class="caselink" id="evCase">${esc(i.case.style || i.case.cause_no)}</button><div class="mute">Cause ${esc(i.case.cause_no)}${i.case.county ? " · " + esc(i.case.county) + " County" : ""}</div></div>` : ""}
       ${i.notes ? `<div class="mute" style="white-space:pre-wrap;font-size:14px;color:var(--ink2)">${esc(i.notes)}</div>` : ""}
       ${isEv ? `<div class="row">${i.kind === "deadline" && !i.done ? (i.confirmed ? `<span class="ok">${ic("check", 16, 2)}Confirmed</span>` : `<button type="button" class="btn ghost" id="evConf">Confirm date</button>`) : ""}
-        <button type="button" class="btn ghost" id="evDone">${i.done ? "Reopen" : "Mark done"}</button><button type="button" class="btn danger" id="evDel">Delete</button></div>` : `<p class="mute" style="margin:0">Updates automatically when the court record changes.</p>`}`, sh => {
+        <button type="button" class="btn ghost" id="evDone">${i.done ? "Reopen" : "Mark done"}</button><button type="button" class="btn danger" id="evDel">Delete</button></div>` : `<p class="mute" style="margin:0">Updates automatically when the court record changes.</p>`}
+      ${window.assistOpen && !me.dev_view ? `<div><button type="button" class="btn sm ghost" id="evAsk">Ask the assistant about this</button></div>` : ""}`, sh => {
+      const ask = sh.querySelector("#evAsk"); if (ask) ask.onclick = () => { closeSheet(); Object.assign(assistCtx, { event_id: isEv ? i.id : null, case_id: i.case ? i.case.id : null, case_label: i.case ? (i.case.style || i.case.cause_no) : null }); assistOpen(); };
       const c = sh.querySelector("#evCase"); if (c) c.onclick = () => { closeSheet(); caseHub(i.case.id); };
       const cf = sh.querySelector("#evConf"); if (cf) cf.onclick = async () => { await api(`/api/events/${i.id}`, { method: "PATCH", body: { confirm: true } }); closeSheet(); toast("Date confirmed"); calendarView(); };
       const dn = sh.querySelector("#evDone"); if (dn) dn.onclick = async () => { await api(`/api/events/${i.id}`, { method: "PATCH", body: { done: !i.done } }); closeSheet(); toast(i.done ? "Reopened" : "Marked done"); calendarView(); };
@@ -636,6 +640,7 @@
     subView = true; if (window.leaveMail) leaveMail(); else document.body.classList.remove("mailmode"); window.scrollTo(0, 0); $("#app").innerHTML = `<div class="card mute">Loading case…</div>`;
     let r, cs, tpl, ps, dsc, cv; try { [r, cs, tpl, ps, dsc, cv] = await Promise.all([api(`/api/cases/${id}/hub`), loadCases(), api("/api/templates"), loadPeople(), api(`/api/cases/${id}/discovery`).catch(() => ({ sets: [] })), api(`/api/cases/${id}/convos`).catch(() => ({ convos: [], kinds: [] }))]); if (!rules) rules = (await api("/api/deadlines/rules")).rules; } catch (e) { return fail(e); }
     const c = r.case, t = todayStr();
+    if (window.assistCtx) { Object.assign(assistCtx, { case_id: c.id, case_label: c.style || c.cause_no, event_id: null }); if (window.assistFollow) assistFollow(); }   // the assistant knows which case is open
     const unbilled = r.time.filter(x => x.billable && !x.invoice_id).reduce((s, x) => s + (x.amount != null ? Number(x.amount) : x.minutes / 60 * x.rate), 0);
     const groups = [...new Set(rules.map(x => x.group))];
     const back = titleOf(tab);
@@ -952,7 +957,7 @@
         ${sent ? `<div><b>Served</b> ${esc(new Date(S.sent_at).toLocaleString())} to ${esc(S.sent_to || "")}</div>${S.sent_doc ? `<a class="btn sm ghost" href="/api/documents/${S.sent_doc}">Served copy (Word)</a>` : ""}`
           : `<div><b>Due ${esc(niceDate(S.due_on))}</b> · ${left < 0 ? `<b style="color:var(--bad)">${-left} days late</b>` : `${left} day${left === 1 ? "" : "s"} left`}${items.some(i => i.kind === "rfa") ? ` · <span style="color:var(--bad)">Requests for admission not answered in time are deemed admitted.</span>` : ""}</div>
           <div class="dsprog" role="progressbar" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${appr}" aria-label="Approved"><span style="width:${total ? Math.round(appr / total * 100) : 0}%"></span></div><div class="mute">${appr} of ${total} approved</div>
-          <div class="row" style="gap:6px;margin-top:8px">${dMeta.ai ? `<button class="btn sm" id="dsAi">${S.ai_status === "running" || d.drafting ? "AI is drafting…" : "Draft all with AI"}</button>` : `<span class="mute" style="font-size:13px">AI drafting turns on when the Anthropic key is added in Render.</span>`}
+          <div class="row" style="gap:6px;margin-top:8px">${dMeta.ai ? `<button class="btn sm" id="dsAi">${S.ai_status === "running" || d.drafting ? "AI is drafting…" : "Draft all with AI"}</button>` : `<span class="mute" style="font-size:13px">${me.demo ? "The demo's AI isn't switched on yet." : "Add your firm's Claude key in Firm Settings to draft with AI."}</span>`}
             <a class="btn sm ghost" href="/api/discovery/${S.id}/docx">Preview Word</a><button class="btn sm ghost" id="dsAdd">+ Add a missing request</button>${isLawyer() ? `<button class="btn sm ghost danger" id="dsDel">Delete</button>` : ""}</div>
           ${S.ai_status === "error" ? `<div class="err" style="margin-top:6px">AI draft didn't finish: ${esc(S.ai_error || "")}</div>` : ""}`}
       </div>

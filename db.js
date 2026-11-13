@@ -546,6 +546,55 @@ BEGIN
 END $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS tcd_case_log ON cases;
 CREATE TRIGGER tcd_case_log AFTER UPDATE ON cases FOR EACH ROW EXECUTE FUNCTION tcd_case_log();
+-- AI (Claude): the firm's own key (encrypted with CRED_KEY, shown only as its last 4), every call's cost, per-person monthly limits
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS ai_key_enc TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS ai_key_last4 TEXT;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS ai_key_at TIMESTAMPTZ;
+ALTER TABLE firms ADD COLUMN IF NOT EXISTS ai_key_by TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_limit_usd NUMERIC(10,2);   -- optional monthly AI limit for this person (null = none)
+CREATE TABLE IF NOT EXISTS ai_usage (                                   -- one row per AI call; kept after a demo firm is deleted so the demo's monthly cap holds
+  id BIGSERIAL PRIMARY KEY,
+  firm_id INT REFERENCES firms(id) ON DELETE SET NULL,
+  user_id INT REFERENCES users(id) ON DELETE SET NULL,
+  feature TEXT NOT NULL,                   -- dictation | discovery | assistant | brief | key_test
+  model TEXT NOT NULL,
+  input_tokens INT DEFAULT 0, output_tokens INT DEFAULT 0, cache_read_tokens INT DEFAULT 0, cache_write_tokens INT DEFAULT 0,
+  cost_usd NUMERIC(12,6) DEFAULT 0,
+  demo BOOLEAN DEFAULT false,
+  ok BOOLEAN DEFAULT true,
+  error TEXT,                              -- a short code (BAD_KEY, NO_CREDIT, RATE…), never message text
+  at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ai_usage_user ON ai_usage(user_id, at DESC);
+CREATE INDEX IF NOT EXISTS ai_usage_firm ON ai_usage(firm_id, at DESC);
+CREATE INDEX IF NOT EXISTS ai_usage_demo ON ai_usage(at) WHERE demo;
+-- Case Desk Assistant: saved conversations per person (and per case), and the daily brief (one per person per day)
+CREATE TABLE IF NOT EXISTS assistant_threads (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  case_id INT REFERENCES cases(id) ON DELETE CASCADE,
+  title TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS assistant_threads_user ON assistant_threads(user_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS assistant_messages (
+  id BIGSERIAL PRIMARY KEY,
+  thread_id INT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+  text TEXT NOT NULL,
+  links JSONB,                             -- cases the answer links to [{id, label}]
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS assistant_messages_thread ON assistant_messages(thread_id, id);
+CREATE TABLE IF NOT EXISTS assistant_briefs (
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  day DATE NOT NULL,
+  text TEXT NOT NULL,
+  links JSONB,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (user_id, day)
+);
 `;
 
 async function migrate() { await pool.query(SCHEMA); }
