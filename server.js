@@ -167,7 +167,9 @@ app.get("/api/version", wrap(async (req, res) => {
   res.json({ v: VERSION, updated: STARTED, outlook: c.microsoft, gmail: c.google });
 }));
 app.get("/api/meta", wrap(async (req, res) => res.json({ stages: STAGES, preFiling: PRE_FILING, counties: COUNTIES, appeals: APPEALS, connectors: CONNECTORS, courts: cl.TX_COURTS, localLaw: await lawdb.available(), lawCount: await lawdb.size().catch(() => 0), tokenSet: !!process.env.COURTLISTENER_TOKEN })));
-app.get("/healthz", (req, res) => res.send("ok"));
+app.get("/healthz", wrap(async (req, res) => {   // checks the database too, so Render can restart an app that lost it
+  try { await q("SELECT 1"); res.set("Cache-Control", "no-store").send("ok"); } catch (e) { res.status(503).send("database unavailable"); }
+}));
 
 // ---------- signup / login / 2FA ----------
 app.post("/api/signup", loginLimiter, wrap(async (req, res) => {

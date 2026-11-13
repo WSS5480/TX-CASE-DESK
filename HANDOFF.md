@@ -43,7 +43,7 @@ This is the one part that can hurt someone if it's done loosely. Recommended (no
 - **No dictation on SSN/DOB fields.** `dictate.js` sends dictated text to the Anthropic API for cleanup. Mark those inputs `data-nomic`.
 - **Conflict checks by SSN** should compare without displaying the number (e.g. a keyed hash stored beside the encrypted value).
 - David wants the SSN in two places (the contact and the Synopsis). Store it once, on the client contact, and have the Synopsis read it from there.
-- The free Render database is not where real SSNs should live. This ties to the pending Render upgrade.
+- The database is now on a paid plan (Nov 13), so real SSNs can be stored once the encryption above is built.
 
 ### Answers (Steve, Nov 13, 2026): build to these
 
@@ -107,6 +107,7 @@ David's question 4 (where it runs) is already answered by the app: it's a web ap
 |---|---|
 | Nov 13, 2026 | HANDOFF.md started. David's Nov 6 / Nov 12 notes added under `docs/david-notes/`. No app code changed. |
 | Nov 13, 2026 | Steve answered questions A–G (section 1). No app code changed. |
+| Nov 13, 2026 | Database connection recovers after a database restart (connect timeout, keep-alive, idle-error handler; the missing handler used to crash the app). `/healthz` now checks the database (503 if down). After the Basic-256mb upgrade restarted the database, the app hung until it was restarted. |
 | Nov 13, 2026 | **Demo firm** ("Try the demo" on the sign-in page, `demo.js`): each visitor gets their own copy of "Little Joe Demo Attorney at Law" (sample PI cases, clients, court notices, calendar, conversations, time), signed straight in, deleted after 24 hours. Nothing leaves the app: mail send/connect, discovery serve, AI calls, case-law/CourtListener, court portals, client portal links, calendar feeds, imports, staff logins and passwords are blocked (path-normalized guard in `requireAuth` plus checks inside the routes); public token pages never serve demo firms; documents 1 MB / 10 per demo. Demo firms skip My Apps, are hidden from the My Apps firm list and developer view, and are cleaned up hourly. AI stays off in the demo until the assistant ships with Steve's key and caps (assistant plan, Phase 2). |
 
 Earlier (newest first):

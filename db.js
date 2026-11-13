@@ -4,7 +4,12 @@ const { Pool } = require("pg");
 const url = process.env.DATABASE_URL;
 if (!url) { console.error("DATABASE_URL is not set"); process.exit(1); }
 const local = /localhost|127\.0\.0\.1|\/tmp\//.test(url) || url.includes("host=/");
-const pool = new Pool({ connectionString: url, ssl: local ? false : { rejectUnauthorized: false } });
+// If the database restarts (plan change, maintenance), stale connections are dropped and new ones made:
+// a connection attempt gives up after 10 s instead of hanging, keep-alive checks start after 10 s so a vanished
+// database is noticed on a busy connection, and a dropped idle connection is logged instead of crashing the app.
+const pool = new Pool({ connectionString: url, ssl: local ? false : { rejectUnauthorized: false },
+  connectionTimeoutMillis: 10000, idleTimeoutMillis: 30000, keepAlive: true, keepAliveInitialDelayMillis: 10000 });
+pool.on("error", e => console.warn("[db] idle connection dropped:", e.message));
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS firms (
