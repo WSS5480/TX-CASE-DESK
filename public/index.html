@@ -625,6 +625,14 @@ body.ason .wrap{padding-right:400px}
 .asp .asvm[hidden]{display:none}.asp .asvm .btn{min-height:44px}
 .asp .asvrow{display:flex;gap:10px;align-items:flex-start;cursor:pointer}.asp .asvrow input{width:22px;height:22px;margin:1px 0 0;flex:none}
 .asp .asvf{display:flex;flex-direction:column;gap:4px}.asp .asvf>span{font-weight:600;font-size:13px;color:var(--ink2)}.asp .asvf select{width:100%;min-height:44px;max-width:100%}
+.asp .asprops{display:flex;flex-direction:column;gap:8px;margin-top:10px;clear:both}
+.asp .asprop{border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:10px;background:#fff;padding:10px 12px;display:flex;flex-direction:column;gap:4px}
+.asp .asprop[data-st=applied]{border-left-color:var(--ok,#2e7d4f)}.asp .asprop[data-st=cancelled],.asp .asprop[data-st=expired]{border-left-color:var(--line);opacity:.8}
+.asp .aspk{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute);font-weight:600}
+.asp .aspt{font-weight:600;overflow-wrap:anywhere}.asp .aspd{overflow-wrap:anywhere}.asp .aspold{text-decoration:line-through;color:var(--mute)}
+.asp .aspw{font-size:13px;background:#fff7e6;border:1px solid #f2dfb5;border-radius:8px;padding:6px 8px}
+.asp .asps{font-size:13px;color:var(--ink2);font-weight:600}.asp .asprop[data-st=applied] .asps{color:var(--ok,#2e7d4f)}
+.asp .asprow{gap:8px;flex-wrap:wrap}.asp .asprow .btn{min-height:44px;min-width:96px}
 .asp .asm.asa{position:relative}.asp .asm.asa .assay{float:right;margin:-10px -10px 0 6px;width:44px;height:44px;border:0;border-radius:50%;background:transparent;color:var(--mute);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
 .asp .asm.asa .assay:hover,.asp .asm.asa .assay.on{background:var(--chip);color:var(--acc)}
 @media (prefers-reduced-motion:reduce){.asp .asmic.rec{animation:none}}

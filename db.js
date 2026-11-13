@@ -587,6 +587,23 @@ CREATE TABLE IF NOT EXISTS assistant_messages (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS assistant_messages_thread ON assistant_messages(thread_id, id);
+-- date changes the assistant proposes; nothing changes until the person taps Confirm (Steve, Nov 13 2026)
+CREATE TABLE IF NOT EXISTS assistant_proposals (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  thread_id INT REFERENCES assistant_threads(id) ON DELETE SET NULL,
+  item_kind TEXT NOT NULL CHECK (item_kind IN ('event','task')),
+  item_id INT NOT NULL,
+  case_id INT REFERENCES cases(id) ON DELETE CASCADE,
+  item_type TEXT, title TEXT,
+  old_date DATE, old_time TEXT, new_date DATE NOT NULL, new_time TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','applied','cancelled','expired')),
+  created_at TIMESTAMPTZ DEFAULT now(), decided_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS assistant_proposals_case ON assistant_proposals(case_id, decided_at DESC) WHERE status='applied';
+CREATE INDEX IF NOT EXISTS assistant_proposals_user ON assistant_proposals(user_id, status);
+ALTER TABLE assistant_messages ADD COLUMN IF NOT EXISTS proposals JSONB;
 CREATE TABLE IF NOT EXISTS assistant_briefs (
   user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   day DATE NOT NULL,

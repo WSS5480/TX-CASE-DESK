@@ -59,6 +59,7 @@
     V.list = () => { if (!syn) return []; const all = syn.getVoices() || [], en = all.filter(v => /^en/i.test(v.lang));
       return (en.length ? en : all).slice().sort((a, b) => (/^en[-_]US/i.test(b.lang) - /^en[-_]US/i.test(a.lang)) || a.name.localeCompare(b.name)); };
     const pref = k => (me && me.prefs || {})[k];
+    V.length = () => { const l = pref("assistant_length"); return l === "short" || l === "full" ? l : "normal"; };
     V.rate = () => { const r = +pref("assistant_voice_rate"); return r >= 0.7 && r <= 1.5 ? r : 1.03; };
     V.chosen = () => { const n = pref("assistant_voice_name"); return n ? V.list().find(v => v.name === n) || null : null; };
     function pick() {
@@ -83,15 +84,15 @@
     let backup = 0;
     const hush = () => { clearTimeout(backup); if (syn && (syn.speaking || syn.pending)) try { syn.cancel(); } catch (e) {} };
     V.replaying = false;
-    V.say = (text, links, thenListen) => {
+    V.say = (text, links, thenListen, note) => {
       if (!V.canSay) return thenListen && V.on ? V.end("This browser can't read answers out loud; the answer is on screen.") : undefined;
       if (!thenListen && V.on) V.end();   // a replay ends the hands-free conversation (and gives back a half-typed question)
       const my = ++gen; stopRec(); hush();
       const parts = chunks(V.plain(text, links)); if (!parts.length) return thenListen && V.on ? listen() : ui("idle");
-      V.replaying = !thenListen; ui(thenListen ? "speak" : "idle"); if (!thenListen) draw();
+      V.replaying = !thenListen; ui(thenListen ? "speak" : "idle", thenListen ? undefined : note); if (!thenListen) draw();
       const done = () => { if (my !== gen) return; gen++; clearTimeout(backup); V.q = [];
         if (V.replaying) { V.replaying = false; draw(); }
-        if (thenListen && V.on && S.open) { const g = gen; setTimeout(() => g === gen && V.on && listen(), 250); } else if (!V.on) ui("idle"); };
+        if (thenListen && V.on && S.open) { const g = gen; setTimeout(() => g === gen && V.on && listen(), 250); } else if (!V.on) ui("idle", thenListen ? undefined : note); };
       V.q = [];   // kept referenced: Chrome can drop an unreferenced piece and never say it finished
       parts.forEach((p, i) => { const u = new SpeechSynthesisUtterance(p); const v = pick(); if (v) u.voice = v; u.lang = v ? v.lang : "en-US"; u.rate = V.rate();
         if (i === parts.length - 1) u.onend = u.onerror = done;
@@ -142,7 +143,7 @@
     V.enabled = () => !(me && me.prefs && me.prefs.assistant_voice === false);
     V.paint = () => { const t = el("#asVoice"), m = el("#asMic"), on = V.enabled();
       if (t) { t.innerHTML = `${SPK}<span><span class="vw">Voice </span>${on ? "on" : "off"}</span>`; t.classList.toggle("on", on);
-        t.setAttribute("aria-label", `Voice settings (voice is ${on ? "on" : "off"})`); t.setAttribute("aria-expanded", String(!el("#asVm").hidden)); }
+        t.setAttribute("aria-label", `Assistant options (voice is ${on ? "on" : "off"})`); t.setAttribute("aria-expanded", String(!el("#asVm").hidden)); }
       if (m) m.hidden = !on; };
     const save = (body, local) => { if (me) me.prefs = { ...(me.prefs || {}), ...local }; api("/api/assistant/prefs", { method: "PUT", body }).catch(() => {}); };
     V.set = on => { if (!on) V.end(); save({ voice: !!on }, { assistant_voice: !!on }); draw(); V.menu(true); };
@@ -161,10 +162,13 @@
         ${want && !have ? `<div class="ashint asvmiss">Your chosen voice (${esc(want)}) isn't on this device, so the best one here is used.</div>` : ""}
         ${!list.length ? `<div class="ashint">This device hasn't listed its voices yet. The best one is used automatically.</div>` : ""}
         <label class="asvf"><span>Speed</span><select id="asVRate" ${on ? "" : "disabled"}>${RATES.map(([v, n]) => `<option value="${v}" ${v === rateNow ? "selected" : ""}>${n}</option>`).join("")}</select></label>` : ""}
+        <label class="asvf"><span>Answers</span><select id="asVLen">${[["short", "Short summary"], ["normal", "Normal"], ["full", "Full detail"]].map(([v, n]) => `<option value="${v}" ${V.length() === v ? "selected" : ""}>${n}</option>`).join("")}</select>
+          <small class="ashint">How long the assistant's answers are, typed or spoken. Spoken answers stay short unless you pick Full detail.</small></label>
         <div class="row" style="gap:8px;margin-top:4px">${V.canSay ? `<button type="button" class="btn sm ghost" id="asVTry" ${on ? "" : "disabled"}>Hear a sample</button>` : ""}<button type="button" class="btn sm" id="asVDone">Done</button></div>`;
       m.querySelector("#asVOn").onchange = e => V.set(e.target.checked);
       const sel = m.querySelector("#asVSel"); if (sel) sel.onchange = () => { voice = null; save({ voice_name: sel.value }, { assistant_voice_name: sel.value }); V.sample(); m.querySelectorAll(".asvmiss").forEach(x => x.remove()); };
       const rt = m.querySelector("#asVRate"); if (rt) rt.onchange = () => { save({ voice_rate: +rt.value }, { assistant_voice_rate: +rt.value }); V.sample(); };
+      m.querySelector("#asVLen").onchange = e => save({ answer_length: e.target.value }, { assistant_length: e.target.value });
       const tr = m.querySelector("#asVTry"); if (tr) tr.onclick = () => V.sample();
       m.querySelector("#asVDone").onclick = () => { m.hidden = true; V.paint(); el("#asVoice")?.focus(); };
       if (fid) { const f = m.querySelector("#" + fid); if (f) f.focus(); }   // keep the keyboard / screen reader where it was
@@ -175,16 +179,63 @@
     return V;
   })();
 
+  // ---------- proposed date changes: a card under the answer; nothing changes until Confirm ----------
+  const fdate = d => { if (!d) return "no date"; const x = new Date(d + "T12:00:00"); return x.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric", ...(x.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) }); };
+  const when = (d, t) => fdate(d) + (t ? " · " + t : "");
+  const TYPE = { hearing: "Court date", deadline: "Deadline", meeting: "Meeting", event: "Calendar item", todo: "To-do" };
+  function propHtml(ps) {
+    if (!ps || !ps.length) return "";
+    const pend = ps.filter(p => p.status === "pending");
+    return `<div class="asprops">${ps.map(p => `<div class="asprop" data-st="${esc(p.status)}">
+        <div class="aspk">${esc(TYPE[p.type] || "Item")}${p.kind === "task" ? " due date" : ""}</div>
+        <div class="aspt">${esc(p.title || "")}</div>
+        <div class="aspd"><span class="aspold">${esc(when(p.old_date, p.old_time))}</span> <span aria-hidden="true">→</span><span class="sr-only" style="position:absolute;left:-9999px"> to </span> <b>${esc(when(p.new_date, p.new_time))}</b></div>
+        ${p.status === "pending" && p.type === "hearing" ? `<div class="aspw">This moves it in TX Case Desk only. It doesn't change the court's setting: file a motion or notice to reset it.</div>` : ""}
+        ${p.status === "pending" && p.type === "deadline" ? `<div class="aspw">Check the new date against the rules and any court order. It will show as not confirmed until you confirm it on the calendar.</div>` : ""}
+        ${p.status === "pending" && [0, 6].includes(new Date(p.new_date + "T12:00:00").getDay()) ? `<div class="aspw">The new date is a ${new Date(p.new_date + "T12:00:00").getDay() ? "Saturday" : "Sunday"}.</div>` : ""}
+        ${p.status === "pending" ? `<div class="row asprow"><button type="button" class="btn sm" data-pconf="${+p.id}">Confirm</button><button type="button" class="btn sm ghost" data-pcan="${+p.id}">Cancel</button></div>`
+          : `<div class="asps">${p.status === "applied" ? "✓ Moved." : p.status === "cancelled" ? "Cancelled. Nothing changed." : "Expired. Nothing changed; ask again if you still want it."}</div>`}
+      </div>`).join("")}${pend.length > 1 ? `<div class="row asprow"><button type="button" class="btn sm" data-pall="${pend.map(p => +p.id).join(",")}">Confirm all ${pend.length}</button></div>` : ""}</div>`;
+  }
+  const allProps = () => S.msgs.flatMap(m => m.proposals || []);
+  const setProp = np => { for (const m of S.msgs) (m.proposals || []).forEach((p, i, a) => { if (+p.id === +np.id) a[i] = np; }); };
+  // after a move, redraw the page underneath only when nothing is being typed there (a redraw would lose it)
+  function refreshScreen() {
+    try {
+      const app = document.querySelector("#app"), a = document.activeElement;
+      const busy = app && ((a && app.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) || (a && app.contains(a) && a.isContentEditable)
+        || [...app.querySelectorAll("textarea, input[type=text], input:not([type])")].some(x => x.value !== x.defaultValue));
+      if (busy) return toast("Moved. Your screen shows it next time you open it.");
+      if (assistCtx.case_id && window.caseHub && document.querySelector("#app .cdet")) caseHub(assistCtx.case_id);   // only when the case page is what's showing
+      else if (["today", "calendar", "tasks", "dashboard"].includes(tab) && !(typeof subView !== "undefined" && subView) && typeof show === "function") show();
+    } catch (e) {}
+  }
+  async function decide(ids, how) {
+    let moved = 0, msg = "";
+    for (const id of ids) {
+      try { const r = await api(`/api/assistant/proposals/${id}/${how}`, { method: "POST" }); setProp(r.proposal); if (how === "confirm" && r.proposal.status === "applied") moved++; }
+      catch (e) { if (e.data && e.data.proposal) setProp(e.data.proposal); msg = e.message || "That didn't work."; }
+    }
+    draw();
+    if (moved) { toast(moved > 1 ? `Moved ${moved} dates.` : "Moved."); refreshScreen(); }
+    if (msg) toast(msg);
+  }
+  function wireProps(root) {
+    root.querySelectorAll("[data-pconf]").forEach(b => b.onclick = () => { b.disabled = true; decide([+b.dataset.pconf], "confirm"); });
+    root.querySelectorAll("[data-pcan]").forEach(b => b.onclick = () => { b.disabled = true; decide([+b.dataset.pcan], "cancel"); });
+    root.querySelectorAll("[data-pall]").forEach(b => b.onclick = () => { b.closest(".asprops").querySelectorAll("button").forEach(x => x.disabled = true); decide(b.dataset.pall.split(",").map(Number), "confirm"); });
+  }
+
   // ---------- the panel ----------
   function build() {
     panel = document.createElement("aside"); panel.id = "asPanel"; panel.className = "asp"; panel.hidden = true;
     panel.setAttribute("role", "dialog"); panel.setAttribute("aria-label", NAME);
     panel.innerHTML = `<div class="ash"><h2><span class="asfull">Case Desk </span>Assistant</h2>
-        ${VOICE.ok || VOICE.canSay ? `<button type="button" class="btn sm ghost asvt" id="asVoice" aria-expanded="false" aria-controls="asVm" title="Voice: on/off, which voice, speed"></button>` : ""}
+        ${VOICE.ok || VOICE.canSay ? `<button type="button" class="btn sm ghost asvt" id="asVoice" aria-expanded="false" aria-controls="asVm" title="Assistant options: voice on/off, which voice, speed, answer length"></button>` : ""}
         <button type="button" class="btn sm ghost" id="asNew" title="Start a new conversation">New</button>
         <button type="button" class="btn sm ghost" id="asHist" title="Saved conversations">History</button>
         <button type="button" class="iconb" id="asX" aria-label="Close the assistant">${ic("close", 20, 2)}</button></div>
-      <div class="asvm" id="asVm" hidden role="group" aria-label="Voice settings"></div>
+      <div class="asvm" id="asVm" hidden role="group" aria-label="Assistant options"></div>
       <div class="asctx" id="asCtx"></div>
       <div class="asbody" id="asBody" aria-live="polite"></div>
       <div class="asvs" id="asVs" hidden aria-live="polite"><span class="ddot" aria-hidden="true"></span><span id="asVsT"></span><button type="button" class="btn sm ghost" id="asVsEnd">End</button></div>
@@ -217,9 +268,9 @@
     if (S.view === "hist") return drawHist(body);
     body.innerHTML = (S.msgs.length ? "" : `<div class="ashint">${assistCtx.case_id ? `Ask about this case: what's due, the last conversation, who opposing counsel is, new court emails.`
       : `Ask about your cases: "what's due this week?", "which cases have no next court date?", "any new court emails?". I can only read your data; I can't change or send anything.`}${VOICE.ok && VOICE.enabled() ? ` Or tap the mic and just talk: it answers out loud.` : ""}</div>`)
-      + S.msgs.map((m, i) => m.role === "user" ? `<div class="asm asu">${esc(m.text)}</div>` : m.role === "error" ? `<div class="asm ase">${m.html}</div>` : `<div class="asm asa">${VOICE.canSay && VOICE.enabled() ? (VOICE.replaying && VOICE.replayIdx === i ? `<button type="button" class="assay on" data-asay="${i}" aria-label="Stop reading" title="Stop reading">${STOP}</button>` : `<button type="button" class="assay" data-asay="${i}" aria-label="Read this answer out loud" title="Read out loud">${SPK}</button>`) : ""}${render(m.text, m.links)}</div>`).join("")
+      + S.msgs.map((m, i) => m.role === "user" ? `<div class="asm asu">${esc(m.text)}</div>` : m.role === "error" ? `<div class="asm ase">${m.html}</div>` : `<div class="asm asa">${VOICE.canSay && VOICE.enabled() ? (VOICE.replaying && VOICE.replayIdx === i ? `<button type="button" class="assay on" data-asay="${i}" aria-label="Stop reading" title="Stop reading">${STOP}</button>` : `<button type="button" class="assay" data-asay="${i}" aria-label="Read this answer out loud" title="Read out loud">${SPK}</button>`) : ""}${render(m.text, m.links)}${propHtml(m.proposals)}</div>`).join("")
       + (S.busy ? `<div class="asm asa busy ashint">Looking that up…</div>` : "");
-    wireLinks(body);
+    wireLinks(body); wireProps(body);
     body.querySelectorAll("[data-asay]").forEach(b => b.onclick = () => { if (VOICE.replaying && +b.dataset.asay === VOICE.replayIdx) return VOICE.hushReplay();
       const m = S.msgs[+b.dataset.asay]; if (m) { VOICE.replayIdx = +b.dataset.asay; VOICE.say(m.text, m.links, false); } });
     body.scrollTop = body.scrollHeight;
@@ -238,7 +289,7 @@
       await api("/api/assistant/threads", { method: "DELETE" }).catch(() => {}); S.thread = null; S.msgs = []; drawHist(body); };
   }
   async function loadThread(id) {
-    try { const r = await api(`/api/assistant/threads/${id}`); S.thread = r.thread.id; S.threadCase = r.thread.case_id; S.msgs = r.messages.map(m => ({ role: m.role, text: m.text, links: m.links })); }
+    try { const r = await api(`/api/assistant/threads/${id}`); S.thread = r.thread.id; S.threadCase = r.thread.case_id; S.msgs = r.messages.map(m => ({ role: m.role, text: m.text, links: m.links, proposals: m.proposals || [] })); }
     catch (e) { S.thread = null; S.msgs = [{ role: "error", html: errHtml(e) }]; }
     S.view = "chat"; draw();
   }
@@ -260,13 +311,15 @@
     let said = null; const conv = S.msgs;
     S.busy = true; S.msgs.push({ role: "user", text }); inp.value = ""; draw();
     try {
-      const r = await api("/api/assistant/chat", { method: "POST", body: { message: text, thread_id: S.thread, context: { ...ctxNow(), voice: !!voice } } });
+      const r = await api("/api/assistant/chat", { method: "POST", body: { message: text, thread_id: S.thread, context: { ...ctxNow(), voice: !!voice, length: VOICE.length() } } });
       if (S.msgs !== conv) { S.busy = false; draw(); return; }   // they started another conversation while waiting; this answer stays saved in its own
       S.thread = r.thread_id; if (S.threadCase == null) S.threadCase = assistCtx.case_id || null;
-      S.msgs.push({ role: "assistant", text: r.reply, links: r.links }); if (voice) said = r;
+      S.msgs.push({ role: "assistant", text: r.reply, links: r.links, proposals: r.proposals || [] }); if (voice) said = r;
     } catch (e) { if (S.msgs !== conv) { S.busy = false; draw(); return; } S.msgs.push({ role: "error", html: errHtml(e) }); if (!inp.value) inp.value = text; if (voice) VOICE.end("The assistant didn't answer. Tap the mic to try again."); }
     S.busy = false; draw();
-    if (said && VOICE.on) VOICE.say(said.reply, said.links, true);
+    // a change waiting for Confirm: read the answer, then stop listening so the tap decides (never a spoken "yes")
+    if (said && VOICE.on && (said.proposals || []).some(p => p.status === "pending")) { VOICE.end(); VOICE.replayIdx = S.msgs.length - 1; VOICE.say(said.reply, said.links, false, "Tap Confirm to make the change."); }
+    else if (said && VOICE.on) VOICE.say(said.reply, said.links, true);
   }
   function setOpen(on, quiet) {
     if (!panel) build();

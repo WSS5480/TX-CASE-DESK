@@ -789,7 +789,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     await audit(req, "import_matters", { added, skipped }); res.json({ added, skipped });
   }));
 
-  Object.assign(SHARED, { calendarItems, contactCond });   // the assistant's read-only tools use the same access rules
+  Object.assign(SHARED, { calendarItems, contactCond, eventOk: (user, id) => eventOk({ user }, id), taskOk: (user, id) => taskOk({ user }, id) });   // the assistant uses the same access rules (reading, and date changes after Confirm)
   app.use("/api", R);
 }
 const SHARED = {};

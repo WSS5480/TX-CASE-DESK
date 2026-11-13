@@ -8,7 +8,7 @@ function toast(m) { const t = $("#toast"); t.textContent = m; t.style.display = 
 async function api(path, opts = {}) {
   const res = await fetch(path, { method: opts.method || "GET", headers: { "Content-Type": "application/json", "X-Requested-With": "tcd" }, body: opts.body ? JSON.stringify(opts.body) : undefined, credentials: "same-origin" });
   let data = {}; try { data = await res.json(); } catch (e) {}
-  if (!res.ok) { const err = new Error(data.error || "Request failed"); err.status = res.status; err.code = data.code; err.reconnect = !!data.reconnect;
+  if (!res.ok) { const err = new Error(data.error || "Request failed"); err.status = res.status; err.code = data.code; err.reconnect = !!data.reconnect; err.data = data;
     if (data.code === "DEV_READONLY" && opts.method && opts.method !== "GET") toast(err.message);   // developer view: a save was refused (background reads stay quiet)
     if (data.code === "DEV_ENDED") { toast(err.message); setTimeout(() => { location.href = "/?dev=1"; }, 1500); }
     if (data.code === "TERMS" && me && !me.dev_view) { me.terms_ok = false; termsView(); }   // a new User Agreement came out while signed in

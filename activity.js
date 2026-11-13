@@ -22,7 +22,7 @@ async function build(user, caseId) {
   if (!c) return null;
   const F = user.firm_id, id = c.id, law = LAWYER(user);
   const none = { rows: [] }, safe = p => p.catch(e => { console.warn("[activity]", e.message); return none; });
-  const [users, convos, emails, docs, tasks, events, time, invoices, disc, changes, audits] = await Promise.all([
+  const [users, convos, emails, docs, tasks, events, time, invoices, disc, changes, audits, moved] = await Promise.all([
     safe(q("SELECT id, name FROM users WHERE firm_id=$1", [F])),
     safe(q("SELECT id, at, kind, with_name, direction, minutes, body, user_id FROM case_convos WHERE case_id=$1 AND firm_id=$2 ORDER BY at DESC LIMIT 1000", [id, F])),
     safe(q(`SELECT id, subject, from_addr, received_at FROM inbound_emails WHERE firm_id=$2 AND dismissed_at IS NULL
@@ -38,6 +38,8 @@ async function build(user, caseId) {
     // written to match the indexes on audit_log (db.js LATE_INDEXES)
     safe(q(`(SELECT action, detail, user_id, at FROM audit_log WHERE firm_id=$1 AND action IN (${AUD.map(a => `'${a}'`).join(",")}) AND COALESCE(detail->>'case', detail->>'case_id') = $2 ORDER BY at DESC LIMIT 500)
         UNION ALL (SELECT action, detail, user_id, at FROM audit_log WHERE firm_id=$1 AND action='case_added' AND detail->>'id' = $2 LIMIT 1)`, [F, String(id)])),
+    // dates moved through the assistant (each one confirmed by the person)
+    safe(q("SELECT item_kind, item_type, title, old_date, old_time, new_date, new_time, user_id, decided_at FROM assistant_proposals WHERE case_id=$1 AND firm_id=$2 AND status='applied' ORDER BY decided_at DESC LIMIT 500", [id, F])),
   ]);
   const nm = Object.fromEntries(users.rows.map(u => [u.id, u.name])), by = uid => uid ? nm[uid] || "Former user" : null;
   // the full wording of an edited or deleted conversation: firm leaders and the lead attorney only (it may have been on the wrong matter)
@@ -54,6 +56,9 @@ async function build(user, caseId) {
   }
   for (const e of events.rows) add("dates", e.created_at, `${e.kind === "hearing" ? "Hearing" : e.kind === "deadline" ? "Deadline" : e.kind === "meeting" ? "Meeting" : "Date"} added: ${clip(e.title, 160)}`,
     "On " + mdy(e.on_date) + (e.at_time ? " " + e.at_time : ""), e.created_by ? by(e.created_by) : SRC, { sec: "dates" });
+  for (const m of moved.rows) add(m.item_kind === "task" ? "tasks" : "dates", m.decided_at,
+    `${m.item_kind === "task" ? "Task due date" : m.item_type === "hearing" ? "Hearing" : m.item_type === "deadline" ? "Deadline" : m.item_type === "meeting" ? "Meeting" : "Date"} moved: ${clip(m.title, 160)}`,
+    `${m.old_date ? mdy(m.old_date) : "No due date"}${m.old_time ? " " + m.old_time : ""} → ${mdy(m.new_date)}${m.new_time ? " " + m.new_time : ""} · with the assistant, confirmed`, by(m.user_id), { sec: m.item_kind === "task" ? "tasks" : "dates" });
   for (const t of time.rows) add("billing", t.created_at, t.amount != null && !t.minutes ? `Expense / flat fee: ${usd(t.amount)}` : `Time: ${hrs(t.minutes)}`, clip(t.description, 200) + (t.invoice_id ? " · invoiced" : ""), by(t.user_id), { sec: "billing" });
   for (const i of invoices.rows) add("billing", i.created_at, `Invoice ${i.number}: ${usd(i.total)}`, "Status: " + i.status, null, { sec: "billing" });
   for (const s of disc.rows) {
