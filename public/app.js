@@ -47,8 +47,16 @@ function authView(mode = "login", msg = "") {
    ${signup ? `<p class="mute" style="text-align:center">Every new firm starts with a free 14-day trial.</p>` : ""}
    <p class="mute" style="text-align:center"><a class="link" id="sw">${signup ? "Have an account? Sign in" : "New firm? Create an account"}</a></p>
    ${signup ? "" : `<p class="mute" style="text-align:center;margin:8px 0 0"><a class="link" id="forgot" href="#" role="button">Forgot password?</a></p>`}
+   ${signup ? "" : `<div class="demobox"><h3>Try the demo</h3><p class="mute">Your own copy of a sample personal-injury firm, Little Joe Demo Attorney at Law: cases, clients, court notices, calendar, conversations and billing. Nothing you do is sent anywhere, and your copy is deleted after 24 hours. No sign-up needed.</p>
+     <label class="ck" style="align-items:flex-start"><input type="checkbox" id="demoAgree" style="margin-top:3px"><span>I agree to the <a class="link" href="/terms" target="_blank" rel="noopener">User Agreement</a></span></label>
+     <div class="err" id="demoErr"></div><button type="button" class="btn ghost" id="demoGo" style="width:100%">Try the demo</button></div>`}
    <p class="mute authf"><a class="link" href="/terms" target="_blank" rel="noopener">User Agreement</a><span aria-hidden="true">·</span><a class="link" id="devGo" href="#" role="button">Developer</a></p></div>`;
   $("#devGo").onclick = e => { e.preventDefault(); devPinView(); };
+  if ($("#demoGo")) $("#demoGo").onclick = async () => { const b = $("#demoGo"), er = $("#demoErr"); er.textContent = "";
+    if (!$("#demoAgree").checked) { er.textContent = "Tick the box to agree to the User Agreement first."; return; }
+    b.disabled = true; b.textContent = "Setting up your demo firm…";
+    try { await api("/api/demo/start", { method: "POST", body: { agree: true } }); me = (await api("/api/me")).user; tab = "cases"; start(); }
+    catch (x) { er.textContent = x.message; b.disabled = false; b.textContent = "Try the demo"; } };
   if ($("#forgot")) $("#forgot").onclick = e => { e.preventDefault(); forgotView($("#f [name=email]").value); };
   $("#sw").onclick = () => authView(signup ? "login" : "signup");
   $$("[name=kind]").forEach(r => r.onchange = () => { const solo = $("[name=kind]:checked").value === "solo"; $("#firmLbl").textContent = solo ? "Practice name (optional)" : "Firm name"; $("#firmIn").required = !solo; $("#firmIn").placeholder = solo ? "Law Office of …" : ""; });
@@ -144,7 +152,17 @@ async function devPickView() {
 // the banner while viewing as someone: who, read-only, until when; switch person or leave
 function devBar(off) {
   let bar = document.getElementById("devbar");
-  if (off || !me || !me.dev_view) { if (bar) bar.remove(); document.body.classList.remove("devv"); return; }
+  if (off || !me || !(me.dev_view || me.demo)) { if (bar) bar.remove(); document.body.classList.remove("devv"); return; }
+  if (me.demo) {   // demo firm: say so on every screen, with a way out
+    if (!bar) { bar = document.createElement("div"); bar.id = "devbar"; bar.setAttribute("role", "status"); document.body.prepend(bar); }
+    document.body.classList.add("devv"); bar.classList.add("demo");
+    bar.innerHTML = `<span class="dvt"><span class="dv1"><b>Demo firm</b> · sample data, nothing is sent</span><span class="dv2">Your copy is deleted ${esc(new Date(me.demo_until).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }))}</span></span>
+      <span class="dvb"><button type="button" class="btn sm" id="dmSign">Sign up</button><button type="button" class="btn sm ghost" id="dmEx">Leave</button></span>`;
+    const fit = () => document.body.style.setProperty("--devh", bar.offsetHeight + "px"); fit(); if (!bar._fit) { bar._fit = true; addEventListener("resize", fit); }
+    bar.querySelector("#dmSign").onclick = async () => { await api("/api/logout", { method: "POST" }).catch(() => {}); location.href = "/?signup=1"; };
+    bar.querySelector("#dmEx").onclick = async () => { if (!confirm("Leave the demo? You can't come back to this copy; you can start a fresh one any time.")) return; await api("/api/logout", { method: "POST" }).catch(() => {}); location.href = "/"; };
+    return;
+  }
   if (!bar) { bar = document.createElement("div"); bar.id = "devbar"; bar.setAttribute("role", "status"); document.body.prepend(bar); }
   document.body.classList.add("devv");
   // line 1: whose account (always visible); line 2: developer view, read-only time, firm
@@ -759,6 +777,7 @@ const DICT = {
     busy = true; const mine = ++run; show("work", r);
     let out = null, note = "";
     if (me && me.dev_view) note = "(AI cleanup is off in developer view.)";
+    else if (me && me.demo) note = "(AI cleanup is off in the demo.)";
     else try { out = (await api("/api/dictation/cleanup", { method: "POST", body: { text: r } })).text; }
       catch (e) { note = e.status === 503 ? "(AI cleanup isn't switched on yet.)" : e.status === 429 || e.status === 400 ? "(" + e.message + ")" : "(AI cleanup didn't answer.)"; }
     if (mine !== run) return;   // discarded or inserted while waiting
@@ -1483,6 +1502,7 @@ checkVersion();
   const qs = new URLSearchParams(location.search);
   if (qs.get("connected") || qs.get("mailerror")) { tab = /firm/.test(qs.get("connected") || "") ? "firm" : "inbox"; if (/court inbox/.test(qs.get("connected") || "")) fsSec = "email"; history.replaceState(null, "", "/"); setTimeout(() => toast(qs.get("connected") ? `Email connected: ${qs.get("connected")} — checking court emails now` : qs.get("mailerror")), 600); }
   try { me = (await api("/api/me")).user; start();
+    if (qs.get("demo")) { history.replaceState(null, "", "/"); setTimeout(() => toast("Demo firm: nothing is sent or connected. In your own firm this works for real."), 400); }
     if (qs.get("devro")) { history.replaceState(null, "", "/"); setTimeout(() => toast("Developer view is read-only (except email setup): exports and calendar links are off. Nothing was changed."), 400); } }
   catch (e) {
     if (e.code === "CHANGE_PW") { me = { must_change_pw: true }; return changePwView(true); }

@@ -17,6 +17,7 @@ const mail = require("./mail");
 const practice = require("./practice");
 const access = require("./access");
 const myapps = require("./myapps");
+const demo = require("./demo");
 const cl = require("./courtlistener");
 const { COUNTIES, APPEALS, CONNECTORS } = require("./counties");
 const sync = require("./sync");
@@ -112,10 +113,10 @@ function publicUser(u) {
     firm_dash: access.firmDash(u), firm_kind: u.firm_kind || "firm", prefs: u.prefs || {},
     licensed_on: u.licensed_on ? new Date(u.licensed_on).toISOString().slice(0, 10) : "", has_bar_card: !!u.bar_card_at,
     court_handler: courtHandler(u), court_mode: u.court_mode || "each",
-    terms_ok: u.terms_version === TERMS.VERSION, terms_version: TERMS.VERSION };
+    terms_ok: u.terms_version === TERMS.VERSION, terms_version: TERMS.VERSION, ...(u.demo_until ? { demo: true, demo_until: u.demo_until } : {}) };
 }
 async function loadUser(id) {
-  const { rows } = await q("SELECT u.*, f.name AS firm_name, f.logo_token, f.kind AS firm_kind, f.court_mode, f.plan, f.plan_expires, f.plan_source, f.plan_checked, f.disabled AS firm_disabled FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
+  const { rows } = await q("SELECT u.*, f.name AS firm_name, f.logo_token, f.kind AS firm_kind, f.court_mode, f.plan, f.plan_expires, f.plan_source, f.plan_checked, f.disabled AS firm_disabled, f.demo_until FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.id=$1 AND u.active", [id]);
   return rows[0];
 }
 const requireAuth = wrap(async (req, res, next) => {
@@ -136,12 +137,16 @@ const requireAuth = wrap(async (req, res, next) => {
   }
   req.user = await loadUser(req.session.uid);
   if (!req.user) { req.session.destroy(() => {}); return res.status(401).json({ error: "Account disabled" }); }
+  if (req.user.demo_until) {   // "Try the demo" copy: ends on its date; nothing may leave the app
+    if (new Date(req.user.demo_until) < new Date()) { req.session.destroy(() => {}); return res.status(401).json({ error: "This demo has ended. Start a new one from the sign-in page." }); }
+    if (demo.guard(req, res)) return;
+  }
   if (req.devEmail) await q("INSERT INTO audit_log(user_id, firm_id, action, detail, ip) VALUES($1,$2,'developer_email_setup',$3,$4)", [req.user.id, req.user.firm_id, { dev: true, method: req.method, path }, req.ip]);   // logged before it runs
   if (req.user.must_change_pw && !["/api/me", "/api/password", "/api/logout"].includes(path))
     return res.status(403).json({ error: "Change your temporary password first", code: "CHANGE_PW" });
   // Subscription (managed in My Apps). Account, logout and subscription pages stay open so they can fix it.
   const fs = { id: req.user.firm_id, plan: req.user.plan, plan_expires: req.user.plan_expires, plan_source: req.user.plan_source, plan_checked: req.user.plan_checked, disabled: req.user.firm_disabled };
-  const firm = req.devView ? fs : await myapps.refresh(fs);   // developer view: no calls that could change the firm's plan
+  const firm = req.devView || req.user.demo_until ? fs : await myapps.refresh(fs);   // developer view and demo firms: no My Apps calls that could change a plan
   // User Agreement: required before using the app (developer view excepted — it can't accept for anyone)
   if (!req.devView && req.user.terms_version !== TERMS.VERSION && !["/api/me", "/api/logout", "/api/password", "/api/terms/accept", "/api/subscription", "/api/subscription/redeem"].includes(path))
     return res.status(403).json({ error: "Please accept the updated User Agreement first.", code: "TERMS" });
@@ -315,7 +320,7 @@ app.post("/api/dev/pin", devLimiter, wrap(async (req, res) => {
 app.get("/api/dev/people", wrap(async (req, res) => {
   if (!devOk(req)) return res.status(401).json({ error: "Enter the developer PIN first.", code: "DEV_PIN" });
   const { rows } = await q(`SELECT u.id, u.name, u.email, u.role, u.active, f.id AS firm_id, f.name AS firm_name, f.kind AS firm_kind
-    FROM users u JOIN firms f ON f.id=u.firm_id ORDER BY lower(f.name), f.id, CASE u.role WHEN 'admin' THEN 0 WHEN 'partner' THEN 1 WHEN 'manager' THEN 2 WHEN 'attorney' THEN 3 ELSE 4 END, lower(u.name)`);
+    FROM users u JOIN firms f ON f.id=u.firm_id WHERE f.demo_until IS NULL ORDER BY lower(f.name), f.id, CASE u.role WHEN 'admin' THEN 0 WHEN 'partner' THEN 1 WHEN 'manager' THEN 2 WHEN 'attorney' THEN 3 ELSE 4 END, lower(u.name)`);
   res.json({ people: rows, until: req.session.dev.at + DEV_TTL });
 }));
 app.post("/api/dev/view", wrap(async (req, res) => {
@@ -1016,7 +1021,7 @@ app.post("/api/inbound/postmark", wrap(async (req, res) => {
   catch (e) { console.error("[inbound] failed", e.message); res.json({ ok: false }); } // 200 so Postmark doesn't retry forever
 }));
 app.get("/api/email-alerts", requireAuth, wrap(async (req, res) => {
-  const token = req.devView ? (await q("SELECT inbox_token FROM users WHERE id=$1", [req.user.id])).rows[0]?.inbox_token || null : await inbound.tokenFor(req.user.id);
+  const token = req.devView || req.user.demo_until ? (await q("SELECT inbox_token FROM users WHERE id=$1", [req.user.id])).rows[0]?.inbox_token || null : await inbound.tokenFor(req.user.id);
   const { rows } = await q("SELECT id, from_addr, subject, kind, causes, matched_case_ids, confirm_code, received_at FROM inbound_emails WHERE user_id=$1 AND dismissed_at IS NULL ORDER BY received_at DESC LIMIT 30", [req.user.id]);
   const confirm = rows.find(r => r.kind === "forward_confirm" && r.confirm_code);
   const known = rows.length ? (await q("SELECT upper(cause_no) c FROM cases WHERE firm_id=$1", [req.user.firm_id])).rows.map(r => r.c) : [];
@@ -1157,6 +1162,7 @@ require("./discovery").mount(app, { requireAuth, wrap, audit });   // discovery 
 require("./dictate").mount(app, { requireAuth, wrap });   // dictation: AI fixes grammar, the person chooses to insert it
 require("./convos").mount(app, { requireAuth, wrap, audit });   // conversation log on each case
 require("./activity").mount(app, { requireAuth, wrap });   // activity log: everything on a case in one timeline
+demo.mount(app, { wrap, audit, terms: TERMS });   // "Try the demo": a sample firm per visitor, nothing leaves the app
 
 // ---------- static + errors ----------
 app.use(express.static(path.join(__dirname, "public"), { index: "index.html", setHeaders: r => r.setHeader("Cache-Control", "no-cache") }));

@@ -41,6 +41,7 @@ function mount(app, { requireAuth, wrap }) {
   const limiter = rateLimit({ windowMs: 15 * 60e3, max: 150, standardHeaders: true, legacyHeaders: false,
     keyGenerator: req => "u" + req.user.id, message: { error: "Too many cleanups. Wait a few minutes." } });
   app.post("/api/dictation/cleanup", requireAuth, limiter, wrap(async (req, res) => {
+    if (req.user.demo_until) throw fail(503, "AI cleanup is off in the demo.");
     const text = String((req.body && req.body.text) || "").replace(/\r/g, "").trim();
     if (!text) throw fail(400, "Nothing to clean up.");
     if (text.length > MAX) throw fail(400, "That's too long to clean up at once. Insert it as spoken, or dictate in shorter parts.");

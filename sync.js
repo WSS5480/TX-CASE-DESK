@@ -81,7 +81,7 @@ function startScheduler() {
 async function lawWatch() {
   const analysis = require("./analysis");
   const { rows } = await q(`SELECT id, issues, law_checked_at, created_at FROM cases
-    WHERE law_watch AND issues IS NOT NULL AND issues <> '' AND (law_checked_at IS NULL OR law_checked_at < now() - interval '24 hours')
+    WHERE law_watch AND issues IS NOT NULL AND issues <> '' AND firm_id NOT IN (SELECT id FROM firms WHERE demo_until IS NOT NULL) AND (law_checked_at IS NULL OR law_checked_at < now() - interval '24 hours')
     ORDER BY law_checked_at NULLS FIRST LIMIT 20`);
   let n = 0;
   for (const c of rows) {
@@ -106,6 +106,7 @@ async function hourly() {
   hourlyRunning = true;
   const summary = { watch_checks: 0, full_pulls: 0 };
   try {
+    await require("./demo").cleanup().catch(e => console.warn("[demo] cleanup:", e.message));   // the free server sleeps; the hourly ping also clears old demos
     const w = await q(`SELECT DISTINCT l.id FROM court_logins l JOIN users u ON u.id=l.user_id
       JOIN cases c ON c.firm_id=u.firm_id AND c.county=l.county AND c.watch_dates AND c.external_url IS NOT NULL
       WHERE u.active AND l.status <> 'syncing'`);

@@ -275,7 +275,7 @@ function mount(app, { requireAuth, wrap, audit }) {
         [hasRfa ? "Includes requests for admission: unanswered requests are deemed admitted (TRCP 198.2(c))." : "", dueR.moved.length ? `Moved to the next court day: ${dueR.moved.join("; ")} (TRCP 4).` : ""].filter(Boolean).join(" ") || null, "TRCP 196.2, 197.2, 198.2; TRCP 4", req.user.id])).rows[0];
     await q("UPDATE discovery_sets SET event_id=$2 WHERE id=$1", [s.id, ev.id]);
     await audit(req, "discovery_set_created", { case: c.id, set: s.id, items: parsed.items.length });
-    if (b.draft !== false && parsed.items.length && (process.env.ANTHROPIC_API_KEY || "").trim()) draftSet(req.user, s, c).catch(() => {});   // starts drafting in the background
+    if (b.draft !== false && !req.user.demo_until && parsed.items.length && (process.env.ANTHROPIC_API_KEY || "").trim()) draftSet(req.user, s, c).catch(() => {});   // starts drafting in the background
     res.json({ set: pub(s, await itemsOf(s.id)) });
   }));
 

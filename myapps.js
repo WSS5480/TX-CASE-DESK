@@ -72,7 +72,7 @@ async function listFirms(appUrl) {
       (SELECT count(*)::int FROM mailboxes m JOIN users u ON u.id=m.user_id WHERE u.firm_id=f.id) AS mailboxes,
       (SELECT provider FROM firm_mail fm WHERE fm.firm_id=f.id) AS firm_mail
       , (f.ms_client_id IS NOT NULL) AS ms_keys
-    FROM firms f ORDER BY f.created_at DESC`);
+    FROM firms f WHERE f.demo_until IS NULL ORDER BY f.created_at DESC`);   // demo copies aren't customers
   return rows.map(f => ({
     key: tenantKey(f.id), slug: String(f.id), name: f.name, created: f.created_at, users: f.users, cases: f.cases,
     email: f.admin_email, admin: f.admin_name, last_login: f.last_login, disabled: f.disabled,

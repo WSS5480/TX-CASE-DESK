@@ -88,6 +88,7 @@ David's question 4 (where it runs) is already answered by the app: it's a web ap
 
 - Node/Express + Postgres on Render, workspace "TX CASE DESK". Live at https://tx-case-desk.onrender.com. See `README.md` for environment variables.
 - Repo: `WSS5480/TX-CASE-DESK`, branch `main`.
+- Demo firm: `demo.js` (seed, guard, cleanup). Demo firms are `firms.demo_until IS NOT NULL`; any new route that sends, connects, publishes or calls an outside service must be added to `demo.js` BLOCK and checked in the route.
 - Server: `server.js` (routes), `db.js` (schema, all `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE … IF NOT EXISTS`, so migrations run on boot), `practice.js`, `mail.js`, `mailbox.js`, `inbound.js`, `discovery.js`, `analysis.js`, `lawdb.js`, `courtlistener.js`, `deadlines.js`, `activity.js`, `convos.js`, `access.js`, `dictate.js`, `crypto-box.js`, `myapps.js`, `terms.js`.
 - Front end: `public/index.html`, `public/app.js`, `public/practice.js`, `public/mail.js`, service worker `public/sw.js`.
 - GitHub Actions: `hourly.yml` (the free hourly court-date ping), `load-texas.yml` (case-law load).
@@ -106,6 +107,7 @@ David's question 4 (where it runs) is already answered by the app: it's a web ap
 |---|---|
 | Nov 13, 2026 | HANDOFF.md started. David's Nov 6 / Nov 12 notes added under `docs/david-notes/`. No app code changed. |
 | Nov 13, 2026 | Steve answered questions A–G (section 1). No app code changed. |
+| Nov 13, 2026 | **Demo firm** ("Try the demo" on the sign-in page, `demo.js`): each visitor gets their own copy of "Little Joe Demo Attorney at Law" (sample PI cases, clients, court notices, calendar, conversations, time), signed straight in, deleted after 24 hours. Nothing leaves the app: mail send/connect, discovery serve, AI calls, case-law/CourtListener, court portals, client portal links, calendar feeds, imports, staff logins and passwords are blocked (path-normalized guard in `requireAuth` plus checks inside the routes); public token pages never serve demo firms; documents 1 MB / 10 per demo. Demo firms skip My Apps, are hidden from the My Apps firm list and developer view, and are cleaned up hourly. AI stays off in the demo until the assistant ships with Steve's key and caps (assistant plan, Phase 2). |
 
 Earlier (newest first):
 
@@ -126,4 +128,5 @@ The Decision Log in the app is the record. Nov 13: Steve's answers A–G (sectio
 - [ ] Render upgrade: app server to Starter, database to Basic-256mb. Free database expires **Nov 30, 2026**.
 - [x] Fill in sections 3 and 4 (Nov 13).
 - [ ] Offered, not yet accepted: export the Activity log (PDF/Excel); Client box on the Add case form (now covered by David's notes); read hearing dates from PDF orders; detect discovery requests in incoming email.
+- [ ] Demo: turn on the assistant with Steve's key and per-visitor / monthly caps when the assistant ships (plan: https://claude.ai/artifact/Vr8G8HVskMUGGaiMBHCtSp). Open decision 3 there: plain link vs quick email sign-up for the demo.
 - [ ] Anthropic API key (`ANTHROPIC_API_KEY`) not yet set in Render: AI drafting and dictation cleanup fall back until it is.

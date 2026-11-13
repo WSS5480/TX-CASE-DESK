@@ -197,7 +197,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     res.json({ url: `${APP()}/cal/${t}.ics`, webcal: `${APP().replace(/^https?:/, "webcal:")}/cal/${t}.ics` });
   }));
   app.get("/cal/:token.ics", wrap(async (req, res) => {
-    const u = (await q("SELECT id, firm_id, name FROM users WHERE cal_token=$1 AND active", [String(req.params.token)])).rows[0];
+    const u = (await q("SELECT u.id, u.firm_id, u.name FROM users u JOIN firms f ON f.id=u.firm_id WHERE u.cal_token=$1 AND u.active AND f.demo_until IS NULL", [String(req.params.token)])).rows[0];   // demo firms publish nothing
     if (!u) return res.status(404).send("Not found");
     const items = await calendarItems(u.firm_id, { from: addDays(today(), -30), to: addDays(today(), 400), userId: u.id });
     const icsEsc = s => String(s || "").replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
@@ -322,10 +322,12 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   // ===================== Documents =====================
   R.post("/cases/:id/documents", requireAuth, express.raw({ type: () => true, limit: "15mb" }), wrap(async (req, res) => {
     const c = await caseOf(req, req.params.id); if (!c) return res.status(404).json({ error: "Case not found" });
+    if (!(await require("./demo").uploadOk(req, res))) return;
     const name = clean(decodeURIComponent(req.get("X-File-Name") || "document"), 200).replace(/[\\/]/g, "_");
     if (!req.body || !req.body.length) return res.status(400).json({ error: "Empty file" });
     const { rows } = await q("INSERT INTO documents(firm_id, case_id, name, mime, size, data, uploaded_by) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id, name, size",
       [req.user.firm_id, c.id, name, clean(req.get("Content-Type"), 100) || "application/octet-stream", req.body.length, req.body, req.user.id]);
+    if (!(await require("./demo").uploadAfter(req, res, rows[0].id))) return;
     await audit(req, "document_uploaded", { case: c.id, name }); res.json({ document: rows[0] });
   }));
   const docOk = async (req, id) => { const pr = [+id, req.user.firm_id]; const cond = access.caseCond(req.user, "c", pr); return (await q(`SELECT d.* FROM documents d JOIN cases c ON c.id=d.case_id WHERE d.id=$1 AND d.firm_id=$2 AND ${cond}`, pr)).rows[0]; };
@@ -634,7 +636,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   }
   // Public pay page
   app.get("/pay/:token", wrap(async (req, res) => {
-    const row = (await q("SELECT id, firm_id FROM invoices WHERE pay_token=$1", [String(req.params.token)])).rows[0]; if (!row) return res.status(404).send("Invoice not found");
+    const row = (await q("SELECT i.id, i.firm_id FROM invoices i JOIN firms f ON f.id=i.firm_id WHERE i.pay_token=$1 AND f.demo_until IS NULL", [String(req.params.token)])).rows[0]; if (!row) return res.status(404).send("Invoice not found");
     let note = "";
     if (req.query.session_id) {
       const f = (await q("SELECT stripe_enc FROM firms WHERE id=$1", [row.firm_id])).rows[0];
@@ -650,7 +652,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     res.set({ "Content-Type": "text/html; charset=utf-8", "X-Robots-Tag": "noindex" }).send(invoiceHtml(inv, { pay: true, note }));
   }));
   app.get("/pay/:token/checkout", wrap(async (req, res) => {
-    const row = (await q("SELECT i.id, i.firm_id, f.stripe_enc FROM invoices i JOIN firms f ON f.id=i.firm_id WHERE i.pay_token=$1", [String(req.params.token)])).rows[0];
+    const row = (await q("SELECT i.id, i.firm_id, f.stripe_enc FROM invoices i JOIN firms f ON f.id=i.firm_id WHERE i.pay_token=$1 AND f.demo_until IS NULL", [String(req.params.token)])).rows[0];
     if (!row || !row.stripe_enc) return res.status(404).send("Online payment isn't available for this invoice.");
     const inv = await invoiceFull(row.firm_id, row.id);
     if (!(inv.balance > 0) || inv.status === "void") return res.redirect(`/pay/${req.params.token}`);
@@ -698,7 +700,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     res.json({ url: t ? `${APP()}/portal/${t}` : null });
   }));
   app.get("/portal/:token", wrap(async (req, res) => {
-    const ct = (await q("SELECT ct.*, f.name AS firm_name, f.address AS firm_address, f.phone AS firm_phone, f.firm_email, f.website AS firm_website, f.logo_token FROM contacts ct JOIN firms f ON f.id=ct.firm_id WHERE ct.portal_token=$1", [String(req.params.token)])).rows[0];
+    const ct = (await q("SELECT ct.*, f.name AS firm_name, f.address AS firm_address, f.phone AS firm_phone, f.firm_email, f.website AS firm_website, f.logo_token FROM contacts ct JOIN firms f ON f.id=ct.firm_id AND f.demo_until IS NULL WHERE ct.portal_token=$1", [String(req.params.token)])).rows[0];
     if (!ct) return res.status(404).send("This link is no longer active. Contact your attorney for a new one.");
     const cases = (await q("SELECT c.* FROM case_contacts cc JOIN cases c ON c.id=cc.case_id WHERE cc.contact_id=$1 AND cc.role='client' ORDER BY c.id DESC", [ct.id])).rows;
     const blocks = [];
@@ -717,7 +719,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
       `${brandHead({ name: ct.firm_name, address: ct.firm_address, phone: ct.firm_phone, email: ct.firm_email, website: ct.firm_website, logo_token: ct.logo_token })}<h1>Hello, ${esc(ct.name.split(" ")[0])}</h1><p class="mute">Your case updates from ${esc(ct.firm_name)}. Questions? Contact your attorney directly.</p>${blocks.join("") || `<div class="card">No active cases to show yet.</div>`}${inv}`));
   }));
   app.get("/portal/:token/doc/:id", wrap(async (req, res) => {
-    const d = (await q(`SELECT d.* FROM documents d JOIN case_contacts cc ON cc.case_id=d.case_id AND cc.role='client' JOIN contacts ct ON ct.id=cc.contact_id WHERE ct.portal_token=$1 AND d.id=$2 AND d.shared`, [String(req.params.token), +req.params.id])).rows[0];
+    const d = (await q(`SELECT d.* FROM documents d JOIN case_contacts cc ON cc.case_id=d.case_id AND cc.role='client' JOIN contacts ct ON ct.id=cc.contact_id JOIN firms f ON f.id=d.firm_id AND f.demo_until IS NULL WHERE ct.portal_token=$1 AND d.id=$2 AND d.shared`, [String(req.params.token), +req.params.id])).rows[0];
     if (!d) return res.status(404).send("Not found");
     res.set({ "Content-Type": d.mime || "application/octet-stream", "Content-Disposition": dispo("attachment", d.name) }).send(d.data);
   }));
