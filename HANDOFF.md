@@ -45,7 +45,19 @@ This is the one part that can hurt someone if it's done loosely. Recommended (no
 - David wants the SSN in two places (the contact and the Synopsis). Store it once, on the client contact, and have the Synopsis read it from there.
 - The free Render database is not where real SSNs should live. This ties to the pending Render upgrade.
 
-### Questions for Steve / David before building
+### Answers (Steve, Nov 13, 2026): build to these
+
+| Q | Answer |
+|---|---|
+| A. List order | **Last clicked, per person.** Each user sees the cases *they* opened most recently at the top. |
+| B. Status list | **Per practice area.** Personal-injury cases (case type "Civil – Personal Injury") use David's list **plus Settled and Closed** at the end: Intake, Property Damage, Treating, Demand Sent, Negotiating, Review for Suit, Suit Filed, Discovery, Mediation, Trial, Settled, Closed. Other case types keep the current 12 stages. Closed still moves a case to Closed cases. |
+| C. Running notes | **Conversations log** (dated, authored, searchable, in the Activity log; "Note to file" type). Rename the tab "Notes & conversations". Synopsis is the fixed snapshot. |
+| D. SSN | Encrypted at rest, masked `•••-••-1234`, every reveal/change audited, no dictation, never in search / activity / exports / AI / logs. Full number revealed by **attorneys and firm admins only**; paralegals see last 4. Stored once on the contact; Synopsis reads the client's. Conflict check by keyed hash. |
+| E. File number | **Auto-assigned, editable** (e.g. 2026-0042). |
+| F. Synopsis money / insurance | **Two figures** (total medicals, total damages). Insurance: company, claim #, adjuster name / phone / email, policy limits, for **both** the client's and the defendant's carriers. |
+| G. Contact types | **Opposing Counsel and Co-Counsel as separate types**; a contact can hold **several types**. Role on each case stays one pick. Types: Client, Opposing Party / Defendant, Opposing Counsel, Co-Counsel, Witness, Medical Provider, Litigation Support, Other. |
+
+### Questions for Steve / David before building (answered above)
 
 Don't guess on these. David's full list of 13 is in the notes file; these are the ones that block the build:
 
@@ -86,15 +98,17 @@ David's question 4 (where it runs) is already answered by the app: it's a web ap
 | Date | Change |
 |---|---|
 | Nov 13, 2026 | HANDOFF.md started. David's Nov 6 / Nov 12 notes added under `docs/david-notes/`. No app code changed. |
+| Nov 13, 2026 | Steve answered questions A–G (section 1). No app code changed. |
 
 _To fill in by the build session: earlier history._
 
 ## 5. Decisions
 
-The Decision Log in the app is the record. Nothing was decided in the Nov 13 handoff.
+The Decision Log in the app is the record. Nov 13: Steve's answers A–G (section 1) logged there.
 
 ## 6. Open items
 
-- [ ] Get answers to questions A–G above, then build David's notes (section 1).
+- [x] Get answers to questions A–G (Steve, Nov 13).
+- [ ] Build David's notes (section 1) to those answers.
 - [ ] Render upgrade: app server to Starter, database to Basic-256mb. Free database expires **Nov 30, 2026**.
 - [ ] Fill in the "to fill in" parts of sections 3 and 4.
