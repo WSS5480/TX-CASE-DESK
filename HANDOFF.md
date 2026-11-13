@@ -106,6 +106,7 @@ David's question 4 (where it runs) is already answered by the app: it's a web ap
 |---|---|
 | Nov 13, 2026 | HANDOFF.md started. David's Nov 6 / Nov 12 notes added under `docs/david-notes/`. No app code changed. |
 | Nov 13, 2026 | Steve answered questions A–G (section 1). No app code changed. |
+| Nov 13, 2026 | Attorney AI assistant planned (section 7) and logged in the Decision Log: assistant, firm Claude key in Firm Settings, Demo firm. No app code changed. |
 
 Earlier (newest first):
 
@@ -117,7 +118,7 @@ Earlier (newest first):
 
 ## 5. Decisions
 
-The Decision Log in the app is the record. Nov 13: Steve's answers A–G (section 1) logged there.
+The Decision Log in the app is the record. Nov 13: Steve's answers A–G (section 1) logged there, plus the assistant, firm Claude key and Demo firm decisions (section 7).
 
 ## 6. Open items
 
@@ -126,4 +127,16 @@ The Decision Log in the app is the record. Nov 13: Steve's answers A–G (sectio
 - [ ] Render upgrade: app server to Starter, database to Basic-256mb. Free database expires **Nov 30, 2026**.
 - [x] Fill in sections 3 and 4 (Nov 13).
 - [ ] Offered, not yet accepted: export the Activity log (PDF/Excel); Client box on the Add case form (now covered by David's notes); read hearing dates from PDF orders; detect discovery requests in incoming email.
-- [ ] Anthropic API key (`ANTHROPIC_API_KEY`) not yet set in Render: AI drafting and dictation cleanup fall back until it is.
+- [ ] `ANTHROPIC_API_KEY`: Steve says a key is set on the Render service (Nov 13; not visible from here). Per the Demo firm decision it becomes the Demo firm's key; remove the Render setting only after the in-app key is tested working.
+- [ ] Attorney assistant (section 7): open decisions listed in the plan, first one is who may approve (attorney only, or paralegals for some items).
+
+## 7. Next big build: attorney AI assistant (planned Nov 13, 2026)
+
+Full plan (Claude Doc): https://claude.ai/artifact/Vr8G8HVskMUGGaiMBHCtSp . Decision Log entries `2026-11-13-ai-assistant`, `2026-11-13-firm-claude-key`, `2026-11-13-demo-firm`.
+
+- Claude API from the Node server (`@anthropic-ai/sdk`, tool runner), not the Agent SDK. Tools are read tools plus propose tools that only write to an Approvals queue; approved items run through the app's normal code under the approver's permissions. Audit who proposed/approved what and when.
+- Every tool filters by firm and by `access.js` visibility. No SSNs to AI. No assistant in developer view. Court email text is passed as data, never instructions.
+- Firm Settings "AI (Claude)": admin enters/replaces the firm key, encrypted with `crypto-box.js`, masked, Test key, audited. One key per firm; usage logged per person with optional limits. Dictation and discovery move to the firm key. No key = no AI (no fallback to Steve's key).
+- Demo firm on Steve's key: sample data only, per-visitor and monthly caps, 24-hour reset per visitor, Sign up button.
+- Models: Haiku 5.5 for email reading, Sonnet 5.5 for chat/brief/proposals, Opus 5.5 for drafting (switchable).
+- Phases: 0 Render upgrade, 1 firm key + Approvals + audit, 2 chat + brief + Demo firm, 3 proposals, 4 drafting, 5 case-law research, 6 limits/subscription. New User Agreement version naming Anthropic before phase 2 ships.
