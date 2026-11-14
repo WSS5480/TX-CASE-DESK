@@ -39,7 +39,7 @@ function guard(req, res) {
   const rawPath = String(req.originalUrl || "").split("?")[0];
   if (/(^|\/)(\.|%2e){1,2}(\/|$)|%2f|%5c|\\/i.test(rawPath)) return res.status(400).json({ error: "Bad address.", code: "DEMO" });   // dot segments, encoded slashes
   const path = norm(req), m = req.method === "HEAD" ? "GET" : req.method, w = m !== "GET";
-  if (w) {
+  if (w && path !== "/api/assistant/speak") {   // reading an answer aloud changes nothing (it has its own daily cap)
     if (+(req.get("content-length") || 0) > 200 * 1024 && !/^\/api\/cases\/[^/]+\/documents$/.test(path)) return res.status(413).json({ error: "Demo firm: that's too large for the demo.", code: "DEMO" });
     const k = req.user.firm_id, now = Date.now(), e = writes.get(k) || { n: 0, at: now };
     if (now - e.at > 3600e3) { e.n = 0; e.at = now; }

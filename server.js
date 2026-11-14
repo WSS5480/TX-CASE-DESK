@@ -51,7 +51,7 @@ if (process.env.NODE_ENV === "production" && !(process.env.CRED_KEY || "").trim(
 const PROD = process.env.NODE_ENV === "production";
 const app = express();
 app.set("trust proxy", 1);
-app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", "data:"] } } }));
+app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", "data:"], mediaSrc: ["'self'", "blob:", "data:"] } } }));   // blob: = the assistant's natural-voice audio
 app.use("/api/ingest", express.json({ limit: "80mb" }));
 app.use("/api/inbound", express.json({ limit: "30mb" })); // Postmark inbound email webhook // bulk case-law loader (gzip JSON batches)
 app.use("/api/mailx/send", express.json({ limit: "12mb" }));   // an email body can be larger than other requests

@@ -63,6 +63,18 @@ const PROPOSE_TOOL = { name: "propose_date_change", description: "Propose moving
 const BILLING_TOOL = { name: "get_billing", description: "Time and billing on one case: billing type, hours logged, unbilled amount, invoices and balances.",
   input_schema: { type: "object", properties: { case_id: { type: "integer" } }, required: ["case_id"] } };
 const toolsFor = user => [...TOOLS, PROPOSE_TOOL, ...(billingOk(user) ? [BILLING_TOOL] : [])];
+// ---------- natural voices: Kokoro (the same voices as Pentex University) served by DeepInfra on TX Case Desk's key ----------
+const KOKORO = [
+  ["af_heart", "Heart", "female, warm", "en"], ["af_bella", "Bella", "female, bright", "en"], ["af_nicole", "Nicole", "female, soft", "en"], ["af_sarah", "Sarah", "female", "en"],
+  ["am_michael", "Michael", "male", "en"], ["am_fenrir", "Fenrir", "male, deeper", "en"], ["am_puck", "Puck", "male, upbeat", "en"], ["am_adam", "Adam", "male", "en"],
+  ["bf_emma", "Emma", "female, British", "en"], ["bm_george", "George", "male, British", "en"],
+  ["ef_dora", "Dora", "female, Spanish", "es"], ["em_alex", "Alex", "male, Spanish", "es"], ["em_santa", "Santa", "male, Spanish, older", "es"],
+];
+const KOKORO_IDS = new Set(KOKORO.map(v => v[0]));
+const voiceKey = () => (process.env.DEEPINFRA_API_KEY || "").trim();
+const VOICE_URL = () => (process.env.DEEPINFRA_TTS_URL || "https://api.deepinfra.com/v1/inference/hexgrad/Kokoro-82M").trim();
+const VOICE_DAY = () => { const n = +process.env.VOICE_DAY_CHARS; return Number.isFinite(n) && n > 0 ? n : 200000; };        // per firm per day (about 20 cents)
+const VOICE_DEMO_DAY = () => { const n = +process.env.VOICE_DEMO_DAY_CHARS; return Number.isFinite(n) && n > 0 ? n : 20000; };
 const MAX_PROPOSALS = 10;
 // The person's own next message deciding the latest card (Steve, Nov 13 2026): the whole message must be a plain yes or no.
 // Matched here, never by the AI, so text inside court emails or notes can't confirm anything.
@@ -334,6 +346,8 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     if (typeof b.voice_name === "string") set.assistant_voice_name = b.voice_name.replace(/[\u0000-\u001f]/g, "").slice(0, 120);   // "" = automatic
     if (b.answer_length === "short" || b.answer_length === "normal" || b.answer_length === "full") set.assistant_length = b.answer_length;
     if (typeof b.voice_rate === "number" && b.voice_rate >= 0.7 && b.voice_rate <= 1.5) set.assistant_voice_rate = Math.round(b.voice_rate * 100) / 100;
+    if (b.voice_engine === "device" || b.voice_engine === "natural") set.assistant_voice_engine = b.voice_engine;
+    if (typeof b.natural_voice === "string" && KOKORO_IDS.has(b.natural_voice)) set.assistant_natural_voice = b.natural_voice;
     const r = await q("UPDATE users SET prefs=COALESCE(prefs,'{}'::jsonb) || $2::jsonb WHERE id=$1 RETURNING prefs", [req.user.id, JSON.stringify(set)]);
     res.json({ prefs: r.rows[0].prefs });
   }));
@@ -370,6 +384,32 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const n = (await q("DELETE FROM assistant_threads WHERE firm_id=$1", [req.user.firm_id])).rowCount;
     await q("DELETE FROM assistant_briefs WHERE user_id IN (SELECT id FROM users WHERE firm_id=$1)", [req.user.firm_id]);
     await audit(req, "assistant_firm_history_deleted", { threads: n }); res.json({ ok: true, deleted: n });
+  }));
+
+  // natural voices: the list, and one piece of an answer read aloud (Steve, Nov 13 2026)
+  const speakLimiter = rateLimit({ windowMs: 15 * 60e3, max: 600, standardHeaders: true, legacyHeaders: false, keyGenerator: req => "v" + req.user.id, message: { error: "Too much read aloud in a few minutes. Wait a little." } });
+  R.get("/voices", wrap(async (req, res) => res.json({ natural: !!voiceKey(), voices: KOKORO.map(([id, name, note, lang]) => ({ id, name, note, lang })) })));
+  R.post("/speak", speakLimiter, wrap(async (req, res) => {
+    if (!voiceKey()) return res.status(503).json({ error: "Natural voices aren't switched on yet.", code: "NO_VOICE_KEY" });
+    const b = req.body || {}, voice = KOKORO_IDS.has(b.voice) ? b.voice : "af_heart";
+    const text = ai.scrub(String(b.text || "").replace(/[\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim()).slice(0, 600);   // SSN-shaped numbers never leave
+    if (!text) return res.status(400).json({ error: "Nothing to read." });
+    const cap = req.user.demo_until ? VOICE_DEMO_DAY() : VOICE_DAY(), day = today();   // same day for the charge and any refund
+    const used = (await q(`INSERT INTO voice_usage(firm_id, day, chars) VALUES($1, $2, $3) ON CONFLICT (firm_id, day) DO UPDATE SET chars = voice_usage.chars + EXCLUDED.chars
+      WHERE voice_usage.chars + EXCLUDED.chars <= $4 RETURNING chars`, [req.user.firm_id, day, text.length, cap])).rows[0];
+    if (!used) return res.status(429).json({ error: "Today's natural-voice allowance is used up; the device voice is used until tomorrow.", code: "VOICE_CAP" });
+    const refund = () => q("UPDATE voice_usage SET chars = GREATEST(chars - $3, 0) WHERE firm_id=$1 AND day=$2", [req.user.firm_id, day, text.length]).catch(() => {});
+    let r;
+    try { r = await fetch(VOICE_URL(), { method: "POST", headers: { Authorization: "Bearer " + voiceKey(), "Content-Type": "application/json" },
+      body: JSON.stringify({ text, preset_voice: [voice], output_format: "mp3" }), signal: AbortSignal.timeout(20000) }); }
+    catch (e) { await refund(); return res.status(502).json({ error: "The voice service didn't answer.", code: "VOICE_DOWN" }); }
+    const ct = String(r.headers.get("content-type") || "");
+    if (!r.ok) { console.warn("[voice] service said", r.status); await refund(); return res.status(502).json({ error: r.status === 401 || r.status === 403 ? "The voice service key isn't valid." : r.status === 402 ? "The voice service is out of credit." : "The voice service didn't answer.", code: "VOICE_DOWN" }); }
+    let audio;
+    if (/^audio\//.test(ct)) audio = Buffer.from(await r.arrayBuffer());
+    else { const j = await r.json().catch(() => ({})); const a = String(j.audio || ""); const m = a.match(/^data:audio\/[\w.+-]+;base64,(.+)$/); audio = a ? Buffer.from(m ? m[1] : a, "base64") : null; }
+    if (!audio || audio.length < 100) { await refund(); return res.status(502).json({ error: "The voice service sent no audio.", code: "VOICE_DOWN" }); }
+    res.set({ "Content-Type": "audio/mpeg", "Cache-Control": "no-store" }).send(audio);
   }));
 
   R.post("/chat", limiter, wrap(async (req, res) => {

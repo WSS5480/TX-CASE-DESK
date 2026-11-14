@@ -47,7 +47,7 @@ function authView(mode = "login", msg = "") {
    ${signup ? `<p class="mute" style="text-align:center">Every new firm starts with a free 14-day trial.</p>` : ""}
    <p class="mute" style="text-align:center"><a class="link" id="sw">${signup ? "Have an account? Sign in" : "New firm? Create an account"}</a></p>
    ${signup ? "" : `<p class="mute" style="text-align:center;margin:8px 0 0"><a class="link" id="forgot" href="#" role="button">Forgot password?</a></p>`}
-   ${signup ? "" : `<div class="demobox"><h3>Try the demo</h3><p class="mute">Your own copy of a sample personal-injury firm, Little Joe Demo Attorney at Law: cases, clients, court notices, calendar, conversations and billing. Nothing you do is sent anywhere, and your copy is deleted after 24 hours. No sign-up needed.</p>
+   ${signup ? "" : `<div class="demobox"><h3>Try the demo</h3><p class="mute">Your own copy of a sample personal-injury firm, Little Joe Demo Attorney at Law: cases, clients, court notices, calendar, conversations and billing. No email, message or filing you make is sent anywhere, and your copy is deleted after 24 hours. No sign-up needed.</p>
      <label class="ck" style="align-items:flex-start"><input type="checkbox" id="demoAgree" style="margin-top:3px"><span>I agree to the <a class="link" href="/terms" target="_blank" rel="noopener">User Agreement</a></span></label>
      <div class="err" id="demoErr"></div><button type="button" class="btn ghost" id="demoGo" style="width:100%">Try the demo</button></div>`}
    <p class="mute authf"><a class="link" href="/terms" target="_blank" rel="noopener">User Agreement</a><span aria-hidden="true">·</span><a class="link" id="devGo" href="#" role="button">Developer</a></p></div>`;

@@ -82,10 +82,46 @@
       .reduce((o, s) => { const l = o[o.length - 1]; if (l && (l + " " + s).length < 220) o[o.length - 1] = l + " " + s; else o.push(s); return o; }, []);
     window.assistChunks = chunks;   // pure; used by the tests
     let backup = 0;
-    const hush = () => { clearTimeout(backup); if (syn && (syn.speaking || syn.pending)) try { syn.cancel(); } catch (e) {} };
+    // natural voices (Kokoro via the server): one audio player, reused so phones allow it after the first tap
+    const SILENT = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+    V.naturalOk = false; V.kokoro = [];
+    V.engine = () => V.naturalOk && pref("assistant_voice_engine") === "natural" ? "natural" : "device";
+    V.canPlay = () => V.canSay || V.engine() === "natural";
+    const prime = () => { if (V.engine() !== "natural") return; if (!V.audio) V.audio = new Audio(); if (!V.primed) { try { V.audio.src = SILENT; const p = V.audio.play(); if (p && p.then) p.then(() => { V.primed = true; }, () => {}); else V.primed = true; } catch (e) {} } };   // counts only if the phone allowed it
+    const stopAudio = () => { if (V.freeNat) { V.freeNat(); V.freeNat = null; } if (V.abort) { try { V.abort.abort(); } catch (e) {} V.abort = null; } if (V.audio) { try { V.audio.onended = V.audio.onerror = null; V.audio.pause(); } catch (e) {} } };
+    // which Kokoro voice reads this piece: theirs, or a Spanish voice when the answer is in Spanish
+    const ES = /(?:^|[^a-záéíóúñ])(el|la|los|las|que|del|por|para|usted|caso|fecha|audiencia|tiene|está|cliente|también|pero|como|sus)(?=$|[^a-záéíóúñ])/gi, EN = /\b(the|and|is|are|you|your|case|date|hearing|this|that|with|for|of)\b/gi;
+    V.naturalVoice = t => { const v = pref("assistant_natural_voice") || "af_heart"; const es = (String(t).match(ES) || []).length, en = (String(t).match(EN) || []).length;
+      const spanish = es >= 3 && es > en;
+      if (spanish) return /^e/.test(v) ? v : /^.m_/.test(v) ? "em_alex" : "ef_dora";
+      return /^e/.test(v) ? (/^em_/.test(v) ? "am_michael" : "af_heart") : v; };   // a Spanish voice reads Spanish answers only
+    let warned = 0;
+    function playNatural(parts, my, done, fallback) {
+      const a = V.audio || (V.audio = new Audio()), ctl = V.abort = new AbortController();
+      const get = t => fetch("/api/assistant/speak", { method: "POST", credentials: "same-origin", signal: ctl.signal, headers: { "Content-Type": "application/json", "X-Requested-With": "tcd" }, body: JSON.stringify({ text: t, voice: V.naturalVoice(t) }) })
+        .then(async r => { if (!r.ok) { const j = await r.json().catch(() => ({})); throw Object.assign(new Error(j.error || "The voice service didn't answer."), { code: j.code }); } return URL.createObjectURL(await r.blob()); });
+      let i = 0, next = get(parts[0]), over = false;
+      const free = pr => pr && pr.then(u => URL.revokeObjectURL(u), () => {});   // audio fetched but never played
+      V.freeNat = () => { const n = next; next = null; free(n); };
+      // once only: a bad file can fire both the error event and a refused play(), which must not read the rest twice
+      const bail = e => { if (my !== gen || over) return; over = true; stopAudio(); free(next);
+        if (e && e.name !== "AbortError" && Date.now() - warned > 60000) { warned = Date.now(); toast((e.message || "The voice service didn't answer.") + " Using this device's voice."); } fallback(parts.slice(i)); };
+      const step = async () => {
+        let url; try { url = await next; } catch (e) { return bail(e); }
+        if (my !== gen || over) { URL.revokeObjectURL(url); return; }
+        if (i + 1 < parts.length) { next = get(parts[i + 1]); next.catch(() => {}); } else next = null;
+        a.onended = () => { URL.revokeObjectURL(url); if (my !== gen || over) { free(next); return; } i++; if (i < parts.length) step(); else done(); };
+        a.onerror = () => { URL.revokeObjectURL(url); bail(new Error("This device couldn't play the natural voice.")); };
+        a.src = url; try { a.playbackRate = V.rate(); } catch (e) {}
+        try { await a.play(); } catch (e) { if (my === gen) bail(new Error("Tap the speaker to hear it (this device blocked the sound).")); }
+      };
+      step();
+    }
+    const hush = () => { clearTimeout(backup); stopAudio(); if (syn && (syn.speaking || syn.pending)) try { syn.cancel(); } catch (e) {} };
     V.replaying = false;
     V.say = (text, links, thenListen, note) => {
-      if (!V.canSay) return thenListen && V.on ? V.end("This browser can't read answers out loud; the answer is on screen.") : undefined;
+      if (!V.canPlay()) return thenListen && V.on ? V.end("This browser can't read answers out loud; the answer is on screen.") : undefined;
+      prime();   // still inside the tap when it's a replay or the mic: lets phones play the natural voice later
       if (!thenListen && V.on) V.end();   // a replay ends the hands-free conversation (and gives back a half-typed question)
       const my = ++gen; stopRec(); hush();
       const parts = chunks(V.plain(text, links)); if (!parts.length) return thenListen && V.on ? listen() : ui("idle");
@@ -93,13 +129,17 @@
       const done = () => { if (my !== gen) return; gen++; clearTimeout(backup); V.q = [];
         if (V.replaying) { V.replaying = false; draw(); }
         if (thenListen && V.on && S.open) { const g = gen; setTimeout(() => g === gen && V.on && listen(), 250); } else if (!V.on) ui("idle", thenListen ? undefined : note); };
-      V.q = [];   // kept referenced: Chrome can drop an unreferenced piece and never say it finished
-      parts.forEach((p, i) => { const u = new SpeechSynthesisUtterance(p); const v = pick(); if (v) u.voice = v; u.lang = v ? v.lang : "en-US"; u.rate = V.rate();
-        if (i === parts.length - 1) u.onend = u.onerror = done;
-        V.q.push(u); syn.speak(u); });
-      // backup in case the browser never reports the end (about 90 ms a character, plus slack)
-      const check = () => { if (my !== gen) return; if (syn.speaking || syn.pending) backup = setTimeout(check, 5000); else done(); };   // still reading: check again in 5 s
-      backup = setTimeout(check, parts.join(" ").length * 90 + 3000);
+      const device = ps => {
+        if (!V.canSay || !ps.length) return done();
+        V.q = [];   // kept referenced: Chrome can drop an unreferenced piece and never say it finished
+        ps.forEach((p, i) => { const u = new SpeechSynthesisUtterance(p); const v = pick(); if (v) u.voice = v; u.lang = v ? v.lang : "en-US"; u.rate = V.rate();
+          if (i === ps.length - 1) u.onend = u.onerror = done;
+          V.q.push(u); syn.speak(u); });
+        // backup in case the browser never reports the end (about 90 ms a character, plus slack)
+        const check = () => { if (my !== gen) return; if (syn.speaking || syn.pending) backup = setTimeout(check, 5000); else done(); };   // still reading: check again in 5 s
+        backup = setTimeout(check, ps.join(" ").length * 90 + 3000);
+      };
+      if (V.engine() === "natural") playNatural(parts, my, done, device); else device(parts);
     };
     V.hushReplay = () => { gen++; hush(); V.replaying = false; draw(); };
     function stopRec() { clearTimeout(V.quiet); if (rec) { const r = rec; rec = null; r.onresult = r.onend = r.onerror = null; try { r.abort(); } catch (e) {} } }
@@ -107,7 +147,7 @@
     function listen(keepUnlock) {
       if (!V.on || !panel) return;
       if (S.busy) return V.end("Wait for the answer to finish, then tap the mic.");
-      stopRec(); if (keepUnlock) clearTimeout(backup); else hush(); if (V.replaying) { V.replaying = false; draw(); }   // don't cancel the silent unlock word on the first tap
+      stopRec(); if (keepUnlock) { clearTimeout(backup); stopAudio(); } else hush(); if (V.replaying) { V.replaying = false; draw(); }   // don't cancel the silent unlock word on the first tap
       const inp = el("#asIn"), my = ++gen; if (inp.value.trim()) draft = inp.value; inp.value = "";
       const r = rec = new SR(); r.lang = "en-US"; r.interimResults = true; r.continuous = false; r.maxAlternatives = 1;
       let fin = "", err = null;
@@ -132,6 +172,7 @@
       if (V.state === "think") return V.end();                                          // waiting on an answer: stop the conversation
       // phones only allow reading aloud after a tap: a silent word now lets the answer be read later
       let first = false;
+      prime();
       if (V.canSay && !V.unlocked) { try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; syn.speak(u); } catch (e) {} V.unlocked = first = true; }
       V.on = true; listen(first && V.state !== "speak" && !V.replaying);                                                             // start, or cut in while it's talking
     };
@@ -153,18 +194,27 @@
     V.menu = keep => {
       const m = el("#asVm"); if (!m) return;
       if (!keep) { m.hidden = !m.hidden; if (m.hidden) { V.paint(); return; } } else if (m.hidden) return;
+      const nat = V.engine() === "natural";
       const on = V.enabled(), list = V.list(), want = pref("assistant_voice_name"), have = V.chosen(), r = V.rate();
       vkey = list.map(v => v.name).join("|"); const fid = m.contains(document.activeElement) && document.activeElement.id;
       const rateNow = RATES.reduce((a, b) => Math.abs(b[0] - r) < Math.abs(a[0] - r) ? b : a)[0];
       m.innerHTML = `<label class="asvrow"><input type="checkbox" id="asVOn" ${on ? "checked" : ""}> <span><b>Talk and hear answers</b><br><span class="ashint">${V.ok ? "Mic to ask out loud; answers are read to you." : "Answers can be read to you."}</span></span></label>
-        ${V.canSay ? `<label class="asvf"><span>Voice</span><select id="asVSel" ${on ? "" : "disabled"}><option value="">Automatic (best on this device)</option>
+        ${V.canPlay() || V.naturalOk ? `<label class="asvf"><span>Voice engine</span><select id="asVEng" ${on ? "" : "disabled"}>
+            <option value="device" ${nat ? "" : "selected"} ${V.canSay ? "" : "disabled"}>This device's voices (free)</option>
+            <option value="natural" ${nat ? "selected" : ""} ${V.naturalOk ? "" : "disabled"}>Natural voices: Kokoro${V.naturalOk ? "" : " (not switched on yet)"}</option></select>
+          ${nat ? `<small class="ashint">Same voices as Pentex University. The answer text (social security numbers removed) goes to DeepInfra, our voice service, to be spoken.</small>` : ""}</label>` : ""}
+        ${nat ? `<label class="asvf"><span>Voice</span><select id="asVNat" ${on ? "" : "disabled"}>${[["en", "English"], ["es", "Spanish (used for answers in Spanish)"]].map(([lg, lab]) =>
+            `<optgroup label="${lab}">${V.kokoro.filter(v => v.lang === lg).map(v => `<option value="${esc(v.id)}" ${(pref("assistant_natural_voice") || "af_heart") === v.id ? "selected" : ""}>${esc(v.name)} · ${esc(v.note)}</option>`).join("")}</optgroup>`).join("")}</select></label>`
+        : V.canSay ? `<label class="asvf"><span>Voice</span><select id="asVSel" ${on ? "" : "disabled"}><option value="">Automatic (best on this device)</option>
           ${list.map(v => `<option value="${esc(v.name)}" ${have && have.name === v.name ? "selected" : ""}>${esc(v.name.replace(/^(Microsoft|Google)\s+/, ""))} · ${esc(v.lang)}</option>`).join("")}</select></label>
         ${want && !have ? `<div class="ashint asvmiss">Your chosen voice (${esc(want)}) isn't on this device, so the best one here is used.</div>` : ""}
-        ${!list.length ? `<div class="ashint">This device hasn't listed its voices yet. The best one is used automatically.</div>` : ""}
-        <label class="asvf"><span>Speed</span><select id="asVRate" ${on ? "" : "disabled"}>${RATES.map(([v, n]) => `<option value="${v}" ${v === rateNow ? "selected" : ""}>${n}</option>`).join("")}</select></label>` : ""}
+        ${!list.length ? `<div class="ashint">This device hasn't listed its voices yet. The best one is used automatically.</div>` : ""}` : ""}
+        ${V.canPlay() ? `<label class="asvf"><span>Speed</span><select id="asVRate" ${on ? "" : "disabled"}>${RATES.map(([v, n]) => `<option value="${v}" ${v === rateNow ? "selected" : ""}>${n}</option>`).join("")}</select></label>` : ""}
         <label class="asvf"><span>Answers</span><select id="asVLen">${[["short", "Short summary"], ["normal", "Normal"], ["full", "Full detail"]].map(([v, n]) => `<option value="${v}" ${V.length() === v ? "selected" : ""}>${n}</option>`).join("")}</select>
           <small class="ashint">How long the assistant's answers are, typed or spoken. Spoken answers stay short unless you pick Full detail.</small></label>
-        <div class="row" style="gap:8px;margin-top:4px">${V.canSay ? `<button type="button" class="btn sm ghost" id="asVTry" ${on ? "" : "disabled"}>Hear a sample</button>` : ""}<button type="button" class="btn sm" id="asVDone">Done</button></div>`;
+        <div class="row" style="gap:8px;margin-top:4px">${V.canPlay() ? `<button type="button" class="btn sm ghost" id="asVTry" ${on ? "" : "disabled"}>Hear a sample</button>` : ""}<button type="button" class="btn sm" id="asVDone">Done</button></div>`;
+      const eng = m.querySelector("#asVEng"); if (eng) eng.onchange = () => { save({ voice_engine: eng.value }, { assistant_voice_engine: eng.value }); V.menu(true); if (eng.value === "natural") V.sample(); };
+      const nv = m.querySelector("#asVNat"); if (nv) nv.onchange = () => { save({ natural_voice: nv.value }, { assistant_natural_voice: nv.value }); V.sample(nv.value); };
       m.querySelector("#asVOn").onchange = e => V.set(e.target.checked);
       const sel = m.querySelector("#asVSel"); if (sel) sel.onchange = () => { voice = null; save({ voice_name: sel.value }, { assistant_voice_name: sel.value }); V.sample(); m.querySelectorAll(".asvmiss").forEach(x => x.remove()); };
       const rt = m.querySelector("#asVRate"); if (rt) rt.onchange = () => { save({ voice_rate: +rt.value }, { assistant_voice_rate: +rt.value }); V.sample(); };
@@ -174,7 +224,10 @@
       if (fid) { const f = m.querySelector("#" + fid); if (f) f.focus(); }   // keep the keyboard / screen reader where it was
       V.paint();
     };
-    V.sample = () => { if (!V.canSay || !V.enabled()) return; V.replayIdx = -1; V.end(); V.say("This is how the Case Desk Assistant will sound when it reads your answers.", [], false); };
+    V.sample = id => { if (!V.canPlay() || !V.enabled()) return; V.replayIdx = -1; V.end();
+      V.say(/^e/.test(id || "") ? "Así sonará el Asistente de Case Desk cuando lea sus respuestas en español." : "This is how the Case Desk Assistant will sound when it reads your answers.", [], false); };
+    // which engines this server offers (natural voices need the voice-service key in Render)
+    V.loadVoices = () => api("/api/assistant/voices").then(r => { V.naturalOk = !!r.natural; V.kokoro = r.voices || []; V.menu(true); }).catch(() => {});
     V.ui = ui;
     return V;
   })();
@@ -244,6 +297,7 @@
         ${VOICE.ok ? `<button type="button" class="asmic" id="asMic" aria-label="Talk to the assistant" title="Talk: it answers out loud">${MIC}</button>` : ""}
         <button class="btn" id="asGo">Send</button></form>`;
     document.body.appendChild(panel);
+    VOICE.loadVoices();
     panel.querySelector("#asX").onclick = () => setOpen(false);
     const mic = panel.querySelector("#asMic"); if (mic) mic.onclick = () => VOICE.tap();
     const vt = panel.querySelector("#asVoice"); if (vt) vt.onclick = () => VOICE.menu();
@@ -267,8 +321,8 @@
     panel.querySelector("#asHist").textContent = S.view === "hist" ? "Back" : "History";
     if (S.view === "hist") return drawHist(body);
     body.innerHTML = (S.msgs.length ? "" : `<div class="ashint">${assistCtx.case_id ? `Ask about this case: what's due, the last conversation, who opposing counsel is, new court emails.`
-      : `Ask about your cases: "what's due this week?", "which cases have no next court date?", "any new court emails?". I can only read your data; I can't change or send anything.`}${VOICE.ok && VOICE.enabled() ? ` Or tap the mic and just talk: it answers out loud.` : ""}</div>`)
-      + S.msgs.map((m, i) => m.role === "user" ? `<div class="asm asu">${esc(m.text)}</div>` : m.role === "error" ? `<div class="asm ase">${m.html}</div>` : `<div class="asm asa">${VOICE.canSay && VOICE.enabled() ? (VOICE.replaying && VOICE.replayIdx === i ? `<button type="button" class="assay on" data-asay="${i}" aria-label="Stop reading" title="Stop reading">${STOP}</button>` : `<button type="button" class="assay" data-asay="${i}" aria-label="Read this answer out loud" title="Read out loud">${SPK}</button>`) : ""}${render(m.text, m.links)}${propHtml(m.proposals)}</div>`).join("")
+      : `Ask about your cases: "what's due this week?", "which cases have no next court date?", "any new court emails?". I read your data, and I can move a date or a to-do once you confirm. I can't send anything.`}${VOICE.ok && VOICE.enabled() ? ` Or tap the mic and just talk: it answers out loud.` : ""}</div>`)
+      + S.msgs.map((m, i) => m.role === "user" ? `<div class="asm asu">${esc(m.text)}</div>` : m.role === "error" ? `<div class="asm ase">${m.html}</div>` : `<div class="asm asa">${VOICE.canPlay() && VOICE.enabled() ? (VOICE.replaying && VOICE.replayIdx === i ? `<button type="button" class="assay on" data-asay="${i}" aria-label="Stop reading" title="Stop reading">${STOP}</button>` : `<button type="button" class="assay" data-asay="${i}" aria-label="Read this answer out loud" title="Read out loud">${SPK}</button>`) : ""}${render(m.text, m.links)}${propHtml(m.proposals)}</div>`).join("")
       + (S.busy ? `<div class="asm asa busy ashint">Looking that up…</div>` : "");
     wireLinks(body); wireProps(body);
     body.querySelectorAll("[data-asay]").forEach(b => b.onclick = () => { if (VOICE.replaying && +b.dataset.asay === VOICE.replayIdx) return VOICE.hushReplay();

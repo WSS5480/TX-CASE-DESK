@@ -604,6 +604,13 @@ CREATE TABLE IF NOT EXISTS assistant_proposals (
 CREATE INDEX IF NOT EXISTS assistant_proposals_case ON assistant_proposals(case_id, decided_at DESC) WHERE status='applied';
 CREATE INDEX IF NOT EXISTS assistant_proposals_user ON assistant_proposals(user_id, status);
 ALTER TABLE assistant_messages ADD COLUMN IF NOT EXISTS proposals JSONB;
+-- natural voices (Kokoro via DeepInfra): characters read aloud per firm per day, for the daily cap
+CREATE TABLE IF NOT EXISTS voice_usage (
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  day DATE NOT NULL,
+  chars INT NOT NULL DEFAULT 0,
+  PRIMARY KEY (firm_id, day)
+);
 CREATE TABLE IF NOT EXISTS assistant_briefs (
   user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   day DATE NOT NULL,
