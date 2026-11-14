@@ -283,9 +283,13 @@
         fin = f; inp.value = (f + t).replace(/\s+/g, " ").trim();
         // some phones (iOS) keep listening after you go quiet: 1.5 seconds with no new words sends it
         clearTimeout(V.quiet); if (inp.value) V.quiet = setTimeout(() => { if (rec === r) try { r.stop(); } catch (x) {} }, 1500); };
-      r.onerror = e => { err = e.error; };
+      r.onerror = e => { err = e.error; mlog("error", e.error); };
+      // diagnostics: what the mic did (no words), sent once this listen is over
+      const t0 = Date.now(); V.mic = [{ t: "listen", ms: 0, x: (V.released ? "rel" + (t0 - V.released) : "norel") + (keepUnlock ? "+unlock" : "") + (syn && syn.speaking ? "+tts" : "") + (V.audio && !V.audio.paused ? "+audio" : "") }];
+      const mlog = (t, x) => { if (rec === r && V.mic && V.mic.length < 40) V.mic.push({ t, ms: Date.now() - t0, x }); };
+      r.onstart = () => mlog("start"); r.onaudiostart = () => mlog("audio"); r.onsoundstart = () => mlog("sound"); r.onspeechstart = () => mlog("speech");
       let started = 0, again = false;
-      r.onend = () => { if (rec !== r || my !== gen) return; clearTimeout(V.quiet);
+      r.onend = () => { mlog("end", (fin || inp.value) ? "text" : "empty"); sendDiag(); if (rec !== r || my !== gen) return; clearTimeout(V.quiet);
         const text = (fin || inp.value).replace(/\s+/g, " ").trim();
         // ended at once with nothing heard (the phone was still switching from playing sound): try once more
         if (!text && !again && (!err || err === "aborted" || err === "no-speech" || err === "audio-capture") && !r.byTap && Date.now() - started < 1200 && V.released && started - V.released < 3000) { again = true; err = null; setTimeout(() => { if (rec === r && my === gen) begin(); }, 400); return; }
@@ -296,9 +300,12 @@
         if (!text) return V.end(tr("heardNothing"));
         draft = ""; inp.value = text; ui("think"); send(true); };
       let tries = 0;
+      const sendDiag = () => { const ev = V.mic; if (!ev || ev.length < 2) return; V.mic = null;
+        fetch("/api/assistant/diag", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Requested-With": "tcd" },
+          body: JSON.stringify({ ua: (navigator.userAgent.match(/(iPhone|iPad|Android|Windows|Macintosh)[^;)]*/) || [""])[0] + " " + (navigator.userAgent.match(/(CriOS|Chrome|Version|Firefox|EdgA?)\/[\d]+/) || [""])[0] + (navigator.maxTouchPoints > 1 ? " touch" : ""), engine: V.engine(), events: ev }) }).catch(() => {}); };
       const begin = () => { if (rec !== r || my !== gen) return; if (r.byTap) { stopRec(); return V.end(); }   // tapped to stop while it was still waiting to start
-        started = Date.now();
-        try { r.start(); ui("listen"); } catch (e) { if (++tries < 2) return setTimeout(begin, 350); rec = null; V.end(tr("micFail")); } };
+        started = Date.now(); if (!V.mic) V.mic = [{ t: "retry", ms: started - t0 }];
+        try { r.start(); mlog("called"); ui("listen"); } catch (e) { mlog("throw", e && e.name); if (++tries < 2) return setTimeout(begin, 350); sendDiag(); rec = null; V.end(tr("micFail")); } };
       // just stopped playing a natural voice: give the phone a moment to hand the sound over to the mic
       if (V.released && Date.now() - V.released < 600) { ui("listen"); setTimeout(begin, 300); } else begin();
     }

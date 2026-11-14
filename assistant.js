@@ -436,6 +436,14 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   // natural voices: the list, and one piece of an answer read aloud (Steve, Nov 13 2026)
   const speakLimiter = rateLimit({ windowMs: 15 * 60e3, max: 600, standardHeaders: true, legacyHeaders: false, keyGenerator: req => "v" + req.user.id, message: { error: "Too much read aloud in a few minutes. Wait a little." } });
   R.get("/voices", wrap(async (req, res) => res.json({ natural: !!voiceKey(), voices: KOKORO.map(([id, name, note, lang]) => ({ id, name, note, lang })) })));
+  // mic diagnostics (Steve's phone stopped hearing him after a voice test): what the microphone did, never words or audio
+  const diagLimiter = rateLimit({ windowMs: 15 * 60e3, max: 120, standardHeaders: false, legacyHeaders: false, keyGenerator: req => "d" + req.user.id, message: { ok: false } });
+  R.post("/diag", diagLimiter, wrap(async (req, res) => {
+    const b = req.body || {}, ev = (Array.isArray(b.events) ? b.events.slice(0, 40) : []).filter(e => e && typeof e === "object");
+    const clean = v => String(v == null ? "" : v).replace(/[^\w .:+=/-]/g, "").slice(0, 60);
+    console.log(`[mic] user ${req.user.id} ${clean(b.ua)} ${clean(b.engine)} :: ` + ev.map(e => `${clean(e.t)}@${+e.ms || 0}${e.x ? "(" + clean(e.x) + ")" : ""}`).join(" "));
+    res.json({ ok: true });
+  }));
   R.post("/speak", speakLimiter, wrap(async (req, res) => {
     if (!voiceKey()) return res.status(503).json({ error: "Natural voices aren't switched on yet.", code: "NO_VOICE_KEY" });
     const b = req.body || {}, voice = KOKORO_IDS.has(b.voice) ? b.voice : "af_heart";
