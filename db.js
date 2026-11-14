@@ -619,6 +619,7 @@ CREATE TABLE IF NOT EXISTS assistant_briefs (
   created_at TIMESTAMPTZ DEFAULT now(),
   PRIMARY KEY (user_id, day)
 );
+ALTER TABLE assistant_briefs ADD COLUMN IF NOT EXISTS lang TEXT;   -- the assistant language it was written in (null = English)
 `;
 
 async function migrate() { await pool.query(SCHEMA); }

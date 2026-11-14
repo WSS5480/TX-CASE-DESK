@@ -620,11 +620,19 @@ body.ason .wrap{padding-right:400px}
 .asp .asvs:not([data-state=listen]) .ddot{visibility:hidden}
 .asp .asvt{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;color:var(--mute)}.asp .asvt.on{color:var(--acc);border-color:var(--acc)}
 .asp .ash .asfull{display:none}
-@media (max-width:420px){.asp .asvt .vw{display:none}.asp .asvt{padding-left:8px;padding-right:8px}}.asp .asvt:not(.on) svg{opacity:.45}
+.asp .asvt .vw{display:none}.asp .asvt{padding-left:8px;padding-right:8px}   /* the panel is 400px wide everywhere: "Voice" shows as the speaker icon so the title, language and buttons fit */.asp .asvt:not(.on) svg{opacity:.45}
 .asp .asvm{padding:12px 16px;border-bottom:1px solid var(--line);background:#fbfaf7;display:flex;flex-direction:column;gap:10px;font-size:14px}
 .asp .asvm[hidden]{display:none}.asp .asvm .btn{min-height:44px}
 .asp .asvrow{display:flex;gap:10px;align-items:flex-start;cursor:pointer}.asp .asvrow input{width:22px;height:22px;margin:1px 0 0;flex:none}
 .asp .asvf{display:flex;flex-direction:column;gap:4px}.asp .asvf>span{font-weight:600;font-size:13px;color:var(--ink2)}.asp .asvf select{width:100%;min-height:44px;max-width:100%}
+.asp .aslb{min-height:44px;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;padding-left:8px;padding-right:8px;font-weight:600;letter-spacing:.02em}   /* the assistant's language (globe + EN/ES) */
+.asp .aslf{border:0;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}.asp .aslf legend{font-weight:600;font-size:13px;color:var(--ink2);padding:0;margin-bottom:4px}
+.asp .asl1{min-height:44px;align-items:center;padding:4px 0}.asp .asl1 input{margin:0}
+.asp .ash{gap:4px;padding-left:12px}.asp .ash .btn.sm{padding-left:8px;padding-right:8px}.asp .ash h2{min-width:5.5em}
+.asp .ash .btn.sm,.asp .asth .btn,.asp #asDelAll,.asp #asGo,.asp .asvm .btn,#brGo{min-height:44px}.asp .ash #asX{flex:none}   /* 44px touch targets in the assistant */
+.asp .asvm{max-height:min(60vh,calc(100% - 180px));overflow-y:auto;flex:none}   /* a long menu scrolls inside itself, so Done and the text box stay reachable on small phones */
+.asp #asH:focus{outline:none}.asp #asH:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+@media (max-width:479px){ .asp .ash{flex-wrap:wrap;row-gap:6px} .asp .ash h2{order:-2;flex:1 1 calc(100% - 56px)} .asp .ash #asX{order:-1} }   /* phones up to 479px: title and close on the first row, language, voice, New and History on the second, so nothing scrolls sideways */
 .asp .asprops{display:flex;flex-direction:column;gap:8px;margin-top:10px;clear:both}
 .asp .asprop{border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:10px;background:#fff;padding:10px 12px;display:flex;flex-direction:column;gap:4px}
 .asp .asprop[data-st=applied]{border-left-color:var(--ok,#2e7d4f)}.asp .asprop[data-st=cancelled],.asp .asprop[data-st=expired]{border-left-color:var(--line);opacity:.8}
@@ -644,6 +652,7 @@ body.ason .wrap{padding-right:400px}
   .asb{width:40px;padding:0;justify-content:center;border-radius:20px}.asb .asl{display:none}
   .asp{top:0;left:0;width:auto;z-index:55;border-left:0;box-shadow:none;padding-top:env(safe-area-inset-top,0px)}
   body.devv .asp{top:var(--devh,44px)}   /* the demo / developer banner stays visible above the sheet */
+  .asp .asvm{max-height:max(150px,calc(100% - 290px))}   /* phones: room stays for the header, the screen line and the text box under an open menu */
   body.ason .wrap{padding-right:0}
   body.ason{overflow:hidden}
 }
