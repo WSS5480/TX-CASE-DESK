@@ -811,6 +811,7 @@ const DICT = {
       if (restarts.length > 4) { stop(); return toast("Dictation stopped. Tap the mic to try again."); }
       base = said.slice(); fin = [];   // the browser starts a new list of results after a restart
       setTimeout(() => { if (on && rec) { try { rec.start(); } catch (e) { stop(); } } }, 250); };
+    try { if (navigator.audioSession && navigator.audioSession.type !== "auto") navigator.audioSession.type = "auto"; } catch (e) {}   // the assistant may have left the iPhone in "playback" (no mic)
     try { rec.start(); on = true; btn.classList.add("rec"); btn.setAttribute("aria-pressed", "true"); btn.title = "Stop dictating"; show("listen", ""); } catch (e) { stop(true); close(); }
   }
   function stop(quiet) {

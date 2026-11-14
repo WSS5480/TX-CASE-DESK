@@ -441,7 +441,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   R.post("/diag", diagLimiter, wrap(async (req, res) => {
     const b = req.body || {}, ev = (Array.isArray(b.events) ? b.events.slice(0, 40) : []).filter(e => e && typeof e === "object");
     const clean = v => String(v == null ? "" : v).replace(/[^\w .:+=/-]/g, "").slice(0, 60);
-    console.log(`[mic] user ${req.user.id} ${clean(b.ua)} ${clean(b.engine)} :: ` + ev.map(e => `${clean(e.t)}@${+e.ms || 0}${e.x ? "(" + clean(e.x) + ")" : ""}`).join(" "));
+    console.log(`${b.kind === "say" ? "[say]" : "[mic]"} user ${req.user.id} ${clean(b.ua)} ${clean(b.engine)} :: ` + ev.map(e => `${clean(e.t)}@${+e.ms || 0}${e.x ? "(" + clean(e.x) + ")" : ""}`).join(" "));
     res.json({ ok: true });
   }));
   R.post("/speak", speakLimiter, wrap(async (req, res) => {

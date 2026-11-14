@@ -173,8 +173,12 @@
     // the voices this device has in the assistant's language (US first, then Mexico for Spanish), or every voice if it has none; names differ per device
     const LRX = { en: [/^en/i, /^en[-_]US/i, /^en[-_]US/i], es: [/^es/i, /^es[-_]US/i, /^es[-_]MX/i] };
     V.has = () => !!syn && (syn.getVoices() || []).some(v => LRX[lang()][0].test(v.lang));
-    V.list = () => { if (!syn) return []; const [any, us, mx] = LRX[lang()], all = syn.getVoices() || [], mine = all.filter(v => any.test(v.lang));
-      const rank = v => us.test(v.lang) ? 0 : mx.test(v.lang) ? 1 : 2;
+    // Apple's joke voices (Bubbles, Bells, Zarvox…) and old robot voices are never offered or picked (Steve, Nov 14: "distorted")
+    const JUNK = /^(Albert|Bad News|Bahh|Bells|Boing|Bubbles|Cellos|Deranged|Good News|Hysterical|Jester|Organ|Pipe Organ|Superstar|Trinoids|Whisper|Wobble|Zarvox|Fred|Junior|Kathy|Ralph|Grandma|Grandpa|Eddy|Flo|Reed|Rocko|Sandy|Shelley)\b/i;
+    const GOOD = /enhanced|premium|natural|neural|siri|Samantha|Ava|Zoe|Evan|Nathan|Tom|Allison|Susan|Noelle|Joelle|Google US English|Aria|Jenny|Guy|Paulina|Mónica|Monica|Jorge|Juan/i;
+    const usable = vs => { const ok = vs.filter(v => !JUNK.test(v.name)); return ok.length ? ok : vs; };
+    V.list = () => { if (!syn) return []; const [any, us, mx] = LRX[lang()], all = usable(syn.getVoices() || []), mine = all.filter(v => any.test(v.lang));
+      const rank = v => (us.test(v.lang) ? 0 : mx.test(v.lang) ? 2 : 4) + (GOOD.test(v.name) ? 0 : 1);
       return (mine.length ? mine : all).slice().sort((a, b) => (rank(a) - rank(b)) || a.name.localeCompare(b.name)); };
     const vkeyName = () => lang() === "es" ? "assistant_voice_name_es" : "assistant_voice_name";   // one chosen voice per language
     const pref = k => (me && me.prefs || {})[k];
@@ -186,10 +190,10 @@
       const c = V.chosen(); if (c) return c;
       if (voice || !syn) return voice;
       // in tiers: US voices first (best quality, a known good name, on-device, any), then Mexico (Spanish), then the rest of the language
-      const es = lang() === "es", all = syn.getVoices() || [], [any, us, mx] = LRX[lang()];
+      const es = lang() === "es", all = usable(syn.getVoices() || []), [any, us, mx] = LRX[lang()];
       const named = es ? /Paulina|Monica|Mónica|Google español|Sabina|Dalia|Elvira|Jorge|Juan/i : /Google US English|Samantha|Aria|Jenny/i;
       const tiers = [all.filter(v => us.test(v.lang)), es ? all.filter(v => mx.test(v.lang) && !us.test(v.lang)) : [], all.filter(v => any.test(v.lang) && !us.test(v.lang) && !mx.test(v.lang))];
-      for (const t of tiers) { const v = t.find(v => /natural|neural|premium|enhanced/i.test(v.name)) || t.find(v => named.test(v.name)) || t.find(v => v.localService) || t[0]; if (v) return voice = v; }
+      for (const t of tiers) { const v = t.find(v => /natural|neural|premium|enhanced|siri/i.test(v.name)) || t.find(v => named.test(v.name)) || t.find(v => GOOD.test(v.name)) || t.find(v => v.localService) || t[0]; if (v) return voice = v; }
       return voice = null;
     }
     let vkey = "";   // redraw the menu only when the voice list really changed, and never while someone is using it (an open phone picker would close)
@@ -234,12 +238,12 @@
     function playNatural(parts, my, done, fallback) {
       const ctx = V.useCtx() ? ctxNow() : null, a = ctx ? null : V.audio || (V.audio = new Audio()), ctl = V.abort = new AbortController();
       const get = t => fetch("/api/assistant/speak", { method: "POST", credentials: "same-origin", signal: ctl.signal, headers: { "Content-Type": "application/json", "X-Requested-With": "tcd" }, body: JSON.stringify({ text: t, voice: V.naturalVoice(t) }) })
-        .then(async r => { if (!r.ok) { const j = await r.json().catch(() => ({})); throw Object.assign(new Error(errText(j.error || "") || errText("The voice service didn't answer.")), { code: j.code }); } return ctx ? r.arrayBuffer() : URL.createObjectURL(await r.blob()); });
+        .then(async r => { slog("fetch", r.status); if (!r.ok) { const j = await r.json().catch(() => ({})); throw Object.assign(new Error(errText(j.error || "") || errText("The voice service didn't answer.")), { code: j.code }); } return ctx ? r.arrayBuffer() : URL.createObjectURL(await r.blob()); });
       let i = 0, next = get(parts[0]), over = false;
       const free = pr => pr && !ctx && pr.then(u => URL.revokeObjectURL(u), () => {});   // audio fetched but never played
       V.freeNat = () => { const n = next; next = null; free(n); };
       // once only: a bad file can fire both the error event and a refused play(), which must not read the rest twice
-      const bail = e => { if (my !== gen || over) return; over = true; stopAudio(); free(next);
+      const bail = e => { if (my !== gen || over) return; over = true; slog("bail", (e && (e.code || e.name)) || ""); stopAudio(); free(next);
         if (e && e.code) { V.natErr = e.message; V.menu(true); }   // the service said no (out of credit, bad key, down): show it in the menu
         if (e && e.name !== "AbortError" && Date.now() - warned > 60000) { warned = Date.now(); toast((e.message || errText("The voice service didn't answer.")) + tr("natUse")); } fallback(parts.slice(i)); };
       const stepCtx = async () => {   // iPhone / iPad: Web Audio
@@ -256,7 +260,7 @@
         src.connect(ctx.destination);
         src.onended = () => { if (V.src === src) { V.src = null; V.released = Date.now(); } if (my !== gen || over) return; i++; if (i < parts.length) stepCtx(); else done(); };
         if (V.natErr) { V.natErr = null; V.menu(true); }
-        try { src.start(0); } catch (e) { return bail(new Error(tr("natPlay"))); }
+        try { src.start(0); slog("ctxplay", ctx.state); } catch (e) { return bail(new Error(tr("natPlay"))); }
       };
       if (ctx) return stepCtx();
       const step = async () => {
@@ -266,27 +270,42 @@
         a.onended = () => { URL.revokeObjectURL(url); if (my !== gen || over) { free(next); return; } i++; if (i < parts.length) step(); else done(); };
         a.onerror = () => { URL.revokeObjectURL(url); bail(new Error(tr("natPlay"))); };
         a.src = url; try { a.playbackRate = V.rate(); } catch (e) {} if (V.natErr) { V.natErr = null; V.menu(true); }
-        try { await a.play(); } catch (e) { if (my === gen) bail(new Error(tr("natTap"))); }
+        try { await a.play(); slog("elplay"); } catch (e) { slog("elrej", e && e.name); if (my === gen) bail(new Error(tr("natTap"))); }
       };
       step();
     }
-    const hush = () => { clearTimeout(backup); stopAudio(); if (syn && (syn.speaking || syn.pending)) try { syn.cancel(); } catch (e) {} };
+    const hush = () => { clearTimeout(backup); stopAudio(); sess("auto"); if (syn && (syn.speaking || syn.pending)) try { syn.cancel(); } catch (e) {} };
     V.replaying = false;
+    // iPhone: say "this is playback" so the voice uses the speaker (not the earpiece after the mic) and plays even on silent;
+    // back to "auto" before listening so the mic works. Older iPhones without navigator.audioSession just skip this.
+    const sess = t => { try { if (navigator.audioSession && navigator.audioSession.type !== t) navigator.audioSession.type = t; } catch (e) {} };
+    // playback diagnostics (Steve's iPhone: no sound): what the voice did, never words; sent once per answer
+    const slog = (t, x) => { if (V.sl && V.sl.ev.length < 40) V.sl.ev.push({ t, ms: Date.now() - V.sl.t0, x }); };
+    const sendSay = () => { const l = V.sl; V.sl = null; if (!l || l.ev.length < 2) return; clearTimeout(l.tm);
+      fetch("/api/assistant/diag", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Requested-With": "tcd" },
+        body: JSON.stringify({ kind: "say", ua: (navigator.userAgent.match(/(iPhone|iPad|Android|Windows|Macintosh)[^;)]*/) || [""])[0] + " " + (navigator.userAgent.match(/(CriOS|Chrome|Version|Firefox|EdgA?)\/[\d]+/) || [""])[0] + (navigator.maxTouchPoints > 1 ? " touch" : ""), engine: V.engine(), events: l.ev }) }).catch(() => {}); };
+    V.slog = slog;
     V.say = (text, links, thenListen, note) => {
+      if (V.sl) sendSay();
+      V.sl = { t0: Date.now(), ev: [], tm: setTimeout(() => sendSay(), 20000) };
+      slog("say", (V.engine() === "natural" ? (V.useCtx() ? "ctx" : "el") : "dev") + (navigator.audioSession ? "+as:" + navigator.audioSession.type : "+noas") + (V.ctx ? "+ctx:" + V.ctx.state : "") + (syn ? "+voices" + (syn.getVoices() || []).length : "+nosyn"));
+      sess("playback");
       if (!V.canPlay()) return thenListen && V.on ? V.end(tr("noSay")) : undefined;
       prime();   // still inside the tap when it's a replay or the mic: lets phones play the natural voice later
       if (!thenListen && V.on) V.end();   // a replay ends the hands-free conversation (and gives back a half-typed question)
       const my = ++gen; stopRec(); hush();
       const parts = chunks(V.plain(text, links)); if (!parts.length) return thenListen && V.on ? listen() : ui("idle");
       V.replaying = !thenListen; ui(thenListen ? "speak" : "idle", thenListen ? undefined : note); if (!thenListen) draw();
-      const done = () => { if (my !== gen) return; gen++; clearTimeout(backup); V.q = [];
+      const done = () => { if (my !== gen) return; slog("done"); sendSay(); sess("auto"); gen++; clearTimeout(backup); V.q = [];
         if (V.replaying) { V.replaying = false; draw(); }
         if (thenListen && V.on && S.open) { const g = gen; setTimeout(() => g === gen && V.on && listen(), 250); } else if (!V.on) ui("idle", thenListen ? undefined : note); };
       const device = ps => {
         if (!V.canSay || !ps.length) return done();
         V.q = [];   // kept referenced: Chrome can drop an unreferenced piece and never say it finished
+        slog("dev", (pick() ? "v" : "nov") + ps.length);
         ps.forEach((p, i) => { const u = new SpeechSynthesisUtterance(p); const v = pick(); if (v) u.voice = v; u.lang = v ? v.lang : LANG[lang()].code; u.rate = V.rate();
-          if (i === ps.length - 1) u.onend = u.onerror = done;
+          if (i === 0) { u.onstart = () => slog("ttsstart"); }
+          if (i === ps.length - 1) { u.onend = done; u.onerror = e => { slog("ttserr", e && e.error); done(); }; }
           V.q.push(u); syn.speak(u); });
         // backup in case the browser never reports the end (about 90 ms a character, plus slack)
         const check = () => { if (my !== gen) return; if (syn.speaking || syn.pending) backup = setTimeout(check, 5000); else done(); };   // still reading: check again in 5 s
@@ -329,7 +348,7 @@
         fetch("/api/assistant/diag", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Requested-With": "tcd" },
           body: JSON.stringify({ ua: (navigator.userAgent.match(/(iPhone|iPad|Android|Windows|Macintosh)[^;)]*/) || [""])[0] + " " + (navigator.userAgent.match(/(CriOS|Chrome|Version|Firefox|EdgA?)\/[\d]+/) || [""])[0] + (navigator.maxTouchPoints > 1 ? " touch" : ""), engine: V.engine(), events: ev }) }).catch(() => {}); };
       const begin = () => { if (rec !== r || my !== gen) return; if (r.byTap) { stopRec(); return V.end(); }   // tapped to stop while it was still waiting to start
-        started = Date.now(); if (!V.mic) V.mic = [{ t: "retry", ms: started - t0 }];
+        sess("auto"); started = Date.now(); if (!V.mic) V.mic = [{ t: "retry", ms: started - t0 }];
         try { r.start(); mlog("called"); ui("listen"); } catch (e) { mlog("throw", e && e.name); if (++tries < 2) return setTimeout(begin, 350); sendDiag(); rec = null; V.end(tr("micFail")); } };
       // just stopped playing a natural voice: give the phone a moment to hand the sound over to the mic
       if (V.released && Date.now() - V.released < 600) { ui("listen"); setTimeout(begin, 300); } else begin();
@@ -383,7 +402,7 @@
             `<optgroup label="${esc(lab)}" lang="${lg}">${V.kokoro.filter(v => v.lang === lg).map(v => `<option value="${esc(v.id)}" ${(pref("assistant_natural_voice") || "af_heart") === v.id ? "selected" : ""}>${esc(v.name)} · ${esc(es ? (NOTE_ES[v.note] || v.note) : v.note)}</option>`).join("")}</optgroup>`).join("")}</select></label>`
         : V.canSay ? `<label class="asvf"><span>${esc(tr("voice"))}</span><select id="asVSel" ${on ? "" : "disabled"}><option value="">${esc(tr("auto"))}</option>
           ${list.map(v => `<option value="${esc(v.name)}" ${have && have.name === v.name ? "selected" : ""}>${esc(v.name.replace(/^(Microsoft|Google)\s+/, ""))} · ${esc(v.lang)}</option>`).join("")}</select></label>
-        ${want && !have ? `<div class="ashint asvmiss">${esc(tr("missing")(want))}</div>` : ""}
+        ${want && !have && !JUNK.test(want) ? `<div class="ashint asvmiss">${esc(tr("missing")(want))}</div>` : ""}
         ${!list.length ? `<div class="ashint">${esc(tr("noVoices"))}</div>` : list.length && !V.has() ? `<div class="ashint">${esc(tr("noLangVoice"))}</div>` : ""}` : ""}
         ${V.canPlay() ? `<label class="asvf"><span>${esc(tr("speed"))}</span><select id="asVRate" ${on ? "" : "disabled"}>${RATES.map((v, i) => `<option value="${v}" ${v === rateNow ? "selected" : ""}>${esc(tr("rates")[i])}</option>`).join("")}</select></label>` : ""}
         <label class="asvf"><span>${esc(tr("answers"))}</span><select id="asVLen">${["short", "normal", "full"].map((v, i) => `<option value="${v}" ${V.length() === v ? "selected" : ""}>${esc(tr("lens")[i])}</option>`).join("")}</select>
