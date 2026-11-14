@@ -136,6 +136,7 @@ The Decision Log in the app is the record. Nov 13: Steve's answers A–G (sectio
 
 ## 6. Open items
 
+- [ ] **Language picker for the assistant** (Steve, Nov 13): plan in section 7, waiting on Steve's OK and his answers to its open decisions; not built.
 - [x] Get answers to questions A–G (Steve, Nov 13).
 - [ ] Build David's notes (section 1) to those answers.
 - [x] Render upgrade done Nov 13, 2026: app server on Starter, database on Basic-256mb (no expiry). Stop reminding Steve about it.
@@ -147,3 +148,44 @@ The Decision Log in the app is the record. Nov 13: Steve's answers A–G (sectio
 - [x] **AI (Claude) setup page** in Firm Settings (assistant plan, Phase 1), built Nov 13 (see the change log; not yet shipped): firm key entry (encrypted, masked, Test key, plain errors, audited). It must show the estimated monthly cost per active attorney, exactly: daily brief (22 workdays) $1; questions, to-dos, case updates (about 10 a day) $5 to $8; reading court emails under $0.50; drafts (about 10 motions or letters) $5 to $10; **total $12 to $20**; "These are estimates before real usage; a light user runs about $5. Reusing the case file between questions (prompt caching) keeps repeat questions cheap." **Build every assistant call with prompt caching** (cache the system prompt, tools and case file with `cache_control`) so that last sentence is true (Steve, Nov 13).
 - [x] **Build with Phase 1 (decided Nov 13): demo AI on Steve's key.** Built Nov 13 (not yet shipped). `ANTHROPIC_API_KEY` in Render is used **only by demo firms** (`firms.demo_until IS NOT NULL`); real firms use only their own Firm Settings key and never fall back. Caps: **$50 a month for the whole demo, $2 per visitor (demo firm) per day**, plus a rate limit; track cost per call (tokens × model price) and, when a cap is hit, show a plain message with a Sign up button. The demo's Firm Settings → AI (Claude) page shows "Using the demo key" (masked, read-only). Then remove the AI blocks in `demo.js` BLOCK (dictation, discovery draft, assistant) for demo firms, keeping every *sending* block. Still open: plain link vs quick email sign-up for the demo (plan, open decision 3). Plan: https://claude.ai/artifact/Vr8G8HVskMUGGaiMBHCtSp
 - [x] `ANTHROPIC_API_KEY` set in Render Nov 13 (an `sk-ant-api03-` key; a wrong-type key pasted in chat was revoked). Was: After this build it is used **only by demo firms**; until it's set the demo's AI shows "The demo's AI isn't switched on yet." Real firms need their own key in Firm Settings.
+
+## 7. Plan: language picker for the Case Desk Assistant (proposed Nov 13, 2026; waiting on Steve's OK, not built)
+
+**What Steve asked (Nov 13, 2026, voice call):** "for my AI assistant, I want a language picker for the user to be very accessible." Asked whether the assistant's spoken voice should change language too: "Um, sure." Logged in the Decision Log as 2026-11-13-assistant-language.
+
+**Today:** the assistant is English only. `public/assistant.js` hard-codes `en-US` for listening (`r.lang`) and speaking (`u.lang`, the voice list shows English voices only, US first); `assistant.js` tells the AI nothing about language, formats spoken dates with `en-US`, and only English words count as a spoken or typed "confirm" (`SAY_YES`, `SAY_YES_VOICE`, `SAY_NO`). The panel's buttons and notes are English. The rest of the app is English (`<html lang="en">`).
+
+### How it works (one setting drives everything)
+- **One setting per person:** `prefs.assistant_language` (a language code such as `en-US`, `es-US`), saved through `PUT /api/assistant/prefs {language}` and accepted only from the app's own list (anything else is ignored). Remembered on every device, like the voice settings. Default: English.
+- **The picker:** a globe button in the assistant header next to the Voice button, on every screen and on phones (44px, `aria-label="Language: English"`, the label changes with the choice). Tapping it opens a plain list (a native `<select>` or a list of buttons, so screen readers and keyboards work without extra steps). Each language is written in its own name with English after it: "English", "Español (Spanish)", "Tiếng Việt (Vietnamese)", "中文 (Chinese)", "العربية (Arabic)". The same choice also sits at the top of the Voice/options menu. Changing it says so out loud for screen readers (an `aria-live` note: "Assistant language: Español").
+- **What the setting changes:**
+  1. **Answers:** the language goes in `<page_context>` ("Answer in Spanish (Español). Keep case styles, cause numbers, court names, statutes and quoted court text exactly as written."), so the cached system prompt and tools stay the same and cost doesn't change. The rules stay in English.
+  2. **Listening:** speech recognition uses that language (`r.lang`).
+  3. **Speaking:** the voice list shows voices for that language (best one picked automatically; the person can choose another); the voice choice is remembered per language (`prefs.assistant_voices`, e.g. `{ "es-US": "Paulina" }`). Spoken dates and amounts use that language's format. "Hear a sample" speaks a sample sentence in that language.
+  4. **The assistant panel itself:** its buttons, hints, status lines ("Listening…"), the date-move card and error messages come from a small translation table per language. The rest of the app stays English for now.
+  5. **The daily brief** on Today is written in the person's assistant language.
+  6. **Saying "confirm" to move a date:** each language gets its own short, strict list of confirm / cancel words (Spanish: "confirmar", "sí, confirmar" / "no", "cancelar"), checked by the server, never by the AI. A language without a checked list falls back to the Confirm button (and English "confirm" still works). Same safety as today: a bystander's "sí" can't move a date by voice.
+- **Accessibility:** each answer bubble carries `lang="es"` (and `dir="rtl"` for Arabic) so screen readers pronounce it in the right language; the picker works by keyboard; text and buttons keep the existing 44px targets and contrast.
+- **If the device can't do it:** when the phone or browser has no voice for the chosen language, answers still come in that language as text, with a plain note ("This device has no Español voice, so answers are shown but not read out"). The same applies to listening.
+- **Court documents stay English.** When drafting arrives (Phase 4), anything meant for a Texas court is drafted in English whatever the picker says; the assistant can explain it in the chosen language.
+- **Dictation cleanup** (`dictate.js`) is told the dictation language so it doesn't translate Spanish dictation into English.
+
+### Build steps
+1. Language list and translation table (`public/assistant-i18n.js`), English and Spanish first.
+2. Setting: `prefs.assistant_language` and `prefs.assistant_voices`, `PUT /api/assistant/prefs` accepts `language` (allow list) and `voice_name` per language.
+3. Globe button and picker in the assistant header (phone and desktop), plus the row in the options menu.
+4. Listening and speaking use the chosen language (`r.lang`, voice list, sample sentence, spoken dates and amounts).
+5. Answers and the daily brief in that language (`<page_context>` line, brief prompt), `lang` / `dir` on each bubble.
+6. Confirm / cancel words per language in `assistant.js` (server side), Spanish first.
+7. Dictation cleanup told the language.
+8. Tests: extend `/tmp/uitest/voice.js` and `move.js` (fake mic and speaker in Spanish; picker by keyboard; screen-reader labels; phone and desktop), then the independent review (section 3) before shipping. Update this file and the change log in the same commit.
+
+### Open decisions for Steve
+1. **Which languages at launch?** Suggested: English and Spanish fully (panel, voice, confirm words); add Vietnamese, Chinese, Arabic and others after, as the list grows.
+2. **Default:** English for everyone until they pick (suggested), or start in the device's language.
+3. **Firm default:** should a firm admin set a firm-wide default that each person can still change?
+4. **Assistant only, or the whole app later?** Suggested: assistant now; the whole app is a much bigger job.
+
+### Decision Log
+- 2026-11-13-assistant-language (by Steve): add a language picker to the Case Desk Assistant, easy to reach and screen-reader friendly; the chosen language also changes listening and the spoken voice.
+- The design above (one setting, globe button, English court documents, per-language confirm words) is proposed, not decided, until Steve approves it.
