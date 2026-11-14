@@ -362,7 +362,11 @@
     const RATES = [0.85, 1.03, 1.15, 1.3];
     V.menu = keep => {
       const m = el("#asVm"); if (!m) return;
-      if (!keep) { m.hidden = !m.hidden; if (m.hidden) { V.paint(); return; } } else if (m.hidden) return;
+      if (!keep) { m.hidden = !m.hidden; if (m.hidden) { V.paint(); return; }
+        // iPhone (Safari / Chrome) often hands over its voice list a moment late: keep checking for a few seconds
+        if (V.canSay && !V.list().length) { let n = 0; const t = setInterval(() => { const has = V.list().length;
+          if (has || ++n > 12 || m.hidden) { clearInterval(t); if (has && !m.hidden && !m.contains(document.activeElement)) V.menu(true); } }, 500); }
+      } else if (m.hidden) return;
       const nat = V.engine() === "natural", es = lang() === "es";
       const on = V.enabled(), list = V.list(), want = pref(vkeyName()), have = V.chosen(), r = V.rate();
       vkey = list.map(v => v.name).join("|"); const fid = m.contains(document.activeElement) && document.activeElement.id;

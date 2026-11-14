@@ -620,7 +620,7 @@ body.ason .wrap{padding-right:400px}
 .asp .asvs:not([data-state=listen]) .ddot{visibility:hidden}
 .asp .asvt{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;color:var(--mute)}.asp .asvt.on{color:var(--acc);border-color:var(--acc)}
 .asp .ash .asfull{display:none}
-.asp .asvt .vw{display:none}.asp .asvt{padding-left:8px;padding-right:8px}   /* the panel is 400px wide everywhere: "Voice" shows as the speaker icon so the title, language and buttons fit */.asp .asvt:not(.on) svg{opacity:.45}
+@media (min-width:1000px){.asp .asvt .vw{display:none}}.asp .asvt{padding-left:8px;padding-right:8px}   /* side panel (400px): "Voice" shows as the speaker icon so one row fits; phones have a second row, so the word shows there (Steve couldn't find the voice menu, Nov 14) */.asp .asvt:not(.on) svg{opacity:.45}
 .asp .asvm{padding:12px 16px;border-bottom:1px solid var(--line);background:#fbfaf7;display:flex;flex-direction:column;gap:10px;font-size:14px}
 .asp .asvm[hidden]{display:none}.asp .asvm .btn{min-height:44px}
 .asp .asvrow{display:flex;gap:10px;align-items:flex-start;cursor:pointer}.asp .asvrow input{width:22px;height:22px;margin:1px 0 0;flex:none}
