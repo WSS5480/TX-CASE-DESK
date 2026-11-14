@@ -193,7 +193,7 @@
         ${p.status === "pending" && p.type === "hearing" ? `<div class="aspw">This moves it in TX Case Desk only. It doesn't change the court's setting: file a motion or notice to reset it.</div>` : ""}
         ${p.status === "pending" && p.type === "deadline" ? `<div class="aspw">Check the new date against the rules and any court order. It will show as not confirmed until you confirm it on the calendar.</div>` : ""}
         ${p.status === "pending" && [0, 6].includes(new Date(p.new_date + "T12:00:00").getDay()) ? `<div class="aspw">The new date is a ${new Date(p.new_date + "T12:00:00").getDay() ? "Saturday" : "Sunday"}.</div>` : ""}
-        ${p.status === "pending" ? `<div class="row asprow"><button type="button" class="btn sm" data-pconf="${+p.id}">Confirm</button><button type="button" class="btn sm ghost" data-pcan="${+p.id}">Cancel</button></div>`
+        ${p.status === "pending" ? `<div class="row asprow"><button type="button" class="btn sm" data-pconf="${+p.id}">Confirm</button><button type="button" class="btn sm ghost" data-pcan="${+p.id}">Cancel</button><span class="ashint">or say "confirm"</span></div>`
           : `<div class="asps">${p.status === "applied" ? "✓ Moved." : p.status === "cancelled" ? "Cancelled. Nothing changed." : "Expired. Nothing changed; ask again if you still want it."}</div>`}
       </div>`).join("")}${pend.length > 1 ? `<div class="row asprow"><button type="button" class="btn sm" data-pall="${pend.map(p => +p.id).join(",")}">Confirm all ${pend.length}</button></div>` : ""}</div>`;
   }
@@ -315,11 +315,11 @@
       if (S.msgs !== conv) { S.busy = false; draw(); return; }   // they started another conversation while waiting; this answer stays saved in its own
       S.thread = r.thread_id; if (S.threadCase == null) S.threadCase = assistCtx.case_id || null;
       S.msgs.push({ role: "assistant", text: r.reply, links: r.links, proposals: r.proposals || [] }); if (voice) said = r;
+      if (r.updated && r.updated.length) { r.updated.forEach(setProp); if (r.updated.some(u => u.status === "applied")) setTimeout(refreshScreen, 0); }   // they said "confirm" / "no"
     } catch (e) { if (S.msgs !== conv) { S.busy = false; draw(); return; } S.msgs.push({ role: "error", html: errHtml(e) }); if (!inp.value) inp.value = text; if (voice) VOICE.end("The assistant didn't answer. Tap the mic to try again."); }
     S.busy = false; draw();
-    // a change waiting for Confirm: read the answer, then stop listening so the tap decides (never a spoken "yes")
-    if (said && VOICE.on && (said.proposals || []).some(p => p.status === "pending")) { VOICE.end(); VOICE.replayIdx = S.msgs.length - 1; VOICE.say(said.reply, said.links, false, "Tap Confirm to make the change."); }
-    else if (said && VOICE.on) VOICE.say(said.reply, said.links, true);
+    // a change waiting: read the answer and keep listening; saying "confirm" (or "no") decides it (Steve, Nov 13)
+    if (said && VOICE.on) VOICE.say(said.reply, said.links, true);
   }
   function setOpen(on, quiet) {
     if (!panel) build();
