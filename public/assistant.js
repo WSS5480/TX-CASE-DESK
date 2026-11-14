@@ -212,8 +212,16 @@
     V.naturalOk = false; V.kokoro = [];
     V.engine = () => V.naturalOk && pref("assistant_voice_engine") === "natural" ? "natural" : "device";
     V.canPlay = () => V.canSay || V.engine() === "natural";
-    const prime = () => { if (V.engine() !== "natural") return; if (!V.audio) V.audio = new Audio(); if (!V.primed) { try { V.audio.src = SILENT; const p = V.audio.play(); if (p && p.then) p.then(() => { V.primed = true; }, () => {}); else V.primed = true; } catch (e) {} } };   // counts only if the phone allowed it
-    const stopAudio = () => { if (V.freeNat) { V.freeNat(); V.freeNat = null; } if (V.abort) { try { V.abort.abort(); } catch (e) {} V.abort = null; } if (V.audio) { try { V.audio.onended = V.audio.onerror = null; V.audio.pause();
+    // iPhone / iPad: after an <audio> player plays, Safari's speech recognition can stop getting sound (a known WebKit bug).
+    // There, natural voices play through the Web Audio API instead, which keeps the mic working.
+    const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+    V.useCtx = () => (IOS || window.__forceCtx === true) && !!(window.AudioContext || window.webkitAudioContext);
+    const ctxNow = () => { if (!V.ctx) { const C = window.AudioContext || window.webkitAudioContext; V.ctx = new C(); } return V.ctx; };
+    const prime = () => { if (V.engine() !== "natural") return;
+      if (V.useCtx()) { try { const c = ctxNow(), r = c.resume && c.resume(); if (r && r.catch) r.catch(() => {}); const b = c.createBuffer(1, 1, 22050), s = c.createBufferSource(); s.buffer = b; s.connect(c.destination); s.start(0); } catch (e) {} return; }   /* unlocked by the tap */
+      if (!V.audio) V.audio = new Audio(); if (!V.primed) { try { V.audio.src = SILENT; const p = V.audio.play(); if (p && p.then) p.then(() => { V.primed = true; }, () => {}); else V.primed = true; } catch (e) {} } };   // counts only if the phone allowed it
+    const stopAudio = () => { if (V.src) { const s = V.src; V.src = null; try { s.onended = null; s.stop(); } catch (e) {} V.released = Date.now(); }
+      if (V.freeNat) { V.freeNat(); V.freeNat = null; } if (V.abort) { try { V.abort.abort(); } catch (e) {} V.abort = null; } if (V.audio) { try { V.audio.onended = V.audio.onerror = null; V.audio.pause();
       // fully let go of the sound (not just pause): a phone keeps its audio busy otherwise and the mic then hears nothing
       if (V.audio.getAttribute("src") && V.audio.getAttribute("src") !== SILENT) { V.audio.removeAttribute("src"); V.audio.load(); V.released = Date.now(); } } catch (e) {} } };
     // which Kokoro voice reads this piece: theirs, or a Spanish voice when the answer is in Spanish
@@ -224,16 +232,33 @@
       return /^e/.test(v) ? (/^em_/.test(v) ? "am_michael" : "af_heart") : v; };   // a Spanish voice reads Spanish answers only
     let warned = 0;
     function playNatural(parts, my, done, fallback) {
-      const a = V.audio || (V.audio = new Audio()), ctl = V.abort = new AbortController();
+      const ctx = V.useCtx() ? ctxNow() : null, a = ctx ? null : V.audio || (V.audio = new Audio()), ctl = V.abort = new AbortController();
       const get = t => fetch("/api/assistant/speak", { method: "POST", credentials: "same-origin", signal: ctl.signal, headers: { "Content-Type": "application/json", "X-Requested-With": "tcd" }, body: JSON.stringify({ text: t, voice: V.naturalVoice(t) }) })
-        .then(async r => { if (!r.ok) { const j = await r.json().catch(() => ({})); throw Object.assign(new Error(errText(j.error || "") || errText("The voice service didn't answer.")), { code: j.code }); } return URL.createObjectURL(await r.blob()); });
+        .then(async r => { if (!r.ok) { const j = await r.json().catch(() => ({})); throw Object.assign(new Error(errText(j.error || "") || errText("The voice service didn't answer.")), { code: j.code }); } return ctx ? r.arrayBuffer() : URL.createObjectURL(await r.blob()); });
       let i = 0, next = get(parts[0]), over = false;
-      const free = pr => pr && pr.then(u => URL.revokeObjectURL(u), () => {});   // audio fetched but never played
+      const free = pr => pr && !ctx && pr.then(u => URL.revokeObjectURL(u), () => {});   // audio fetched but never played
       V.freeNat = () => { const n = next; next = null; free(n); };
       // once only: a bad file can fire both the error event and a refused play(), which must not read the rest twice
       const bail = e => { if (my !== gen || over) return; over = true; stopAudio(); free(next);
         if (e && e.code) { V.natErr = e.message; V.menu(true); }   // the service said no (out of credit, bad key, down): show it in the menu
         if (e && e.name !== "AbortError" && Date.now() - warned > 60000) { warned = Date.now(); toast((e.message || errText("The voice service didn't answer.")) + tr("natUse")); } fallback(parts.slice(i)); };
+      const stepCtx = async () => {   // iPhone / iPad: Web Audio
+        let buf; try { buf = await next; } catch (e) { return bail(e); }
+        if (my !== gen || over) return;
+        if (i + 1 < parts.length) { next = get(parts[i + 1]); next.catch(() => {}); } else next = null;
+        let ab; try { ab = await new Promise((ok, no) => { const p = ctx.decodeAudioData(buf, ok, no); if (p && p.then) p.then(ok, no); }); } catch (e) { return bail(new Error(tr("natPlay"))); }
+        if (my !== gen || over) return;
+        // Safari can also be "interrupted" (after the mic, a call or Siri), and resume() can hang: wait at most 1.5 s
+        if (ctx.state !== "running") { try { await Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 1500))]); } catch (e) {} }
+        if (my !== gen || over) return;
+        if (ctx.state !== "running") return bail(new Error(tr("natTap")));
+        const src = V.src = ctx.createBufferSource(); src.buffer = ab; try { src.playbackRate.value = V.rate(); } catch (e) {}
+        src.connect(ctx.destination);
+        src.onended = () => { if (V.src === src) { V.src = null; V.released = Date.now(); } if (my !== gen || over) return; i++; if (i < parts.length) stepCtx(); else done(); };
+        if (V.natErr) { V.natErr = null; V.menu(true); }
+        try { src.start(0); } catch (e) { return bail(new Error(tr("natPlay"))); }
+      };
+      if (ctx) return stepCtx();
       const step = async () => {
         let url; try { url = await next; } catch (e) { return bail(e); }
         if (my !== gen || over) { URL.revokeObjectURL(url); return; }
