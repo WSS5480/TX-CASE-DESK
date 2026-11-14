@@ -31,7 +31,7 @@
       sampleText: "This is how the Case Desk Assistant will sound when it reads your answers.",
       engine: "Voice engine", engDevice: "This device's voices (free)", engNatural: "Natural voices: Kokoro", engOff: " (not switched on yet)",
       natHint: "Same voices as Pentex University. The answer text (social security numbers removed) goes to DeepInfra, our voice service, to be spoken.",
-      natEn: "English", natEs: "Spanish (used for answers in Spanish)", natUse: " Using this device's voice.", natPlay: "This device couldn't play the natural voice.", natTap: "Tap the speaker to hear it (this device blocked the sound).",
+      natEn: "English", natEs: "Spanish (used for answers in Spanish)", natUse: " Using this device's voice.", natDown: "Natural voices aren't working right now:", natDown2: "Answers are read with this device's voice until it's fixed.", natPlay: "This device couldn't play the natural voice.", natTap: "Tap the speaker to hear it (this device blocked the sound).",
       noSay: "This browser can't read answers out loud; the answer is on screen.", wait: "Wait for the answer to finish, then tap the mic.",
       micBlocked: "Allow the microphone for this site in your browser settings, then tap the mic.", noMic: "No microphone found. Plug one in or check your settings, then tap the mic.",
       noNet: "Speech recognition needs an internet connection. Tap the mic to try again.", heardNothing: "Didn't hear anything. Tap the mic to talk.",
@@ -69,7 +69,7 @@
       sampleText: "Así sonará el asistente de Case Desk cuando lea sus respuestas.",
       engine: "Motor de voz", engDevice: "Voces de este dispositivo (gratis)", engNatural: "Voces naturales: Kokoro", engOff: " (todavía no activadas)",
       natHint: "Las mismas voces que Pentex University. El texto de la respuesta (sin números de seguro social) va a DeepInfra, nuestro servicio de voz, para leerlo.",
-      natEn: "Inglés", natEs: "Español (para las respuestas en español)", natUse: " Se usa la voz de este dispositivo.", natPlay: "Este dispositivo no pudo reproducir la voz natural.", natTap: "Toque el altavoz para oírla (este dispositivo bloqueó el sonido).",
+      natEn: "Inglés", natEs: "Español (para las respuestas en español)", natUse: " Se usa la voz de este dispositivo.", natDown: "Las voces naturales no funcionan en este momento:", natDown2: "Las respuestas se leen con la voz de este dispositivo hasta que se arregle.", natPlay: "Este dispositivo no pudo reproducir la voz natural.", natTap: "Toque el altavoz para oírla (este dispositivo bloqueó el sonido).",
       noSay: "Este navegador no puede leer las respuestas en voz alta; la respuesta está en pantalla.", wait: "Espere a que termine la respuesta y luego toque el micrófono.",
       micBlocked: "Permita el micrófono para este sitio en la configuración del navegador y luego toque el micrófono.", noMic: "No se encontró un micrófono. Conecte uno o revise la configuración y luego toque el micrófono.",
       noNet: "El reconocimiento de voz necesita conexión a internet. Toque el micrófono para intentar de nuevo.", heardNothing: "No escuché nada. Toque el micrófono para hablar.",
@@ -213,7 +213,9 @@
     V.engine = () => V.naturalOk && pref("assistant_voice_engine") === "natural" ? "natural" : "device";
     V.canPlay = () => V.canSay || V.engine() === "natural";
     const prime = () => { if (V.engine() !== "natural") return; if (!V.audio) V.audio = new Audio(); if (!V.primed) { try { V.audio.src = SILENT; const p = V.audio.play(); if (p && p.then) p.then(() => { V.primed = true; }, () => {}); else V.primed = true; } catch (e) {} } };   // counts only if the phone allowed it
-    const stopAudio = () => { if (V.freeNat) { V.freeNat(); V.freeNat = null; } if (V.abort) { try { V.abort.abort(); } catch (e) {} V.abort = null; } if (V.audio) { try { V.audio.onended = V.audio.onerror = null; V.audio.pause(); } catch (e) {} } };
+    const stopAudio = () => { if (V.freeNat) { V.freeNat(); V.freeNat = null; } if (V.abort) { try { V.abort.abort(); } catch (e) {} V.abort = null; } if (V.audio) { try { V.audio.onended = V.audio.onerror = null; V.audio.pause();
+      // fully let go of the sound (not just pause): a phone keeps its audio busy otherwise and the mic then hears nothing
+      if (V.audio.getAttribute("src") && V.audio.getAttribute("src") !== SILENT) { V.audio.removeAttribute("src"); V.audio.load(); V.released = Date.now(); } } catch (e) {} } };
     // which Kokoro voice reads this piece: theirs, or a Spanish voice when the answer is in Spanish
     const ES = /(?:^|[^a-záéíóúñ])(el|la|los|las|que|del|por|para|usted|caso|fecha|audiencia|tiene|está|cliente|también|pero|como|sus)(?=$|[^a-záéíóúñ])/gi, EN = /\b(the|and|is|are|you|your|case|date|hearing|this|that|with|for|of)\b/gi;
     V.naturalVoice = t => { const v = pref("assistant_natural_voice") || "af_heart"; const es = (String(t).match(ES) || []).length, en = (String(t).match(EN) || []).length;
@@ -230,6 +232,7 @@
       V.freeNat = () => { const n = next; next = null; free(n); };
       // once only: a bad file can fire both the error event and a refused play(), which must not read the rest twice
       const bail = e => { if (my !== gen || over) return; over = true; stopAudio(); free(next);
+        if (e && e.code) { V.natErr = e.message; V.menu(true); }   // the service said no (out of credit, bad key, down): show it in the menu
         if (e && e.name !== "AbortError" && Date.now() - warned > 60000) { warned = Date.now(); toast((e.message || errText("The voice service didn't answer.")) + tr("natUse")); } fallback(parts.slice(i)); };
       const step = async () => {
         let url; try { url = await next; } catch (e) { return bail(e); }
@@ -237,7 +240,7 @@
         if (i + 1 < parts.length) { next = get(parts[i + 1]); next.catch(() => {}); } else next = null;
         a.onended = () => { URL.revokeObjectURL(url); if (my !== gen || over) { free(next); return; } i++; if (i < parts.length) step(); else done(); };
         a.onerror = () => { URL.revokeObjectURL(url); bail(new Error(tr("natPlay"))); };
-        a.src = url; try { a.playbackRate = V.rate(); } catch (e) {}
+        a.src = url; try { a.playbackRate = V.rate(); } catch (e) {} if (V.natErr) { V.natErr = null; V.menu(true); }
         try { await a.play(); } catch (e) { if (my === gen) bail(new Error(tr("natTap"))); }
       };
       step();
@@ -281,19 +284,28 @@
         // some phones (iOS) keep listening after you go quiet: 1.5 seconds with no new words sends it
         clearTimeout(V.quiet); if (inp.value) V.quiet = setTimeout(() => { if (rec === r) try { r.stop(); } catch (x) {} }, 1500); };
       r.onerror = e => { err = e.error; };
-      r.onend = () => { if (rec !== r || my !== gen) return; rec = null; clearTimeout(V.quiet);
+      let started = 0, again = false;
+      r.onend = () => { if (rec !== r || my !== gen) return; clearTimeout(V.quiet);
         const text = (fin || inp.value).replace(/\s+/g, " ").trim();
+        // ended at once with nothing heard (the phone was still switching from playing sound): try once more
+        if (!text && !again && (!err || err === "aborted" || err === "no-speech" || err === "audio-capture") && !r.byTap && Date.now() - started < 1200 && V.released && started - V.released < 3000) { again = true; err = null; setTimeout(() => { if (rec === r && my === gen) begin(); }, 400); return; }
+        rec = null;
         if (err === "not-allowed" || err === "service-not-allowed") return V.end(tr("micBlocked"));
         if (err === "audio-capture") return V.end(tr("noMic"));
         if (err === "network") return V.end(tr("noNet"));
         if (!text) return V.end(tr("heardNothing"));
         draft = ""; inp.value = text; ui("think"); send(true); };
-      try { r.start(); ui("listen"); } catch (e) { rec = null; V.end(tr("micFail")); }
+      let tries = 0;
+      const begin = () => { if (rec !== r || my !== gen) return; if (r.byTap) { stopRec(); return V.end(); }   // tapped to stop while it was still waiting to start
+        started = Date.now();
+        try { r.start(); ui("listen"); } catch (e) { if (++tries < 2) return setTimeout(begin, 350); rec = null; V.end(tr("micFail")); } };
+      // just stopped playing a natural voice: give the phone a moment to hand the sound over to the mic
+      if (V.released && Date.now() - V.released < 600) { ui("listen"); setTimeout(begin, 300); } else begin();
     }
     V.tap = () => {
       if (!V.ok) return toast(tr("needBrowser"));
       if (!V.enabled()) return;
-      if (V.state === "listen" && rec) { try { rec.stop(); } catch (e) {} return; }      // done talking: send now
+      if (V.state === "listen" && rec) { rec.byTap = true; try { rec.stop(); } catch (e) {} return; }      // done talking: send now
       if (V.state === "think") return V.end();                                          // waiting on an answer: stop the conversation
       // phones only allow reading aloud after a tap: a silent word now lets the answer be read later
       let first = false;
@@ -329,6 +341,7 @@
         ${V.canPlay() || V.naturalOk ? `<label class="asvf"><span>${esc(tr("engine"))}</span><select id="asVEng" ${on ? "" : "disabled"}>
             <option value="device" ${nat ? "" : "selected"} ${V.canSay ? "" : "disabled"}>${esc(tr("engDevice"))}</option>
             <option value="natural" ${nat ? "selected" : ""} ${V.naturalOk ? "" : "disabled"}>${esc(tr("engNatural"))}${V.naturalOk ? "" : esc(tr("engOff"))}</option></select>
+          ${nat && V.natErr ? `<div class="aspw" role="status">${esc(tr("natDown"))} ${esc(V.natErr)} ${esc(tr("natDown2"))}</div>` : ""}
           ${nat ? `<small class="ashint">${esc(tr("natHint"))}</small>` : ""}</label>` : ""}
         ${nat ? `<label class="asvf"><span>${esc(tr("voice"))}</span><select id="asVNat" ${on ? "" : "disabled"}>${natGroups.map(([lg, lab]) =>
             `<optgroup label="${esc(lab)}" lang="${lg}">${V.kokoro.filter(v => v.lang === lg).map(v => `<option value="${esc(v.id)}" ${(pref("assistant_natural_voice") || "af_heart") === v.id ? "selected" : ""}>${esc(v.name)} · ${esc(es ? (NOTE_ES[v.note] || v.note) : v.note)}</option>`).join("")}</optgroup>`).join("")}</select></label>`
