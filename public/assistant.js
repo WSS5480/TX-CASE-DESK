@@ -24,7 +24,7 @@
       aListen: "Stop listening and send", aSpeak: "Stop talking and listen", aThink: "Stop the voice conversation",
       talkHear: "Talk and hear answers", talkHint: "Mic to ask out loud; answers are read to you.", hearHint: "Answers can be read to you.",
       voice: "Voice", auto: "Automatic (best on this device)", missing: n => `Your chosen voice (${n}) isn't on this device, so the best one here is used.`,
-      noVoices: "This device hasn't listed its voices yet. The best one is used automatically.",
+      noVoices: "No professional voices listed on this device yet, so its standard voice is used.", noVoicesNat: "For more natural voices, pick Natural voices above.",
       noLangVoice: "This device has no English voice, so answers are shown but may not be read out well.",
       speed: "Speed", rates: ["Slower", "Normal", "Faster", "Fastest"], answers: "Answers", lens: ["Short summary", "Normal", "Full detail"],
       lenHint: "How long the assistant's answers are, typed or spoken. Spoken answers stay short unless you pick Full detail.", sample: "Hear a sample",
@@ -62,7 +62,7 @@
       aListen: "Dejar de escuchar y enviar", aSpeak: "Dejar de hablar y escuchar", aThink: "Terminar la conversación por voz",
       talkHear: "Hablar y escuchar las respuestas", talkHint: "Micrófono para preguntar en voz alta; las respuestas se leen en voz alta.", hearHint: "Las respuestas se pueden leer en voz alta.",
       voice: "Voz", auto: "Automática (la mejor de este dispositivo)", missing: n => `La voz que eligió (${n}) no está en este dispositivo, así que se usa la mejor que hay aquí.`,
-      noVoices: "Este dispositivo todavía no muestra sus voces. Se usa la mejor automáticamente.",
+      noVoices: "Este dispositivo todavía no muestra voces profesionales; se usa su voz estándar.", noVoicesNat: "Para voces más naturales, elija Voces naturales arriba.",
       noLangVoice: "Este dispositivo no tiene una voz en español: las respuestas se muestran en pantalla, pero puede que no se lean bien en voz alta.",
       speed: "Velocidad", rates: ["Más lenta", "Normal", "Más rápida", "La más rápida"], answers: "Respuestas", lens: ["Resumen corto", "Normal", "Todo el detalle"],
       lenHint: "Qué tan largas son las respuestas, escritas o habladas. Las habladas son cortas a menos que elija Todo el detalle.", sample: "Escuchar una muestra",
@@ -176,7 +176,11 @@
     // Apple's joke voices (Bubbles, Bells, Zarvox…) and old robot voices are never offered or picked (Steve, Nov 14: "distorted")
     const JUNK = /^(Albert|Bad News|Bahh|Bells|Boing|Bubbles|Cellos|Deranged|Good News|Hysterical|Jester|Organ|Pipe Organ|Superstar|Trinoids|Whisper|Wobble|Zarvox|Fred|Junior|Kathy|Ralph|Grandma|Grandpa|Eddy|Flo|Reed|Rocko|Sandy|Shelley)\b/i;
     const GOOD = /enhanced|premium|natural|neural|siri|Samantha|Ava|Zoe|Evan|Nathan|Tom|Allison|Susan|Noelle|Joelle|Google US English|Aria|Jenny|Guy|Paulina|Mónica|Monica|Jorge|Juan/i;
-    const usable = vs => { const ok = vs.filter(v => !JUNK.test(v.name)); return ok.length ? ok : vs; };
+    // professional app (Steve, Nov 14): only an approved list of professional-sounding voices is offered or picked
+    const PRO = /enhanced|premium|natural|neural|siri|\b(Samantha|Ava|Zoe|Evan|Nathan|Tom|Allison|Susan|Noelle|Joelle|Nicky|Alex|Daniel|Karen|Moira|Serena|Kate|Oliver|Arthur|Martha|Catherine|Lee|Paulina|M[oó]nica|Jorge|Juan|Diego|Sabina|Dalia|Elvira|Alvaro|Francisca|Isabela)\b|Google (US|UK) English|Google español|Microsoft (Aria|Jenny|Guy|Dalia|Jorge|Elvira|Alvaro|Sabina|Raul|Helena|Pablo)/i;   // old robotic Zira / David / Mark left out
+    // Android names its (Google) voices by language ("English United States", "en-us-x-sfg-local"): those are professional too
+    const ANDROID = /Android/i.test(navigator.userAgent), ANDROID_OK = /^(English|Spanish|español|inglés)\b|^(en|es)-[a-z]{2}-x-/i;
+    const usable = vs => vs.filter(v => (PRO.test(v.name) || (ANDROID && ANDROID_OK.test(v.name))) && !JUNK.test(v.name) && !/\bAna Online\b/i.test(v.name));   // Edge's "Ana" is a child's voice
     V.list = () => { if (!syn) return []; const [any, us, mx] = LRX[lang()], all = usable(syn.getVoices() || []), mine = all.filter(v => any.test(v.lang));
       const rank = v => (us.test(v.lang) ? 0 : mx.test(v.lang) ? 2 : 4) + (GOOD.test(v.name) ? 0 : 1);
       return (mine.length ? mine : all).slice().sort((a, b) => (rank(a) - rank(b)) || a.name.localeCompare(b.name)); };
@@ -402,8 +406,8 @@
             `<optgroup label="${esc(lab)}" lang="${lg}">${V.kokoro.filter(v => v.lang === lg).map(v => `<option value="${esc(v.id)}" ${(pref("assistant_natural_voice") || "af_heart") === v.id ? "selected" : ""}>${esc(v.name)} · ${esc(es ? (NOTE_ES[v.note] || v.note) : v.note)}</option>`).join("")}</optgroup>`).join("")}</select></label>`
         : V.canSay ? `<label class="asvf"><span>${esc(tr("voice"))}</span><select id="asVSel" ${on ? "" : "disabled"}><option value="">${esc(tr("auto"))}</option>
           ${list.map(v => `<option value="${esc(v.name)}" ${have && have.name === v.name ? "selected" : ""}>${esc(v.name.replace(/^(Microsoft|Google)\s+/, ""))} · ${esc(v.lang)}</option>`).join("")}</select></label>
-        ${want && !have && !JUNK.test(want) ? `<div class="ashint asvmiss">${esc(tr("missing")(want))}</div>` : ""}
-        ${!list.length ? `<div class="ashint">${esc(tr("noVoices"))}</div>` : list.length && !V.has() ? `<div class="ashint">${esc(tr("noLangVoice"))}</div>` : ""}` : ""}
+        ${want && !have && PRO.test(want) && !JUNK.test(want) ? `<div class="ashint asvmiss">${esc(tr("missing")(want))}</div>` : ""}
+        ${!list.length ? `<div class="ashint">${esc(tr("noVoices"))}${V.naturalOk ? " " + esc(tr("noVoicesNat")) : ""}</div>` : list.length && !V.has() ? `<div class="ashint">${esc(tr("noLangVoice"))}</div>` : ""}` : ""}
         ${V.canPlay() ? `<label class="asvf"><span>${esc(tr("speed"))}</span><select id="asVRate" ${on ? "" : "disabled"}>${RATES.map((v, i) => `<option value="${v}" ${v === rateNow ? "selected" : ""}>${esc(tr("rates")[i])}</option>`).join("")}</select></label>` : ""}
         <label class="asvf"><span>${esc(tr("answers"))}</span><select id="asVLen">${["short", "normal", "full"].map((v, i) => `<option value="${v}" ${V.length() === v ? "selected" : ""}>${esc(tr("lens")[i])}</option>`).join("")}</select>
           <small class="ashint">${esc(tr("lenHint"))}</small></label>
