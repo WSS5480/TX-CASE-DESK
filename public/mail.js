@@ -152,11 +152,11 @@
     if (!$("#mx")) app.innerHTML = `<div class="mx" id="mx"><aside class="mxf" id="mxF"></aside><section class="mxl" id="mxL" aria-label="Messages"></section><section class="mxr" id="mxR" aria-label="Reading pane"></section></div>`;
     $("#mx").classList.toggle("reading", M.reading);
     $("#mxF").innerHTML = folderPane();
-    $("#mxL").innerHTML = (desk() ? "" : phoneBar()) + listPane();
+    $("#mxL").innerHTML = phoneBar() + listPane();   // the picker bar is always there; CSS shows it on phones and on desktops with the assistant open
     if (!M.sel && !$("#mxR").dataset.keep) $("#mxR").innerHTML = emptyReader();
     wire();
   }
-  function paintList() { const el = $("#mxL"); if (!el) return paint(); const st = $("#mxList") ? $("#mxList").scrollTop : 0; el.innerHTML = (desk() ? "" : phoneBar()) + listPane(); if ($("#mxList")) $("#mxList").scrollTop = st; wire(); }
+  function paintList() { const el = $("#mxL"); if (!el) return paint(); const st = $("#mxList") ? $("#mxList").scrollTop : 0; el.innerHTML = phoneBar() + listPane(); if ($("#mxList")) $("#mxList").scrollTop = st; wire(); }
 
   function wire() {
     $$("#mx [data-compose]").forEach(b => b.onclick = () => compose({ mode: "new" }));
@@ -167,7 +167,7 @@
     $$("#mx [data-retry]").forEach(b => b.onclick = () => refresh(true));
     $$("#mx [data-more]").forEach(b => b.onclick = async () => { b.disabled = true; b.textContent = "Loading…"; await loadList(true); paintList(); });
     $$("#mx [data-clearq]").forEach(b => b.onclick = () => { M.q = ""; refresh(); });
-    const acctSel = $("#mxAcct") || $("#mxAcctP"); if (acctSel) acctSel.onchange = e => { M.acct = +e.target.value; M.folder = null; M.court = false; M.sel = null; M.reading = false; start(); };
+    [$("#mxAcct"), $("#mxAcctP")].filter(Boolean).forEach(acctSel => acctSel.onchange = e => { M.acct = +e.target.value; M.folder = null; M.court = false; M.sel = null; M.reading = false; start(); });
     if ($("#mxFoldP")) $("#mxFoldP").onchange = e => e.target.value === "__court" ? openCourt() : openFolder(e.target.value);
     const f = $("#mx .msrch"); if (f) f.onsubmit = e => { e.preventDefault(); M.q = $("#mxQ").value.trim(); refresh(); };
     $$("#mxList [data-id]").forEach(b => b.onclick = () => openMsg(b.dataset.id));

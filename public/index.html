@@ -85,13 +85,14 @@ main{width:100%;max-width:1240px;padding:24px 28px 40px}
 #ver{text-align:center;font-size:12px;color:var(--mute);padding:6px 0 24px}
 
 /* phone tab bar, quick add, timer bar */
-.tabs{position:fixed;left:0;right:0;bottom:0;z-index:25;background:#fff;border-top:1px solid var(--line);display:none;grid-template-columns:repeat(5,minmax(0,1fr));padding:6px 4px calc(6px + var(--safe))}
+.tabs{position:fixed;left:0;right:0;bottom:0;z-index:25;background:#fff;border-top:1px solid var(--line);display:none;grid-template-columns:repeat(6,minmax(0,1fr));padding:6px 4px calc(6px + var(--safe))}
 .tb{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:52px;text-decoration:none;color:var(--mute);font-size:11px;font-weight:500;border:0;background:none;cursor:pointer;padding:0}
-.tb .ti{position:relative;width:52px;height:28px;border-radius:14px;display:flex;align-items:center;justify-content:center}
+.tb .ti{position:relative;width:48px;height:28px;border-radius:14px;display:flex;align-items:center;justify-content:center}
 .tb.on{color:var(--navy);font-weight:700}.tb.on .ti{background:var(--navy-t)}
 .tb .bdg{position:absolute;top:-3px;right:5px;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--acc);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center}
-.fab{position:fixed;right:14px;bottom:calc(var(--tabs) + 14px + var(--safe));z-index:24;width:56px;height:56px;border-radius:16px;border:0;background:var(--acc);color:#fff;display:none;align-items:center;justify-content:center;box-shadow:0 6px 20px rgba(122,46,46,.32);cursor:pointer}
-.tbar{position:fixed;left:12px;right:82px;bottom:calc(var(--tabs) + 14px + var(--safe));z-index:24;height:56px;padding:0 6px 0 14px;border-radius:14px;background:#fff;border:1px solid var(--line);box-shadow:0 6px 20px rgba(23,34,59,.14);display:none;align-items:center;gap:10px}
+/* quick add (+ New) sits in the phone tab bar, its own space, so it never covers cards, lines or buttons (Steve's rule; replaced the floating + button Nov 14, 2026) */
+.tb.tnew{color:var(--acc);font-weight:600}.tb.tnew .ti{background:var(--acc);color:#fff}
+.tbar{position:fixed;left:0;right:0;bottom:calc(var(--tabs) + var(--safe));z-index:24;height:56px;padding:0 6px 0 14px;border-radius:0;background:#fff;border:0;border-top:1px solid var(--line);box-shadow:none;display:none;align-items:center;gap:10px}
 .tbar .tt{flex:1;min-width:0;display:flex;flex-direction:column;border:0;background:none;text-align:left;padding:0;cursor:pointer}
 .tbar .tt b{font-variant-numeric:tabular-nums}
 .tbar .tt small{font-size:12px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -356,12 +357,11 @@ body.out .ttl{display:flex!important}body.out .ttl .mark{display:inline-flex!imp
   .srch kbd,.tpill,#newBtn{display:none!important}
   .phone-only{display:inline-flex}
   .tact{gap:2px}
-  main{padding:16px 14px calc(var(--tabs) + 100px + var(--safe))}
-  body.timing main{padding-bottom:calc(var(--tabs) + 170px + var(--safe))}
+  main{padding:16px 14px calc(var(--tabs) + 24px + var(--safe))}
+  body.timing main{padding-bottom:calc(var(--tabs) + 80px + var(--safe))}
   .tabs{display:grid}
-  .fab{display:flex}
   body.timing .tbar{display:flex}
-  .toast{bottom:calc(var(--tabs) + 90px + var(--safe))}
+  .toast{bottom:calc(var(--tabs) + 14px + var(--safe))}body.timing .toast{bottom:calc(var(--tabs) + 70px + var(--safe))}
   input,select,textarea{font-size:16px}
   .sheet{top:auto;right:0;left:0;bottom:0;width:auto;border-radius:18px 18px 0 0;padding:18px 16px calc(18px + var(--safe));max-height:85vh}
   h1.pt{font-size:26px}
@@ -483,6 +483,7 @@ body.devv .shell{min-height:calc(100vh - var(--devh,44px))}
 .cmpf .err{flex-basis:100%;margin:0}
 @media (max-width:999px){
   body.mailmode main{padding:0 0 calc(var(--tabs) + 24px + var(--safe))}
+  body.mailmode.timing main{padding-bottom:calc(var(--tabs) + 80px + var(--safe))}   /* room for the timer bar on Mail too */
   .mx{display:block;height:auto}
   .mxf{display:none}
   .mxl{border:0;overflow:visible}.mlist{overflow:visible}
@@ -497,8 +498,7 @@ body.devv .shell{min-height:calc(100vh - var(--devh,44px))}
   .rsub{margin:16px 14px 8px;font-size:19px}.rbar .rback{padding:0 10px}.rbar .rback{font-size:0;gap:0}.rbar .rback svg{width:18px;height:18px}.rhead,.rtags,.rimg,.ratt{margin-left:14px;margin-right:14px;padding-left:0;padding-right:0}.rpad{padding:0 14px}
   .rdt{display:none}
   .cmp{inset:0;width:auto;height:auto;border-radius:0;border:0;padding-top:env(safe-area-inset-top,0px)}
-  body.composing .tabs,body.composing .fab{display:none}
-  body.mailmode .fab{display:none}
+  body.composing .tabs{display:none}
 }
 @media (min-width:1000px){.mpb{display:none}}
 
@@ -555,7 +555,7 @@ body.devv .shell{min-height:calc(100vh - var(--devh,44px))}
 .dbtns{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .dbtns .btn{flex:1 1 auto;min-width:110px}
 @media (prefers-reduced-motion:reduce){.ddot{animation:none}}
-@media (max-width:999px){.dpane{bottom:calc(var(--tabs) + 8px + var(--safe))}}
+@media (max-width:999px){.dpane{bottom:calc(var(--tabs) + 8px + var(--safe))}body.timing .dpane{bottom:calc(var(--tabs) + 64px + var(--safe))}}
 body.dpaneon .toast{bottom:auto;top:calc(72px + env(safe-area-inset-top,0px))}   /* the dictation panel owns the bottom of the screen */
 input.hasmic,textarea.hasmic{padding-right:44px}
 .closedb{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin:8px 0 0;padding:8px 10px;border-radius:8px;background:#ecebe6;font-size:14px;color:var(--ink2)}
@@ -597,7 +597,41 @@ input.hasmic,textarea.hasmic{padding-right:44px}
 .asp{position:fixed;z-index:35;top:62px;right:0;bottom:0;width:400px;background:#fff;border-left:1px solid var(--line);box-shadow:-8px 0 28px rgba(23,34,59,.10);display:flex;flex-direction:column;min-width:0}
 body.devv .asp{top:calc(62px + var(--devh,44px))}
 body.ason .wrap{padding-right:400px}
-@media (min-width:1000px) and (max-width:1199px){ body.ason .wrap{padding-right:0} .asp{box-shadow:-12px 0 32px rgba(23,34,59,.22)} }   /* narrow desktops: the panel sits over the page instead of squeezing it */
+/* desktops up to 1399 px: with the panel open the page moves over (never under the panel) and the left menu shrinks to icons so the page and search box keep their width (Nov 14, 2026; at 1000-1199 px it used to be an overlay that covered Today) */
+@media (min-width:1000px) and (max-width:1399px){
+  body.ason .side{width:72px;padding:18px 10px 12px;gap:14px;overflow-x:hidden}
+  body.ason .brand{justify-content:center;padding:2px 0}
+  body.ason .brand > span:not(.mark):not(.blogo){display:none}
+  body.ason .blogo{height:44px;padding:4px;margin:0}
+  body.ason .blogo img{max-height:36px}
+  body.ason .side nav{gap:10px!important}
+  body.ason .nh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;padding:0}
+  body.ason .ng+.ng{border-top:1px solid #2c3854;padding-top:10px}
+  body.ason .ni{justify-content:center;padding:0;gap:0;position:relative;min-height:44px}
+  body.ason .ni > span:not(.badge),body.ason .me > span:not(.av){position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  body.ason .ni .badge{position:absolute;top:2px;right:2px;margin:0;min-width:18px;height:18px;padding:0 5px;font-size:11px}
+  body.ason .me{justify-content:center;padding:12px 0 4px}
+  body.ason #newBtn{font-size:0;gap:0;width:40px;padding:0;border-radius:20px}   /* top bar: New and Assistant show as icons so the search box keeps its room */
+  body.ason .asb{width:40px;padding:0;justify-content:center}body.ason .asb .asl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  body.ason .srch kbd{display:none}
+}
+/* Mail when the page is narrow (assistant open up to 1899 px, or any desktop up to 1199 px): folders move into the picker over the list, so the reading pane keeps its width */
+@media (min-width:1000px) and (max-width:1899px){
+  body.ason .mx{grid-template-columns:minmax(200px,38%) minmax(0,1fr)}
+  body.ason .mxf{display:none}
+  body.ason .mpb{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 14px 0}
+  body.ason .mpb select{flex:1 1 150px;min-width:0}body.ason .mpb .mconn{margin:0}
+}
+@media (min-width:1000px) and (max-width:1199px){
+  .mx{grid-template-columns:minmax(200px,38%) minmax(0,1fr)}
+  .mxf{display:none}
+  .mpb{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 14px 0}
+  .mpb select{flex:1 1 150px;min-width:0}.mpb .mconn{margin:0}
+}
+/* the toast centres over the page, not over the assistant panel */
+@media (min-width:1000px){ body.ason .toast{left:calc(50vw - 76px);max-width:calc(100vw - 680px)!important} }
+@media (min-width:1000px) and (max-width:1399px){ body.ason .toast{left:calc(50vw - 164px);max-width:calc(100vw - 504px)!important} }
+.side :focus-visible{outline-color:#fff}
 .asp .ash{display:flex;align-items:center;gap:6px;padding:10px 10px 10px 16px;border-bottom:1px solid var(--line);min-width:0}
 .asp .ash h2{margin:0;font-size:16px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .asp .asctx{padding:8px 16px;border-bottom:1px solid var(--line2);font-size:13px;color:var(--mute);overflow-wrap:anywhere}
@@ -673,7 +707,7 @@ body.ason .wrap{padding-right:400px}
       </div>
       <div class="tact" id="tact" hidden>
         <button type="button" class="tpill" id="tpill" hidden></button>
-        <button type="button" class="btn" id="newBtn"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>New</button>
+        <button type="button" class="btn" id="newBtn" title="New" aria-label="New: quick add"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>New</button>
         <button type="button" class="asb" id="asBtn" hidden aria-label="Case Desk Assistant" aria-expanded="false" aria-controls="asPanel"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"></path><path d="M8.5 9.5h7M8.5 12.5h4"></path></svg><span class="asl">Assistant</span></button>
         <button type="button" class="iconb phone-only" id="qBtn" aria-label="Search"><svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"></circle><path d="M20 20l-4.2-4.2"></path></svg></button>
         <button type="button" class="avb phone-only" id="avBtn" aria-label="Account"></button>
@@ -684,7 +718,6 @@ body.ason .wrap{padding-right:400px}
   </div>
 </div>
 <div class="tbar" id="tbar"></div>
-<button type="button" class="fab" id="fab" hidden aria-label="Quick add"><svg aria-hidden="true" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg></button>
 <nav class="tabs" id="tabs" aria-label="Main" hidden></nav>
 <div class="scrim" id="scrim" hidden></div>
 <div class="sheet" id="sheet" role="dialog" aria-modal="true" hidden></div>

@@ -239,12 +239,12 @@ function navGroups() {
 const PRIMARY = [["today", "Today"], ["cases", "Cases"], ["calendar", "Calendar"], ["inbox", "Mail"]];
 function titleOf(k) { if (k === "account") return "Account"; for (const [, items] of navGroups()) for (const [kk, v] of items) if (kk === k) return v; return "TX Case Desk"; }
 function shellOff() {
-  document.body.classList.add("out"); ["#side", "#tabs", "#fab", "#srch", "#tact"].forEach(s => $(s).hidden = true);
+  document.body.classList.add("out"); ["#side", "#tabs", "#srch", "#tact"].forEach(s => $(s).hidden = true);
   document.body.classList.remove("timing"); closeSheet(); if (window.assistShell) assistShell(true);
   $("#ttl").innerHTML = `<span class="mark" aria-hidden="true">TX</span><span class="tname">TX Case Desk</span>`;
 }
 function shellOn() {
-  document.body.classList.remove("out"); ["#side", "#tabs", "#fab", "#srch", "#tact"].forEach(s => $(s).hidden = false);
+  document.body.classList.remove("out"); ["#side", "#tabs", "#srch", "#tact"].forEach(s => $(s).hidden = false);
   $("#avBtn").textContent = initials(me.name);
   if (window.assistShell) assistShell();   // Case Desk Assistant button (not in developer view)
 }
@@ -261,20 +261,23 @@ function start() {
 function renderNav() {
   if (!me) return;
   const badge = k => k === "inbox" && inboxUnread ? `<span class="badge">${inboxUnread}</span>` : "";
-  const item = ([k, v]) => `<a href="#${k}" data-t="${k}" class="ni${tab === k ? " on" : ""}"${tab === k ? ' aria-current="page"' : ""}>${ic(k)}<span>${v}</span>${badge(k)}</a>`;
+  const item = ([k, v]) => `<a href="#${k}" data-t="${k}" class="ni${tab === k ? " on" : ""}" title="${esc(v)}"${tab === k ? ' aria-current="page"' : ""}>${ic(k)}<span>${v}</span>${badge(k)}</a>`;
   const role = me.firm_kind === "solo" ? "Solo attorney" : ROLE_LBL[me.role] || "Attorney";
   $("#side").innerHTML = (me.firm_logo ? `<div class="brand withlogo"><span class="blogo"><img src="${esc(me.firm_logo)}" alt=""></span><span class="bt"><b>${esc(me.firm_name || "")}</b><small>TX Case Desk</small></span></div>`
     : `<div class="brand"><span class="mark" aria-hidden="true">TX</span><span><b>TX Case Desk</b><small>${esc(me.firm_name || "")}</small></span></div>`) + `
     <nav aria-label="Main" style="display:flex;flex-direction:column;gap:18px">${navGroups().map(([h, items]) => `<div class="ng"><div class="nh">${h}</div>${items.map(item).join("")}</div>`).join("")}</nav>
-    <a href="#account" data-t="account" class="me${tab === "account" ? " on" : ""}"><span class="av">${esc(initials(me.name))}</span><span><b>${esc(me.name)}</b><small>${role}${me.bar_number ? " · Bar #" + esc(me.bar_number) : ""}</small></span></a>`;
+    <a href="#account" data-t="account" class="me${tab === "account" ? " on" : ""}" title="${esc(me.name)}"><span class="av">${esc(initials(me.name))}</span><span><b>${esc(me.name)}</b><small>${role}${me.bar_number ? " · Bar #" + esc(me.bar_number) : ""}</small></span></a>`;
   const inMore = !PRIMARY.some(([k]) => k === tab);
-  $("#tabs").innerHTML = PRIMARY.map(([k, v]) => `<a href="#${k}" data-t="${k}" class="tb${tab === k ? " on" : ""}"${tab === k ? ' aria-current="page"' : ""}><span class="ti">${ic(k, 22, tab === k ? 2 : 1.75)}${k === "inbox" && inboxUnread ? `<span class="bdg">${inboxUnread}</span>` : ""}</span>${v}</a>`).join("")
+  const tabA = ([k, v]) => `<a href="#${k}" data-t="${k}" class="tb${tab === k ? " on" : ""}"${tab === k ? ' aria-current="page"' : ""}><span class="ti">${ic(k, 22, tab === k ? 2 : 1.75)}${k === "inbox" && inboxUnread ? `<span class="bdg">${inboxUnread}</span>` : ""}</span>${v}</a>`;
+  // quick add sits in the middle of the tab bar (its own space, never over the page), replacing the old floating + button
+  $("#tabs").innerHTML = PRIMARY.slice(0, 2).map(tabA).join("") + `<button type="button" class="tb tnew" id="tabNew"><span class="ti">${ic("plus", 22, 2)}</span>New</button>`
+    + PRIMARY.slice(2).map(tabA).join("")
     + `<button type="button" class="tb${inMore ? " on" : ""}" id="moreBtn"><span class="ti">${ic("more", 22)}</span>More</button>`;
   document.body.dataset.tab = tab;
   $("#ttl").innerHTML = tab !== "today" ? `<span class="tname">${esc(titleOf(tab))}</span>`
     : me.firm_logo ? `<img class="tlogo" src="${esc(me.firm_logo)}" alt="${esc(me.firm_name || "Firm")} logo">` : `<span class="mark" aria-hidden="true">TX</span><span class="tname">TX Case Desk</span>`;
   $$("#side [data-t], #tabs [data-t]").forEach(a => a.onclick = e => { e.preventDefault(); nav(a.dataset.t); });
-  $("#moreBtn").onclick = moreSheet;
+  $("#moreBtn").onclick = moreSheet; $("#tabNew").onclick = quickSheet;
 }
 function nav(k) { tab = k; closeSheet(); closeSearch(); renderNav(); return show(); }
 function show() { subView = false; viewSeq++; clearTimeout(courtPoll); if (window.assistCtx) Object.assign(assistCtx, { case_id: null, case_label: null, event_id: null });
@@ -359,7 +362,7 @@ async function topSearch(v) {
 $("#q").oninput = e => { clearTimeout(qT); const v = e.target.value.trim(); qT = setTimeout(() => topSearch(v), 200); };
 $("#q").onkeydown = e => { if (e.key === "Enter") { const f = $("#qres [data-qc], #qres [data-qp]"); if (f) f.click(); } };
 $("#qBtn").onclick = openSearch; $("#qClose").onclick = () => { $("#q").value = ""; closeSearch(); };
-$("#newBtn").onclick = quickSheet; $("#fab").onclick = quickSheet; $("#avBtn").onclick = () => nav("account");
+$("#newBtn").onclick = quickSheet; $("#avBtn").onclick = () => nav("account");
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k" && me && !document.body.classList.contains("out")) { e.preventDefault(); openSearch(); }
   if (e.key === "Escape") { closeSheet(); closeSearch(); }
