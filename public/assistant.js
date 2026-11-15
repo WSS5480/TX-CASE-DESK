@@ -29,7 +29,7 @@
       speed: "Speed", rates: ["Slower", "Normal", "Faster", "Fastest"], answers: "Answers", lens: ["Short summary", "Normal", "Full detail"],
       lenHint: "How long the assistant's answers are, typed or spoken. Spoken answers stay short unless you pick Full detail.", sample: "Hear a sample",
       sampleText: "This is how the Case Desk Assistant will sound when it reads your answers.",
-      engine: "Voice engine", engDevice: "This device's voices (free)", engNatural: "Natural voices: Kokoro", engOff: " (not switched on yet)",
+      engine: "Voice engine", engDevice: "This device's built-in voices", engNatural: "Natural human voices (recommended)", engOff: " (not switched on yet)",
       natHint: "Same voices as Pentex University. The answer text (social security numbers removed) goes to DeepInfra, our voice service, to be spoken.",
       natEn: "English", natEs: "Spanish (used for answers in Spanish)", natUse: " Using this device's voice.", natDown: "Natural voices aren't working right now:", natDown2: "Answers are read with this device's voice until it's fixed.", natPlay: "This device couldn't play the natural voice.", natTap: "Tap the speaker to hear it (this device blocked the sound).",
       noSay: "This browser can't read answers out loud; the answer is on screen.", wait: "Wait for the answer to finish, then tap the mic.",
@@ -67,7 +67,7 @@
       speed: "Velocidad", rates: ["Más lenta", "Normal", "Más rápida", "La más rápida"], answers: "Respuestas", lens: ["Resumen corto", "Normal", "Todo el detalle"],
       lenHint: "Qué tan largas son las respuestas, escritas o habladas. Las habladas son cortas a menos que elija Todo el detalle.", sample: "Escuchar una muestra",
       sampleText: "Así sonará el asistente de Case Desk cuando lea sus respuestas.",
-      engine: "Motor de voz", engDevice: "Voces de este dispositivo (gratis)", engNatural: "Voces naturales: Kokoro", engOff: " (todavía no activadas)",
+      engine: "Motor de voz", engDevice: "Voces integradas de este dispositivo", engNatural: "Voces humanas naturales (recomendado)", engOff: " (todavía no activadas)",
       natHint: "Las mismas voces que Pentex University. El texto de la respuesta (sin números de seguro social) va a DeepInfra, nuestro servicio de voz, para leerlo.",
       natEn: "Inglés", natEs: "Español (para las respuestas en español)", natUse: " Se usa la voz de este dispositivo.", natDown: "Las voces naturales no funcionan en este momento:", natDown2: "Las respuestas se leen con la voz de este dispositivo hasta que se arregle.", natPlay: "Este dispositivo no pudo reproducir la voz natural.", natTap: "Toque el altavoz para oírla (este dispositivo bloqueó el sonido).",
       noSay: "Este navegador no puede leer las respuestas en voz alta; la respuesta está en pantalla.", wait: "Espere a que termine la respuesta y luego toque el micrófono.",
@@ -218,14 +218,17 @@
     // natural voices (Kokoro via the server): one audio player, reused so phones allow it after the first tap
     const SILENT = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
     V.naturalOk = false; V.kokoro = [];
-    V.engine = () => V.naturalOk && pref("assistant_voice_engine") === "natural" ? "natural" : "device";
+    // natural voices are the default whenever the server has them (Steve, Nov 15 2026: device voices sound robotic); "device" only if picked
+    V.engine = () => V.naturalOk && pref("assistant_voice_engine") !== "device" ? "natural" : "device";
+    // after an outage or used-up allowance: answers use the device voice for a while (no wait on every answer); picking a voice again tries natural at once
+    V.natSkip = () => Date.now() < (V.natSkipUntil || 0);
     V.canPlay = () => V.canSay || V.engine() === "natural";
     // iPhone / iPad: after an <audio> player plays, Safari's speech recognition can stop getting sound (a known WebKit bug).
     // There, natural voices play through the Web Audio API instead, which keeps the mic working.
     const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
     V.useCtx = () => (IOS || window.__forceCtx === true) && !!(window.AudioContext || window.webkitAudioContext);
     const ctxNow = () => { if (!V.ctx) { const C = window.AudioContext || window.webkitAudioContext; V.ctx = new C(); } return V.ctx; };
-    const prime = () => { if (V.engine() !== "natural") return;
+    const prime = () => { if (pref("assistant_voice_engine") === "device" || (V.voicesLoaded && V.engine() !== "natural")) return;   // before the voice list arrives, prime anyway (harmless) so the first answer can use natural
       if (V.useCtx()) { try { const c = ctxNow(), r = c.resume && c.resume(); if (r && r.catch) r.catch(() => {}); const b = c.createBuffer(1, 1, 22050), s = c.createBufferSource(); s.buffer = b; s.connect(c.destination); s.start(0); } catch (e) {} return; }   /* unlocked by the tap */
       if (!V.audio) V.audio = new Audio(); if (!V.primed) { try { V.audio.src = SILENT; const p = V.audio.play(); if (p && p.then) p.then(() => { V.primed = true; }, () => {}); else V.primed = true; } catch (e) {} } };   // counts only if the phone allowed it
     const stopAudio = () => { if (V.src) { const s = V.src; V.src = null; try { s.onended = null; s.stop(); } catch (e) {} V.released = Date.now(); }
@@ -241,14 +244,16 @@
     let warned = 0;
     function playNatural(parts, my, done, fallback) {
       const ctx = V.useCtx() ? ctxNow() : null, a = ctx ? null : V.audio || (V.audio = new Audio()), ctl = V.abort = new AbortController();
-      const get = t => fetch("/api/assistant/speak", { method: "POST", credentials: "same-origin", signal: ctl.signal, headers: { "Content-Type": "application/json", "X-Requested-With": "tcd" }, body: JSON.stringify({ text: t, voice: V.naturalVoice(t) }) })
-        .then(async r => { slog("fetch", r.status); if (!r.ok) { const j = await r.json().catch(() => ({})); throw Object.assign(new Error(errText(j.error || "") || errText("The voice service didn't answer.")), { code: j.code }); } return ctx ? r.arrayBuffer() : URL.createObjectURL(await r.blob()); });
+      let slow = 0; const tmo = () => { clearTimeout(slow); slow = setTimeout(() => { ctl.timedOut = true; try { ctl.abort(); } catch (e) {} }, 25000); };   // the voice service hanging: give up after 25 s (the server itself gives up at 20 s), use the device voice
+      const get = t => (tmo(), fetch("/api/assistant/speak", { method: "POST", credentials: "same-origin", signal: ctl.signal, headers: { "Content-Type": "application/json", "X-Requested-With": "tcd" }, body: JSON.stringify({ text: t, voice: V.naturalVoice(t) }) })
+        .then(async r => { slog("fetch", r.status); if (!r.ok) { const j = await r.json().catch(() => ({})); throw Object.assign(new Error(errText(j.error || "") || errText("The voice service didn't answer.")), { code: j.code }); } return ctx ? r.arrayBuffer() : URL.createObjectURL(await r.blob()); })
+        .then(x => { clearTimeout(slow); return x; }, e => { clearTimeout(slow); if (ctl.timedOut && e && e.name === "AbortError") throw Object.assign(new Error(errText("The voice service didn't answer.")), { code: "VOICE_DOWN" }); throw e; }));
       let i = 0, next = get(parts[0]), over = false;
       const free = pr => pr && !ctx && pr.then(u => URL.revokeObjectURL(u), () => {});   // audio fetched but never played
       V.freeNat = () => { const n = next; next = null; free(n); };
       // once only: a bad file can fire both the error event and a refused play(), which must not read the rest twice
       const bail = e => { if (my !== gen || over) return; over = true; slog("bail", (e && (e.code || e.name)) || ""); stopAudio(); free(next);
-        if (e && e.code) { V.natErr = e.message; V.menu(true); }   // the service said no (out of credit, bad key, down): show it in the menu
+        if (e && e.code) { V.natErr = e.message; if (e.code === "VOICE_CAP") V.natSkipUntil = Infinity; else if (e.code === "VOICE_DOWN" || /^VOICE_/.test(e.code)) V.natSkipUntil = Date.now() + 600000; V.menu(true); }   // the service said no (out of credit, bad key, down): show it in the menu
         if (e && e.name !== "AbortError" && Date.now() - warned > 60000) { warned = Date.now(); toast((e.message || errText("The voice service didn't answer.")) + tr("natUse")); } fallback(parts.slice(i)); };
       const stepCtx = async () => {   // iPhone / iPad: Web Audio
         let buf; try { buf = await next; } catch (e) { return bail(e); }
@@ -292,7 +297,7 @@
     V.say = (text, links, thenListen, note) => {
       if (V.sl) sendSay();
       V.sl = { t0: Date.now(), ev: [], tm: setTimeout(() => sendSay(), 20000) };
-      slog("say", (V.engine() === "natural" ? (V.useCtx() ? "ctx" : "el") : "dev") + (navigator.audioSession ? "+as:" + navigator.audioSession.type : "+noas") + (V.ctx ? "+ctx:" + V.ctx.state : "") + (syn ? "+voices" + (syn.getVoices() || []).length : "+nosyn"));
+      slog("say", (V.engine() === "natural" ? (V.natSkip() ? "skip" : V.useCtx() ? "ctx" : "el") : "dev") + (navigator.audioSession ? "+as:" + navigator.audioSession.type : "+noas") + (V.ctx ? "+ctx:" + V.ctx.state : "") + (syn ? "+voices" + (syn.getVoices() || []).length : "+nosyn"));
       sess("playback");
       if (!V.canPlay()) return thenListen && V.on ? V.end(tr("noSay")) : undefined;
       prime();   // still inside the tap when it's a replay or the mic: lets phones play the natural voice later
@@ -315,7 +320,7 @@
         const check = () => { if (my !== gen) return; if (syn.speaking || syn.pending) backup = setTimeout(check, 5000); else done(); };   // still reading: check again in 5 s
         backup = setTimeout(check, ps.join(" ").length * 90 + 3000);
       };
-      if (V.engine() === "natural") playNatural(parts, my, done, device); else device(parts);
+      if (V.engine() === "natural" && !V.natSkip()) playNatural(parts, my, done, device); else device(parts);
     };
     V.hushReplay = () => { gen++; hush(); V.replaying = false; draw(); };
     function stopRec() { clearTimeout(V.quiet); if (rec) { const r = rec; rec = null; r.onresult = r.onend = r.onerror = null; try { r.abort(); } catch (e) {} } }
@@ -364,6 +369,7 @@
       if (V.state === "think") return V.end();                                          // waiting on an answer: stop the conversation
       // phones only allow reading aloud after a tap: a silent word now lets the answer be read later
       let first = false;
+      if (V.voicesFailed) { V.voicesFailed = V.voicesLoaded = false; V.loadVoices(); }   // the voice list didn't load (bad signal): try again
       prime();
       if (V.canSay && !V.unlocked) { try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; syn.speak(u); } catch (e) {} V.unlocked = first = true; }
       V.on = true; listen(first && V.state !== "speak" && !V.replaying);                                                             // start, or cut in while it's talking
@@ -398,8 +404,8 @@
       m.innerHTML = `<label class="asvf"><span>${esc(tr("language"))}</span><select id="asVLang">${langOpts()}</select></label>
         <label class="asvrow"><input type="checkbox" id="asVOn" ${on ? "checked" : ""}> <span><b>${esc(tr("talkHear"))}</b><br><span class="ashint">${esc(V.ok ? tr("talkHint") : tr("hearHint"))}</span></span></label>
         ${V.canPlay() || V.naturalOk ? `<label class="asvf"><span>${esc(tr("engine"))}</span><select id="asVEng" ${on ? "" : "disabled"}>
-            <option value="device" ${nat ? "" : "selected"} ${V.canSay ? "" : "disabled"}>${esc(tr("engDevice"))}</option>
-            <option value="natural" ${nat ? "selected" : ""} ${V.naturalOk ? "" : "disabled"}>${esc(tr("engNatural"))}${V.naturalOk ? "" : esc(tr("engOff"))}</option></select>
+            <option value="natural" ${nat ? "selected" : ""} ${V.naturalOk ? "" : "disabled"}>${esc(tr("engNatural"))}${V.naturalOk ? "" : esc(tr("engOff"))}</option>
+            <option value="device" ${nat ? "" : "selected"} ${V.canSay ? "" : "disabled"}>${esc(tr("engDevice"))}</option></select>
           ${nat && V.natErr ? `<div class="aspw" role="status">${esc(tr("natDown"))} ${esc(V.natErr)} ${esc(tr("natDown2"))}</div>` : ""}
           ${nat ? `<small class="ashint">${esc(tr("natHint"))}</small>` : ""}</label>` : ""}
         ${nat ? `<label class="asvf"><span>${esc(tr("voice"))}</span><select id="asVNat" ${on ? "" : "disabled"}>${natGroups.map(([lg, lab]) =>
@@ -425,11 +431,12 @@
       V.paint();
     };
     // a picked natural voice is heard in its own language; otherwise the sample is in the assistant's language
-    V.sample = id => { if (!V.canPlay() || !V.enabled()) return; V.replayIdx = -1; V.end();
+    V.sample = id => { if (!V.canPlay() || !V.enabled()) return; V.replayIdx = -1; V.end(); V.natSkipUntil = 0;
       V.say(id ? I18N[/^e/.test(id) ? "es" : "en"].sampleText : tr("sampleText"), [], false); };
     V.save = save;
     // which engines this server offers (natural voices need the voice-service key in Render)
-    V.loadVoices = () => api("/api/assistant/voices").then(r => { V.naturalOk = !!r.natural; V.kokoro = r.voices || []; V.menu(true); }).catch(() => {});
+    V.loadVoices = () => api("/api/assistant/voices").then(r => { V.naturalOk = !!r.natural; V.kokoro = r.voices || []; V.voicesLoaded = true;
+      const m = document.querySelector("#asVm"); if (!m || !m.contains(document.activeElement)) V.menu(true); else m.addEventListener("focusout", () => setTimeout(() => { if (!m.contains(document.activeElement)) V.menu(true); }, 0), { once: true }); }).catch(() => { V.voicesLoaded = V.voicesFailed = true; });
     V.ui = ui;
     return V;
   })();
