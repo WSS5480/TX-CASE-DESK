@@ -9,12 +9,13 @@ const crypto = require("crypto");
 const path = require("path");
 const QRCode = require("qrcode");
 const { authenticator } = require("otplib");
-const { pool, q, migrate, lateIndexes } = require("./db");
+const { pool, q, migrate, lateIndexes, isFinal } = require("./db");
 const analysis = require("./analysis");
 const lawdb = require("./lawdb");
 const inbound = require("./inbound");
 const mail = require("./mail");
 const practice = require("./practice");
+const closeout = require("./closeout");
 const access = require("./access");
 const myapps = require("./myapps");
 const demo = require("./demo");
@@ -376,8 +377,11 @@ app.put("/api/me/counties", requireAuth, wrap(async (req, res) => {
 
 // ---------- firm seats (admin) ----------
 // every /api/cases/<id>/... route: the case must be one this person may see (role + access rules in access.js)
+// An id that isn't plain digits but would still read as a number ("0x5", " 5", "5e0") is refused here, so it can't slip past this
+// check into a route; named routes (/api/cases/import, /api/cases/watch-all) are letters only and pass through.
 app.use("/api/cases/:id", wrap(async (req, res, next) => {
-  if (!/^\d+$/.test(req.params.id) || !req.session.uid || !req.session.mfa) return next();
+  if (!/^\d{1,9}$/.test(req.params.id)) return /^[a-z-]+$/i.test(req.params.id) ? next() : res.status(404).json({ error: "Not found" });   // 10+ digits: past the id range, 404 (not a database error)
+  if (!req.session.uid || !req.session.mfa) return next();
   const u = await loadUser(req.session.uid); if (!u) return next();
   const p = [+req.params.id, u.firm_id], cond = access.caseCond(u, "c", p);
   if (!(await q(`SELECT 1 FROM cases c WHERE c.id=$1 AND c.firm_id=$2 AND ${cond}`, p)).rowCount) return res.status(404).json({ error: "Case not found" });
@@ -558,6 +562,38 @@ function cleanCase(b) {
   if ("stage" in o) o.stage = STAGES.find(x => x.toLowerCase() === String(o.stage || "").trim().toLowerCase()) || null;
   return o;
 }
+// Only a firm admin may close or reopen a case (Steve, Nov 20, 2026). Closing runs the close-out checks (closeout.js): with
+// anything open the admin must give a reason (override_reason, 10+ characters), recorded in closed_why and the audit log.
+// The case, if this person may see it (role + access rules in access.js); every /api/cases/:id route checks it itself too,
+// on top of the /api/cases/:id guard above (Nov 20, 2026).
+async function caseSeen(user, id) {
+  if (!/^\d{1,9}$/.test(String(id))) return null;
+  const p = [+id, user.firm_id], cond = access.caseCond(user, "c", p);
+  return (await q(`SELECT c.* FROM cases c WHERE c.id=$1 AND c.firm_id=$2 AND ${cond}`, p)).rows[0] || null;
+}
+const NOT_FOUND = { error: "Not found" };
+const ADMIN_CLOSE = "Only a firm admin can close a case.", ADMIN_REOPEN = "Only a firm admin can reopen a closed case.";
+const refuse = (status, reply) => Object.assign(new Error(reply.error), { status, reply });
+// the admin's reason for closing over open items, or for dismissing the ready-to-close flag: text only; control and
+// zero-width characters removed and spaces squeezed before the length rule
+function reasonOf(v, min) {
+  if (v != null && typeof v !== "string") throw refuse(400, { error: "Give the reason as plain text.", code: "BAD_REASON" });
+  const r = String(v || "").normalize("NFC").replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 500);
+  return r.length >= min ? r : "";
+}
+async function closeGate(req, cur, c, db) {
+  const toClosed = c.stage === "Closed" && cur.stage !== "Closed", fromClosed = cur.stage === "Closed" && c.stage !== "Closed";
+  if (!toClosed && !fromClosed) return null;
+  if (req.user.role !== "admin") throw refuse(403, { error: toClosed ? ADMIN_CLOSE : ADMIN_REOPEN, code: "ADMIN_ONLY" });
+  if (fromClosed) return { reopened: true };
+  const given = (req.body || {}).override_reason, typed = reasonOf(given, 0);   // a reason that isn't text is refused even when nothing is open
+  const co = await closeout.check(req.user, cur, db), open = co.items.filter(i => !i.clear);   // on the transaction's own connection, one query at a time
+  if (!open.length) { c.closed_why = `Closed by ${req.user.name}${cur.close_ready_why ? " · " + cur.close_ready_why : ""}`.slice(0, 600); return { closed: true }; }
+  const reason = typed.length >= closeout.MIN_REASON ? typed : "";
+  if (!reason) throw refuse(400, { error: `This case still has open items. To close it anyway, give the reason (at least ${closeout.MIN_REASON} characters).`, code: "CLOSE_BLOCKED", items: open });
+  c.closed_why = `Closed by ${req.user.name} over open items: ${reason}`;
+  return { closed: true, override: { reason, open: open.map(i => ({ key: i.key, label: i.label, detail: i.detail })) } };
+}
 app.get("/api/cases", requireAuth, wrap(async (req, res) => {
   const { view = "mine", county, type } = req.query;
   const params = [req.user.firm_id, req.user.counties || []];
@@ -565,7 +601,7 @@ app.get("/api/cases", requireAuth, wrap(async (req, res) => {
   if (!access.seesFirm(req.user)) where += " AND " + access.caseCond(req.user, "c", params);
   else if (view === "mine") { params.push(req.user.id); where += ` AND c.user_id=$${params.length}`; }
   if (view === "tracked") where += " AND c.tracked";
-  if (view === "alerts") where += " AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL)";
+  if (view === "alerts") where += " AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL OR c.close_ready_at IS NOT NULL)";
   if (view === "watched") where += " AND c.watch_dates";
   // Closed cases live in their own view; every other view shows active cases (unless you filter by the Closed stage)
   if (view === "closed") where += " AND c.stage = 'Closed'";
@@ -575,14 +611,14 @@ app.get("/api/cases", requireAuth, wrap(async (req, res) => {
   if (type) { params.push(type); where += ` AND c.case_type=$${params.length}`; }
   if (req.query.stage === "none") where += " AND c.stage IS NULL";
   else if (STAGES.includes(req.query.stage)) { params.push(req.query.stage); where += ` AND c.stage=$${params.length}`; }
-  const alertsFirst = "(c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL) DESC";
+  const alertsFirst = "(c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL OR c.close_ready_at IS NOT NULL) DESC";
   const byStage = /^stage(_desc)?$/.test(req.query.sort || ""); if (byStage) params.push(STAGES);
   const stPos = `array_position($${params.length}::text[], c.stage)`;
   const order = byStage ? `${stPos} ${req.query.sort === "stage_desc" ? "DESC" : "ASC"} NULLS LAST, ${alertsFirst}, c.filed_date DESC NULLS LAST`
     : { style: "lower(COALESCE(NULLIF(c.style,''), c.cause_no)) ASC", updated: "c.updated_at DESC NULLS LAST" }[req.query.sort] || `${alertsFirst}, c.filed_date DESC NULLS LAST`;
   const { rows } = await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} ORDER BY ${order}, c.id DESC LIMIT 500`, params);
   const ap = [req.user.firm_id, req.user.counties || []];
-  const al = await q(`SELECT count(*)::int n FROM cases c WHERE c.firm_id=$1 AND (c.county = ANY($2) OR c.tracked) AND c.stage IS DISTINCT FROM 'Closed' AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL) AND ${access.seesFirm(req.user) && req.user.role !== "attorney" ? "TRUE" : access.seesFirm(req.user) ? (ap.push(req.user.id), "c.user_id=$3") : access.caseCond(req.user, "c", ap)}`, ap);
+  const al = await q(`SELECT count(*)::int n FROM cases c WHERE c.firm_id=$1 AND (c.county = ANY($2) OR c.tracked) AND c.stage IS DISTINCT FROM 'Closed' AND (c.date_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.filing_alert IS NOT NULL OR c.close_ready_at IS NOT NULL) AND ${access.seesFirm(req.user) && req.user.role !== "attorney" ? "TRUE" : access.seesFirm(req.user) ? (ap.push(req.user.id), "c.user_id=$3") : access.caseCond(req.user, "c", ap)}`, ap);
   res.json({ cases: rows, alerts: al.rows[0].n });
 }));
 app.post("/api/cases", requireAuth, wrap(async (req, res) => {
@@ -590,15 +626,18 @@ app.post("/api/cases", requireAuth, wrap(async (req, res) => {
   if (!c.cause_no && PRE_FILING.includes(c.stage)) c.cause_no = preCause();   // not filed yet
   if (!c.county || !COUNTIES.includes(c.county) || !c.cause_no) return res.status(400).json({ error: c.county ? "Add the cause #. Not filed yet? Set the stage to Intake, Pre-litigation or Demand / negotiation and leave the cause # blank." : "County is required." });
   if (!(req.user.counties || []).includes(c.county) && !c.tracked) return res.status(403).json({ error: `${c.county} isn't one of your counties. Add it under My Counties, or mark the case as Tracked.` });
+  if (c.stage === "Closed" && req.user.role !== "admin") return res.status(403).json({ error: ADMIN_CLOSE, code: "ADMIN_ONLY" });   // an old matter added as closed: firm admins only
+  if (c.stage === "Closed") c.closed_why = `Added as closed by ${req.user.name}`;
   const cols = Object.keys(c);
   const { rows } = await q(`INSERT INTO cases(firm_id,user_id,source,${cols.join(",")}) VALUES($1,$2,'manual',${cols.map((_, i) => "$" + (i + 3)).join(",")})
     ON CONFLICT(firm_id,county,cause_no) DO NOTHING RETURNING *`, [req.user.firm_id, req.user.id, ...cols.map(k => c[k])]);
   if (!rows[0]) return res.status(409).json({ error: "That cause # is already in your firm's list for this county." });
   await audit(req, "case_added", { id: rows[0].id, county: c.county, cause_no: c.cause_no });
-  await practice.onCaseCreated(rows[0], req.user.id);
+  if (rows[0].stage !== "Closed") await practice.onCaseCreated(rows[0], req.user.id);   // no new-case to-dos on a matter added as closed
   res.json({ case: rows[0] });
 }));
 app.patch("/api/cases/:id", requireAuth, wrap(async (req, res) => {
+  if (!(await caseSeen(req.user, req.params.id))) return res.status(404).json(NOT_FOUND);
   const c = cleanCase(req.body || {}); delete c.county; delete c.cause_no;
   // A case added before filing holds a PRE- number: the real cause # can be filled in once (only then).
   const nc = String((req.body || {}).cause_no || "").trim().slice(0, 500);
@@ -607,24 +646,45 @@ app.patch("/api/cases/:id", requireAuth, wrap(async (req, res) => {
       if (/^PRE-/i.test(nc)) return res.status(400).json({ error: "Enter the real cause # from the court." });
       c.cause_no = nc;
     } }
-  const cols = Object.keys(c);
-  if (!cols.length) return res.status(400).json({ error: "Nothing to update" });
-  const was = cols.includes("next_setting") ? (await q("SELECT next_setting FROM cases WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id])).rows[0] : null;
+  if (!Object.keys(c).length) return res.status(400).json({ error: "Nothing to update" });
+  const was = "next_setting" in c ? (await q("SELECT next_setting FROM cases WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id])).rows[0] : null;
   // the update runs in its own transaction that names the person, so the activity log records who changed what
-  let rows, rbErr; const cl = await pool.connect();
+  let rows, rbErr, closing = null; const cl = await pool.connect();
   try { await cl.query("BEGIN"); await cl.query("SELECT set_config('tcd.uid', $1, true)", [String(req.user.id)]);
+    // Closing and reopening: firm admins only, and closing checks what's still open on the case (Steve, Nov 20, 2026)
+    if ("stage" in c) {
+      const cur = (await cl.query("SELECT * FROM cases WHERE id=$1 AND firm_id=$2 FOR UPDATE", [+req.params.id, req.user.firm_id])).rows[0];
+      if (cur) closing = await closeGate(req, cur, c, cl);
+    }
+    const cols = Object.keys(c);
     ({ rows } = await cl.query(`UPDATE cases SET ${cols.map((k, i) => `${k}=$${i + 3}`).join(",")}, updated_at=now() WHERE id=$1 AND firm_id=$2 RETURNING *`,
       [+req.params.id, req.user.firm_id, ...cols.map(k => c[k])]));
     await cl.query("COMMIT"); }
-  catch (e) { await cl.query("ROLLBACK").catch(x => { rbErr = x; }); if (e.code === "23505") return res.status(409).json({ error: "That cause # is already on another case in your firm for this county." }); throw e; }
+  catch (e) { await cl.query("ROLLBACK").catch(x => { rbErr = x; }); if (e.code === "23505") return res.status(409).json({ error: "That cause # is already on another case in your firm for this county." }); if (e.reply) return res.status(e.status).json(e.reply); throw e; }
   finally { cl.release(rbErr); }   // a connection that couldn't roll back is closed, not reused
   if (!rows[0]) return res.status(404).json({ error: "Not found" });
+  if (closing && closing.override) await audit(req, "case_close_override", { case_id: rows[0].id, reason: closing.override.reason, open: closing.override.open });
+  else if (closing && closing.closed) await audit(req, "case_closed", { case_id: rows[0].id });
+  if (closing && closing.reopened) await audit(req, "case_reopened", { case_id: rows[0].id, stage: rows[0].stage });
   // activity log: a next setting typed by a person (court emails and syncs record their own)
   if (was && (was.next_setting || null) !== (rows[0].next_setting || null)) await q("INSERT INTO case_changes(case_id, field, old_value, new_value, user_id) VALUES($1,'next_setting',$2,$3,$4)", [rows[0].id, was.next_setting, rows[0].next_setting, req.user.id]).catch(() => {});
-  await audit(req, "case_updated", { id: rows[0].id, fields: cols });   // fields only, never the note text
+  await audit(req, "case_updated", { id: rows[0].id, fields: Object.keys(c).filter(k => k !== "closed_why") });   // fields only, never the note text
   res.json({ case: rows[0] });
 }));
+// The court shows the case final but the admin isn't closing it (an appeal pending, a motion for new trial…): firm admins
+// may clear the ready-to-close flag with a reason; audited and shown in the Activity log. A new final court status flags it again.
+app.post("/api/cases/:id/close-ready/dismiss", requireAuth, wrap(async (req, res) => {
+  const cs = await caseSeen(req.user, req.params.id); if (!cs) return res.status(404).json(NOT_FOUND);
+  if (req.user.role !== "admin") return res.status(403).json({ error: "Only a firm admin can dismiss this.", code: "ADMIN_ONLY" });
+  let reason; try { reason = reasonOf((req.body || {}).reason, closeout.MIN_REASON); } catch (e) { return res.status(e.status).json(e.reply); }
+  if (!reason) return res.status(400).json({ error: `Give the reason (at least ${closeout.MIN_REASON} characters), e.g. "Appeal pending".`, code: "NEED_REASON" });
+  if (!cs.close_ready_at) return res.json({ ok: true });
+  await q("UPDATE cases SET close_ready_at=NULL, close_ready_why=NULL WHERE id=$1 AND firm_id=$2", [cs.id, req.user.firm_id]);
+  await audit(req, "close_ready_dismissed", { case_id: cs.id, reason, was: cs.close_ready_why });
+  res.json({ ok: true });
+}));
 app.post("/api/cases/:id/ack", requireAuth, wrap(async (req, res) => {
+  if (!(await caseSeen(req.user, req.params.id))) return res.status(404).json(NOT_FOUND);
   await q("UPDATE cases SET date_alert=NULL WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]);
   await audit(req, "date_change_ack", { id: +req.params.id });
   res.json({ ok: true });
@@ -656,8 +716,7 @@ app.get("/api/law/jobs/:id", requireAuth, wrap(async (req, res) => {
   res.json({ status: j.status, done: j.done, total: j.total, live: j.live, error: j.error || null, result: j.status === "done" ? j.result : undefined, created_at: j.created_at || null });
 }));
 app.post("/api/cases/:id/analyze", requireAuth, rateLimit({ windowMs: 60e3, max: 3, message: { error: "One analysis at a time — try again in a minute." } }), wrap(async (req, res) => {
-  const { rows } = await q("SELECT * FROM cases WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]);
-  const c = rows[0]; if (!c) return res.status(404).json({ error: "Not found" });
+  const c = await caseSeen(req.user, req.params.id); if (!c) return res.status(404).json(NOT_FOUND);
   const issues = typeof req.body?.issues === "string" ? req.body.issues.trim().slice(0, 1000) : c.issues;
   if (issues !== c.issues) await q("UPDATE cases SET issues=$2 WHERE id=$1", [c.id, issues]);
   try {
@@ -670,13 +729,16 @@ app.post("/api/cases/:id/analyze", requireAuth, rateLimit({ windowMs: 60e3, max:
   } catch (e) { res.status(e.status || 502).json({ error: e.message }); }
 }));
 app.get("/api/cases/:id/analysis", requireAuth, wrap(async (req, res) => {
+  if (!(await caseSeen(req.user, req.params.id))) return res.status(404).json(NOT_FOUND);
   const { rows } = await q("SELECT a.id, a.issues, a.result, a.created_at FROM analyses a JOIN cases c ON c.id=a.case_id WHERE a.case_id=$1 AND c.firm_id=$2 ORDER BY a.created_at DESC LIMIT 1", [+req.params.id, req.user.firm_id]);
   res.json({ analysis: rows[0] || null });
 }));
 app.post("/api/cases/:id/law-ack", requireAuth, wrap(async (req, res) => {
+  if (!(await caseSeen(req.user, req.params.id))) return res.status(404).json(NOT_FOUND);
   await q("UPDATE cases SET law_alert=NULL WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true });
 }));
 app.get("/api/cases/:id/changes", requireAuth, wrap(async (req, res) => {
+  if (!(await caseSeen(req.user, req.params.id))) return res.status(404).json(NOT_FOUND);
   const { rows } = await q("SELECT ch.* FROM case_changes ch JOIN cases c ON c.id=ch.case_id WHERE ch.case_id=$1 AND c.firm_id=$2 AND ch.field='next_setting' ORDER BY ch.at DESC LIMIT 50", [+req.params.id, req.user.firm_id]);
   res.json({ changes: rows });
 }));
@@ -687,8 +749,16 @@ app.post("/api/cases/watch-all", requireAuth, wrap(async (req, res) => {
   await audit(req, "watch_all", { user_id: uid, on: req.body?.on !== false, count: r.rowCount });
   res.json({ updated: r.rowCount });
 }));
+// Deleting a case: firm admins only, and only a case with nothing that must be kept (Nov 20, 2026). A closed case, or one with
+// logged conversations, invoices, time or trust entries, is closed instead, never deleted.
+const KEEP = "This case has a record that must be kept. Close it instead.";
 app.delete("/api/cases/:id", requireAuth, wrap(async (req, res) => {
-  const r = await q("DELETE FROM cases WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]);
+  const cs = await caseSeen(req.user, req.params.id); if (!cs) return res.status(404).json(NOT_FOUND);
+  if (req.user.role !== "admin") return res.status(403).json({ error: "Only a firm admin can delete a case.", code: "ADMIN_ONLY" });
+  const kept = cs.stage === "Closed" || (await q(`SELECT EXISTS (SELECT 1 FROM case_convos WHERE case_id=$1) OR EXISTS (SELECT 1 FROM invoices WHERE case_id=$1)
+    OR EXISTS (SELECT 1 FROM time_entries WHERE case_id=$1) OR EXISTS (SELECT 1 FROM trust_tx WHERE case_id=$1) AS k`, [cs.id])).rows[0].k;
+  if (kept) return res.status(400).json({ error: KEEP, code: "KEEP_RECORD" });
+  const r = await q("DELETE FROM cases WHERE id=$1 AND firm_id=$2", [cs.id, req.user.firm_id]);
   await audit(req, "case_deleted", { id: +req.params.id });
   res.json({ ok: r.rowCount > 0 });
 }));
@@ -719,11 +789,17 @@ app.post("/api/cases/import", requireAuth, wrap(async (req, res) => {
     const county = COUNTIES.find(x => x.toLowerCase() === String(c.county || "").toLowerCase().replace(/\s*county$/, ""));
     if (!county || !c.cause_no) { skipped.push(`${c.cause_no || "?"}: missing county/cause #`); continue; }
     if (!(req.user.counties || []).includes(county)) { skipped.push(`${c.cause_no}: ${county} not in your counties`); continue; }
+    if (c.stage === "Closed" && req.user.role !== "admin") { skipped.push(`${c.cause_no}: only a firm admin can add a closed case`); continue; }
+    // a final court status in the file (Closed, Disposed…): a firm admin's import is closed; anyone else's stays active,
+    // flagged for the admin's close-out by the database, without the new-case to-dos
+    const fin = await isFinal(c.status);
+    if (fin && req.user.role === "admin" && c.stage !== "Closed") { if (c.stage) c.stage_before_close = c.stage; c.stage = "Closed"; }
+    if (c.stage === "Closed") c.closed_why = `Imported as closed by ${req.user.name}`;
     c.county = county;
     const cols = Object.keys(c);
     const ins = await q(`INSERT INTO cases(firm_id,user_id,source,${cols.join(",")}) VALUES($1,$2,'csv',${cols.map((_, i) => "$" + (i + 3)).join(",")}) ON CONFLICT DO NOTHING RETURNING *`,
       [req.user.firm_id, req.user.id, ...cols.map(k => c[k])]);
-    if (ins.rowCount) { added++; await practice.onCaseCreated(ins.rows[0], req.user.id); } else skipped.push(`${c.cause_no}: already in list`);
+    if (ins.rowCount) { added++; if (ins.rows[0].stage !== "Closed" && !fin) await practice.onCaseCreated(ins.rows[0], req.user.id); } else skipped.push(`${c.cause_no}: already in list`);
   }
   await audit(req, "cases_imported", { added, skipped: skipped.length });
   res.json({ added, skipped });
@@ -1068,6 +1144,7 @@ app.get("/api/inbox", requireAuth, wrap(async (req, res) => {
 }));
 app.post("/api/inbox/read-all", requireAuth, wrap(async (req, res) => { await q("UPDATE inbound_emails SET read_at=now() WHERE user_id=$1 AND read_at IS NULL", [req.user.id]); res.json({ ok: true }); }));
 app.post("/api/cases/:id/filing-ack", requireAuth, wrap(async (req, res) => {
+  if (!(await caseSeen(req.user, req.params.id))) return res.status(404).json(NOT_FOUND);
   await q("UPDATE cases SET filing_alert=NULL WHERE id=$1 AND firm_id=$2", [+req.params.id, req.user.firm_id]); res.json({ ok: true });
 }));
 
@@ -1142,13 +1219,14 @@ app.post("/api/ingest/done", ingestAuth, wrap(async (req, res) => {
 app.get("/api/research", requireAuth, wrap(async (req, res) => {
   const params = [req.user.id]; let w = "r.user_id=$1";
   if (req.query.case_id) { params.push(+req.query.case_id); w += " AND r.case_id=$2"; }
-  const { rows } = await q(`SELECT r.*, c.style AS case_style, c.cause_no FROM saved_research r LEFT JOIN cases c ON c.id=r.case_id WHERE ${w} ORDER BY r.created_at DESC`, params);
+  const cond = access.caseCond(req.user, "c", params);   // a case this person can no longer see: no name or cause #
+  const { rows } = await q(`SELECT r.*, c.style AS case_style, c.cause_no FROM saved_research r LEFT JOIN cases c ON c.id=r.case_id AND ${cond} WHERE ${w} ORDER BY r.created_at DESC`, params);
   res.json({ research: rows });
 }));
 app.post("/api/research", requireAuth, wrap(async (req, res) => {
   const { case_id, cluster_id, case_name, citation, note } = req.body || {};
   if (!cluster_id) return res.status(400).json({ error: "Missing opinion" });
-  if (case_id && !(await q("SELECT 1 FROM cases WHERE id=$1 AND firm_id=$2", [case_id, req.user.firm_id])).rowCount) return res.status(404).json({ error: "Case not found" });
+  if (case_id && !(await caseSeen(req.user, case_id))) return res.status(404).json({ error: "Case not found" });
   const { rows } = await q("INSERT INTO saved_research(user_id,case_id,cluster_id,case_name,citation,note) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",
     [req.user.id, case_id || null, cluster_id, case_name, citation, note]);
   res.json({ saved: rows[0] });
@@ -1163,6 +1241,7 @@ require("./mailbox").mount(app, { requireAuth, wrap, audit });   // full mail cl
 require("./discovery").mount(app, { requireAuth, wrap, audit });   // discovery responses: split, AI draft, attorney approves, serve
 require("./dictate").mount(app, { requireAuth, wrap });   // dictation: AI fixes grammar, the person chooses to insert it
 require("./convos").mount(app, { requireAuth, wrap, audit });   // conversation log on each case
+closeout.mount(app, { requireAuth, wrap });   // close-out checklist before a firm admin closes a case
 require("./activity").mount(app, { requireAuth, wrap });   // activity log: everything on a case in one timeline
 require("./ai").mount(app, { requireAuth, requireAdmin, wrap, audit });   // Firm Settings → AI (Claude): the firm's key, Test key, usage per person, limits
 require("./assistant").mount(app, { requireAuth, requireAdmin, wrap, audit });   // Case Desk Assistant (read-only) and the daily brief

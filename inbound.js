@@ -183,7 +183,7 @@ async function processEmail(u, { from = "", subject = "", text, html, ext_id = n
       const excerpt = i >= 0 ? body.slice(Math.max(0, i - 60), i + 200).replace(/\s+/g, " ").trim() : "";
       await q("UPDATE cases SET filing_alert=$2, filing_alert_at=now(), updated_at=now(), style=COALESCE(style,$3), court=COALESCE(court,$4) WHERE id=$1",
         [r.id, `${line}${excerpt && !parsed.filing_desc ? " — " + excerpt : ""}`.slice(0, 600), parsed.style || null, parsed.court_name || null]);
-      // The clerk/court says the case is disposed (not an e-filing of a proposed judgment): record it as the court status, which moves the case to Closed.
+      // The clerk/court says the case is disposed (not an e-filing of a proposed judgment): record it as the court status, which flags the case for the firm admin to close out (it no longer closes by itself, Nov 20, 2026).
       if ((r.c === parsed.cause_no || String(subject).toUpperCase().includes(r.c)) && !/efiletexas|tylertech|tylerhost/i.test(from)
           && /notice of (final )?disposition|(this|the above[- ]?(styled|entitled|referenced|numbered)?) (case|cause) (has been|was|is) (finally )?(disposed|closed|dismissed)/i.test(subject + "\n" + body.slice(0, 4000))
           && !/proposed|motion for/i.test(subject))

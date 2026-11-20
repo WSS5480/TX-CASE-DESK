@@ -3,7 +3,7 @@
 // Everything is scoped to the signed-in user's firm.
 const express = require("express");
 const crypto = require("crypto");
-const { q } = require("./db");
+const { q, isFinal } = require("./db");
 const box = require("./crypto-box");
 const deadlines = require("./deadlines");
 const access = require("./access");
@@ -285,8 +285,9 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
 
   // ===================== Case hub (everything about one case) =====================
   R.get("/cases/:id/hub", requireAuth, wrap(async (req, res) => {
-    const c = (await q("SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE c.id=$1 AND c.firm_id=$2", [+req.params.id, req.user.firm_id])).rows[0];
-    if (!c) return res.status(404).json({ error: "Case not found" });
+    const hp = [+req.params.id, req.user.firm_id], hcond = access.caseCond(req.user, "c", hp);   // only a case this person may see
+    const c = (await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE c.id=$1 AND c.firm_id=$2 AND ${hcond}`, hp)).rows[0];
+    if (!c) return res.status(404).json({ error: "Not found" });
     const [contacts, tasks, docs, time, invoices, team, emails] = await Promise.all([
       q("SELECT ct.*, cc.role, coalesce((SELECT sum(amount) FROM trust_tx t WHERE t.contact_id=ct.id),0) AS trust FROM case_contacts cc JOIN contacts ct ON ct.id=cc.contact_id WHERE cc.case_id=$1 ORDER BY cc.role, ct.name", [c.id]),
       q("SELECT t.*, u.name AS assignee_name FROM tasks t LEFT JOIN users u ON u.id=t.assignee WHERE t.case_id=$1 ORDER BY t.done, t.due_date NULLS LAST, t.id", [c.id]),
@@ -300,6 +301,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     ]);
     const events = await calendarItems(req.user.firm_id, { from: addDays(today(), -365), to: addDays(today(), 1500), caseId: c.id });
     const law = req.user.role !== "paralegal";   // billing stays with attorneys
+    if (!access.trustOk(req.user)) for (const x of contacts.rows) delete x.trust;   // trust balances: trust access only (paralegals never)
     res.json({ case: c, contacts: contacts.rows, tasks: tasks.rows, documents: docs.rows, time: law ? time.rows : [], invoices: law ? invoices.rows : [], emails: emails.rows, events,
       team: team.rows, can_team: access.seesFirm(req.user) || c.user_id === req.user.id });
   }));
@@ -343,8 +345,9 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   const templates = require("./templates");
   R.get("/templates", requireAuth, (req, res) => res.json({ templates: templates.list() }));
   R.get("/cases/:id/templates/:key", requireAuth, wrap(async (req, res) => {
-    const c = (await q("SELECT c.*, u.name AS attorney, u.bar_number, u.email AS attorney_email FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE c.id=$1 AND c.firm_id=$2", [+req.params.id, req.user.firm_id])).rows[0];
-    if (!c) return res.status(404).send("Case not found");
+    const tp = [+req.params.id, req.user.firm_id], tcond = access.caseCond(req.user, "c", tp);   // only a case this person may see
+    const c = (await q(`SELECT c.*, u.name AS attorney, u.bar_number, u.email AS attorney_email FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE c.id=$1 AND c.firm_id=$2 AND ${tcond}`, tp)).rows[0];
+    if (!c) return res.status(404).send("Not found");
     const contacts = (await q("SELECT ct.*, cc.role FROM case_contacts cc JOIN contacts ct ON ct.id=cc.contact_id WHERE cc.case_id=$1", [c.id])).rows;
     const events = await calendarItems(req.user.firm_id, { from: today(), to: addDays(today(), 1500), caseId: c.id });
     const f = (await q("SELECT name, address, phone, fax, website, logo, logo_mime, logo_w, logo_h FROM firms WHERE id=$1", [req.user.firm_id])).rows[0] || {};
@@ -418,7 +421,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
       lim ? q(`SELECT coalesce(sum(p.amount),0) AS v FROM payments p JOIN invoices i ON i.id=p.invoice_id WHERE p.firm_id=$1 AND p.on_date >= date_trunc('month', current_date) AND i.case_id IN (${caseIds})`, cp)
         : q(`SELECT coalesce(sum(p.amount),0) AS v FROM payments p JOIN invoices i ON i.id=p.invoice_id WHERE p.firm_id=$1 AND p.on_date >= date_trunc('month', $2::date)`, [firm, t]),
       q(`SELECT coalesce(sum(amount),0) AS v FROM trust_tx WHERE firm_id=$1`, [firm]),
-      q(`SELECT count(*)::int n FROM cases c WHERE ${cw} AND (c.date_alert IS NOT NULL OR c.filing_alert IS NOT NULL OR c.law_alert IS NOT NULL)`, cp)
+      q(`SELECT count(*)::int n FROM cases c WHERE ${cw} AND (c.date_alert IS NOT NULL OR c.filing_alert IS NOT NULL OR c.law_alert IS NOT NULL OR c.close_ready_at IS NOT NULL)`, cp)
     ]);
     const upcoming = (await calendarItems(firm, { from: t, to: addDays(t, 14), userId, county, viewer: req.user })).filter(i => !i.done);
     const overdueDl = (await calendarItems(firm, { from: addDays(t, -60), to: addDays(t, -1), userId, county, viewer: req.user })).filter(i => !i.done && i.kind === "deadline" && i.src === "event");
@@ -775,10 +778,14 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
       const area = g(ix.area).toLowerCase();
       const type = /probate|estate|guardian/.test(area) ? "Probate" : /family|divorce|custody/.test(area) ? "Family" : /injury|accident/.test(area) ? "Civil – Personal Injury" : /contract|collection|debt/.test(area) ? "Civil – Contract"
         : /dtpa|consumer/.test(area) ? "Civil – DTPA / Consumer" : /real (estate|property)/.test(area) ? "Civil – Real Property" : /evict|landlord/.test(area) ? "Eviction" : /felony/.test(area) ? "Criminal – Felony" : /misdemeanor|dwi|criminal/.test(area) ? "Criminal – Misdemeanor" : null;
-      const ins = await q(`INSERT INTO cases(firm_id, user_id, county, cause_no, style, status, court, case_type, notes, source) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'import') ON CONFLICT(firm_id,county,cause_no) DO NOTHING RETURNING *`,
-        [req.user.firm_id, req.user.id, county, cause, g(ix.style) || null, g(ix.status) || null, g(ix.court) || null, type, g(ix.area) ? `Practice area: ${g(ix.area)}` : null]);
+      // a matter whose status is final (Closed, Disposed…): a firm admin imports it as Closed; anyone else imports it active,
+      // flagged for the admin's close-out (the database flags it), without the new-case to-dos
+      const fin = await isFinal(g(ix.status)), asClosed = fin && req.user.role === "admin";
+      const ins = await q(`INSERT INTO cases(firm_id, user_id, county, cause_no, style, status, court, case_type, notes, source, stage, closed_why) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'import',$10,$11) ON CONFLICT(firm_id,county,cause_no) DO NOTHING RETURNING *`,
+        [req.user.firm_id, req.user.id, county, cause, g(ix.style) || null, g(ix.status) || null, g(ix.court) || null, type, g(ix.area) ? `Practice area: ${g(ix.area)}` : null,
+          asClosed ? "Closed" : null, asClosed ? `Imported as closed by ${req.user.name}` : null]);
       if (!ins.rows[0]) { skipped++; continue; }
-      added++; await onCaseCreated(ins.rows[0], req.user.id);
+      added++; if (!fin) await onCaseCreated(ins.rows[0], req.user.id);
       const client = g(ix.client);
       if (client) {
         let ct = (await q("SELECT id FROM contacts WHERE firm_id=$1 AND lower(name)=lower($2) LIMIT 1", [req.user.firm_id, client])).rows[0];

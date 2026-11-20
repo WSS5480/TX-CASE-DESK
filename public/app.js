@@ -846,12 +846,12 @@ async function casesView() {
   if (me.role === "admin" && !firmUsers) { try { firmUsers = (await api("/api/firm/users")).users; } catch (e) { firmUsers = []; } }
   if (__v !== viewSeq) return;   // the person already opened another screen
   app.innerHTML = `
-  ${data.alerts ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4"><b>${data.alerts} case alert${data.alerts === 1 ? "" : "s"}</b> (court dates, court emails, new case law). <a class="link" id="seeAlerts">Show them</a></div>` : ""}
+  ${data.alerts ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4"><b>${data.alerts} case alert${data.alerts === 1 ? "" : "s"}</b> (court dates, court emails, new case law, cases ready to close). <a class="link" id="seeAlerts">Show them</a></div>` : ""}
   ${!me.counties.length ? `<div class="card"><b>Pick your counties first.</b> <span class="mute">You only see and add cases in counties you practice in.</span></div>` : ""}
   <div class="card"><div class="mute">Your counties</div><div style="font-weight:600">${esc(me.counties.join(", ") || "None selected")}</div>
    <div class="mute" style="margin-top:4px">Auto-pull: connect under <a class="link" id="goCourt">Court Logins</a> (live: ${esc(Object.entries(META.connectors).filter(([, v]) => v.status !== "blocked").map(([k]) => k).join(", ") || "none right now — use re:SearchTX alerts")}). Other counties: add cases below or import a CSV.</div></div>
   <div class="card"><div class="grid">
-   <div><label>Show</label><select id="v"><option value="mine">${me.sees_firm ? "My cases" : "My cases (and cases I'm on)"}</option>${me.sees_firm && me.firm_kind !== "solo" ? `<option value="firm">Whole firm (my counties)</option>` : ""}<option value="tracked">Tracked cases</option><option value="watched">Watching court dates</option><option value="alerts">Alerts (dates, filings, case law)</option><option value="closed">Closed cases</option></select></div>
+   <div><label>Show</label><select id="v"><option value="mine">${me.sees_firm ? "My cases" : "My cases (and cases I'm on)"}</option>${me.sees_firm && me.firm_kind !== "solo" ? `<option value="firm">Whole firm (my counties)</option>` : ""}<option value="tracked">Tracked cases</option><option value="watched">Watching court dates</option><option value="alerts">Alerts (dates, filings, case law, ready to close)</option><option value="closed">Closed cases</option></select></div>
    ${me.role === "admin" ? `<div><label>Attorney</label><select id="af2"><option value="">All attorneys</option>${(firmUsers || []).filter(u => u.role !== "paralegal").map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("")}</select></div>` : ""}
    <div><label>County</label><select id="cf"><option value="">All my counties</option>${me.counties.map(c => `<option>${esc(c)}</option>`).join("")}</select></div>
    <div><label>Case type</label><select id="tf"><option value="">All types</option>${TYPES.map(t => `<option>${t}</option>`).join("")}</select></div>
@@ -883,7 +883,8 @@ async function casesView() {
   };
   cs.forEach(c => {
     const el = $(`#case-${c.id}`);
-    const ro = el.querySelector("[data-a=reopen]"); if (ro) ro.onclick = async () => { try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { stage: c.stage_before_close && c.stage_before_close !== "Closed" ? c.stage_before_close : "" } }); toast("Reopened — back on the active list"); casesView(); } catch (e) { fail(e); } };
+    const cob = el.querySelector("[data-a=closeout]"); if (cob) cob.onclick = async () => { if (!window.caseHub) return; await caseHub(c.id); const g = document.getElementById("readyGo"); if (g) g.click(); };
+    const ro = el.querySelector("[data-a=reopen]"); if (ro) ro.onclick = async () => { if (!confirm("Reopen this case? It goes back on the active list.")) return; try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { stage: c.stage_before_close && c.stage_before_close !== "Closed" ? c.stage_before_close : "" } }); toast("Reopened — back on the active list"); casesView(); } catch (e) { fail(e); } };
     el.querySelector("[data-a=track]").onclick = async () => { try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { tracked: !c.tracked } }); casesView(); } catch (e) { fail(e); } };
     el.querySelector("[data-a=law]").onclick = () => { law.q = (c.case_type || "").replace(/^.*– /, ""); law.results = null; law.open = null; tab = "law"; renderNav(); lawView(true); };
     el.querySelector("[data-a=edit]").onclick = () => { el.innerHTML = caseForm(c); bindCaseForm(el.querySelector("form"), c); };
@@ -903,7 +904,8 @@ function caseCard(c) {
   const pre = /^PRE-/.test(c.cause_no || ""), closed = c.stage === "Closed";
   return `<div class="card" id="case-${c.id}"><div class="row">${c.stage ? `<span class="tag stg">${esc(c.stage)}</span>` : ""}${c.status ? `<span class="tag ${st}">${esc(c.status)}</span>` : ""}${c.tracked ? `<span class="tag y">★ Tracked</span>` : ""}<span class="mute">${esc(c.county)} County${c.court ? " · " + esc(c.court) : ""}</span></div>
    <h3 style="margin-top:6px">${esc(c.style || c.cause_no)}</h3>
-   ${closed ? `<div class="closedb"><span><b>Closed</b>${c.closed_at ? " " + esc(new Date(c.closed_at).toLocaleDateString()) : ""}${c.closed_why ? " · " + esc(c.closed_why) : ""}</span><button type="button" class="btn sm ghost" data-a="reopen">Reopen</button></div>` : ""}
+   ${closed ? `<div class="closedb"><span><b>Closed</b>${c.closed_at ? " " + esc(new Date(c.closed_at).toLocaleDateString()) : ""}${c.closed_why ? " · " + esc(c.closed_why) : ""}</span>${me.role === "admin" ? `<button type="button" class="btn sm ghost" data-a="reopen">Reopen</button>` : ""}</div>` : ""}
+   ${c.close_ready_at && !closed ? `<div class="readyb"><span><b>Court shows final — ${me.role === "admin" ? "ready for admin close-out." : "ask your firm admin to close it out."}</b>${c.close_ready_why ? ` <span style="color:var(--ink2)">${esc(c.close_ready_why)}</span>` : ""}</span>${me.role === "admin" ? `<button type="button" class="btn sm" data-a="closeout">Close out</button>` : ""}</div>` : ""}
    <div class="kv"><div><b>Cause #</b>${pre ? "Not filed yet" : esc(c.cause_no)}</div><div><b>Type</b>${esc(c.case_type || "—")}</div><div><b>Filed</b>${c.filed_date ? String(c.filed_date).slice(0, 10) : "—"}</div>
    <div><b>Next</b>${esc(c.next_setting || "—")}</div><div><b>Appeals to</b>${esc(META.appeals[c.county] || "—")}</div><div><b>Attorney</b>${esc(c.attorney || "—")}</div></div>
    ${c.date_alert ? `<div class="card" style="background:#fdf1d8;border-color:#f1dfa4;margin:10px 0 0;padding:10px"><b>Court date changed</b><div>${esc(c.date_alert)}</div><div class="mute">${c.date_alert_at ? new Date(c.date_alert_at).toLocaleString() : ""}</div><button class="btn sm" data-a="ack" style="margin-top:6px">Got it</button></div>` : ""}
@@ -923,7 +925,7 @@ function caseForm(c) {
   const counties = c ? [c.county] : me.counties;
   return `<form><div class="grid">
    <div><label>County</label><select name="county" ${c ? "disabled" : ""}>${counties.map(x => `<option ${c?.county === x ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></div>
-   <div><label for="cfStage${c ? c.id : ""}">Stage</label><select name="stage" id="cfStage${c ? c.id : ""}"><option value="">Choose a stage</option>${(META.stages || []).map(t => `<option ${c?.stage === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></div>
+   <div><label for="cfStage${c ? c.id : ""}">Stage</label><select name="stage" id="cfStage${c ? c.id : ""}"${c?.stage === "Closed" ? ` disabled aria-describedby="cfStageN${c.id}"` : ""}><option value="">Choose a stage</option>${(META.stages || []).filter(t => t !== "Closed" || c?.stage === "Closed" || (!c && me.role === "admin")).map(t => `<option ${c?.stage === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>${c?.stage === "Closed" ? `<div class="mute" id="cfStageN${c.id}" style="font-size:12.5px;margin-top:2px">${me.role === "admin" ? "Reopen it from the case card or the case page." : "Closed. Only a firm admin can reopen it."}</div>` : c ? `<div class="mute" style="font-size:12.5px;margin-top:2px">To close: open the case${me.role === "admin" ? " and pick Closed" : " (firm admin only)"}.</div>` : ""}</div>
    <div><label>Cause #${c && /^PRE-/.test(c.cause_no) ? " (add it once filed)" : c ? "" : " (blank if not filed yet)"}</label><input name="cause_no" value="${c && /^PRE-/.test(c.cause_no) ? "" : v("cause_no")}" ${c && !/^PRE-/.test(c.cause_no) ? "disabled" : ""} placeholder="${c && /^PRE-/.test(c.cause_no) ? "Not filed yet" : "e.g. C-1234-26-G"}"></div>
    <div class="full"><label>Style (e.g. Smith v. Jones)</label><input name="style" value="${v("style")}"></div>
    <div><label>Court</label><input name="court" value="${v("court")}" placeholder="275th District Court"></div>
@@ -934,7 +936,7 @@ function caseForm(c) {
    <div class="full"><label>Issues (comma-separated — used for case-law analysis)</label><input name="issues" value="${v("issues")}" placeholder="slip and fall, constructive notice, grocery store"></div>
    <div class="full"><label>Notes</label>${richEditor("notes", c?.notes || "")}</div>
    ${c ? "" : `<div class="full"><label><input type="checkbox" name="tracked" style="width:auto"> Track this case</label></div>`}
-  </div><div class="err"></div><div class="row"><button class="btn">${c ? "Save" : "Add case"}</button>${c ? `<button type="button" class="btn ghost" data-a="cancel">Cancel</button><button type="button" class="btn danger" data-a="del">Delete</button>` : ""}</div></form>`;
+  </div><div class="err"></div><div class="row"><button class="btn">${c ? "Save" : "Add case"}</button>${c ? `<button type="button" class="btn ghost" data-a="cancel">Cancel</button>${me.role === "admin" ? `<button type="button" class="btn danger" data-a="del">Delete</button>` : ""}` : ""}</div></form>`;
 }
 function bindCaseForm(form, c) {
   if (!form) return;

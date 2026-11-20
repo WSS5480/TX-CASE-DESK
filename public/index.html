@@ -558,6 +558,43 @@ body.devv .shell{min-height:calc(100vh - var(--devh,44px))}
 @media (max-width:999px){.dpane{bottom:calc(var(--tabs) + 8px + var(--safe))}body.timing .dpane{bottom:calc(var(--tabs) + 64px + var(--safe))}}
 body.dpaneon .toast{bottom:auto;top:calc(72px + env(safe-area-inset-top,0px))}   /* the dictation panel owns the bottom of the screen */
 input.hasmic,textarea.hasmic{padding-right:44px}
+/* Conversation log: deleted entries (admins only see them) and earlier versions of an edited entry */
+.cvrow.cvdel{opacity:.62}
+.cvrow.cvdel .cvb{text-decoration:line-through;text-decoration-color:rgba(0,0,0,.35)}
+.cvdeln{font-size:12.5px;margin-top:4px;color:var(--bad);font-weight:600}
+.cvver{margin:8px 0 2px;padding:8px 10px;border-left:3px solid var(--line);background:var(--chip);border-radius:6px}
+.cvver+.cvver{margin-top:6px}
+.cvver .cvb{font-size:14px}
+.cvvh{font-size:12.5px;color:var(--ink2);display:flex;flex-wrap:wrap;gap:2px 8px}
+/* Close-out checklist (firm admins close a case) */
+.cobox{margin:12px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+.cobox h3{margin:0 0 4px;font-size:16px}
+.coit{display:flex;gap:10px;align-items:flex-start;border-top:1px solid var(--line2);padding:8px 0}
+.coit:first-of-type{border-top:0}
+.coit .coic{flex:none;width:24px;height:24px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px}
+.coit.ok .coic{background:var(--ok-t);color:var(--ok)}
+.coit.no .coic{background:var(--bad-t);color:var(--bad)}
+.coit .cot{flex:1;min-width:0;overflow-wrap:anywhere;font-size:14px}
+.coit .cot b{display:block;font-weight:600}
+.coit.no .cot b{color:var(--bad)}
+.cowarn{margin:8px 0;padding:10px 12px;border-radius:8px;background:var(--bad-t);color:var(--bad);font-size:14px;overflow-wrap:anywhere}
+.cobox textarea{width:100%;box-sizing:border-box;min-height:70px}
+.cobtns{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.cobtns .btn{min-height:44px}
+.readyb{margin:8px 0 0;padding:10px 12px;border-radius:8px;background:var(--warn-t);color:var(--warn);font-size:14px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between}
+.readyb b{font-weight:600}
+.readyb>span{min-width:0;overflow-wrap:anywhere}
+#rdForm{margin-top:8px}
+#rdForm textarea{width:100%;box-sizing:border-box}
+.coinfo{display:block;margin-top:2px;font-style:italic}
+.cvvb{display:flex;flex-wrap:wrap;gap:6px 14px;margin:6px 0 2px;font-size:13px}
+.hbback{margin:8px 0}
+.hbback .btn{min-height:44px}
+.cvrow.hl{background:var(--warn-t);border-radius:8px;transition:background .6s}
+/* a long reason (closing over open items, court status) wraps instead of pushing the page sideways */
+.chips{min-width:0}
+.chips .tag{max-width:100%;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.closedb>span{min-width:0;flex:1 1 200px;overflow-wrap:anywhere}
 .closedb{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin:8px 0 0;padding:8px 10px;border-radius:8px;background:#ecebe6;font-size:14px;color:var(--ink2)}
 
 /* Discovery responses */

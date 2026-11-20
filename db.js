@@ -476,36 +476,52 @@ CREATE TABLE IF NOT EXISTS discovery_items (
   added_by_hand BOOLEAN DEFAULT false
 );
 CREATE INDEX IF NOT EXISTS discovery_items_set ON discovery_items(set_id, kind, n);
--- Closed cases: a final disposition in the court's own record moves the case to stage Closed (off the active list).
+-- Closed cases: stage Closed takes a case off the active list. Since Nov 20, 2026 (Steve) only a firm admin closes a case
+-- (server.js checks the role and the close-out list); a final disposition in the court's record no longer closes it,
+-- it flags it "ready for admin close-out" (close_ready_at / close_ready_why). Cases already Closed stay Closed.
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ;
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS closed_why TEXT;
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS stage_before_close TEXT;
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS close_ready_at TIMESTAMPTZ;   -- the court shows a final disposition: an admin should close it out
+ALTER TABLE cases ADD COLUMN IF NOT EXISTS close_ready_why TEXT;
+-- a court status that means the case is over (Disposed, Dismissed, Final judgment, Nonsuit, Closed), not a motion or partial ruling
+CREATE OR REPLACE FUNCTION tcd_final_status(s TEXT) RETURNS boolean AS $$
+  SELECT s IS NOT NULL
+     AND s ~* '(dispos|dismiss|final judgment|judgment (signed|entered|rendered)|non-?suit|\\mclosed\\M)'
+     AND s !~* '(reopen|re-open|not |pending|motion|proposed|undispos|in part|partial|as to|interlocutory|docket|intent|hearing|reinstat)'
+$$ LANGUAGE sql IMMUTABLE;
 CREATE OR REPLACE FUNCTION tcd_case_close() RETURNS trigger AS $$
+DECLARE st_changed BOOLEAN := TG_OP = 'INSERT';
 BEGIN
-  -- the court status turned final (Disposed, Dismissed, Final judgment, Nonsuit, Closed) -> Closed, remembering the stage it had
-  IF NEW.status IS NOT NULL AND (TG_OP = 'INSERT' OR NEW.status IS DISTINCT FROM OLD.status)
-     AND NEW.status ~* '(dispos|dismiss|final judgment|judgment (signed|entered|rendered)|non-?suit|\\mclosed\\M)'
-     AND NEW.status !~* '(reopen|re-open|not |pending|motion|proposed|undispos|in part|partial|as to|interlocutory|docket|intent|hearing|reinstat)'
-     AND NEW.stage IS DISTINCT FROM 'Closed' THEN
-    NEW.stage_before_close := NEW.stage; NEW.stage := 'Closed'; NEW.closed_at := now(); NEW.closed_why := 'Court status: ' || NEW.status;
-  ELSIF TG_OP = 'UPDATE' AND NEW.stage IS DISTINCT FROM OLD.stage THEN
+  IF TG_OP = 'UPDATE' THEN st_changed := NEW.status IS DISTINCT FROM OLD.status; END IF;
+  -- the court status turned final -> flag for the firm admin (never closes by itself); turned non-final -> flag cleared, but
+  -- only when the court (a court email or portal sync) says so: a person typing over the status never clears it (tcd.uid is set
+  -- by the app for a person's edit). Closing the case, or an admin dismissing the flag with a reason, also clears it.
+  IF st_changed THEN
+    IF tcd_final_status(NEW.status) THEN
+      IF NEW.stage IS DISTINCT FROM 'Closed' THEN NEW.close_ready_at := now(); NEW.close_ready_why := 'Court status: ' || NEW.status; END IF;
+    ELSIF COALESCE(current_setting('tcd.uid', true), '') = '' THEN NEW.close_ready_at := NULL; NEW.close_ready_why := NULL; END IF;
+  END IF;
+  IF TG_OP = 'UPDATE' AND NEW.stage IS DISTINCT FROM OLD.stage THEN
     IF NEW.stage = 'Closed' THEN NEW.closed_at := COALESCE(NEW.closed_at, now()); NEW.stage_before_close := COALESCE(NEW.stage_before_close, OLD.stage);
       IF NEW.closed_why IS NOT DISTINCT FROM OLD.closed_why THEN NEW.closed_why := 'Marked closed'; END IF;
-    ELSIF OLD.stage = 'Closed' THEN NEW.closed_at := NULL; NEW.closed_why := NULL; NEW.stage_before_close := NULL; END IF;   -- reopened
+      NEW.close_ready_at := NULL; NEW.close_ready_why := NULL;
+    ELSIF OLD.stage = 'Closed' THEN NEW.closed_at := NULL; NEW.closed_why := NULL; NEW.stage_before_close := NULL; END IF;   -- reopened (a firm admin only)
   ELSIF TG_OP = 'INSERT' AND NEW.stage = 'Closed' THEN NEW.closed_at := COALESCE(NEW.closed_at, now()); NEW.closed_why := COALESCE(NEW.closed_why, 'Marked closed');
+    NEW.close_ready_at := NULL; NEW.close_ready_why := NULL;
   END IF;
   RETURN NEW;
 END $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS tcd_case_close ON cases;
 CREATE TRIGGER tcd_case_close BEFORE INSERT OR UPDATE ON cases FOR EACH ROW EXECUTE FUNCTION tcd_case_close();
--- once: cases whose court status was already final before this existed move to Closed (a reopened case is never re-closed by this)
+-- once (ran in production Nov 8, 2026): cases whose court status was already final were moved to Closed then; they stay Closed.
+-- Since Nov 20, 2026 this never closes anything: on a database where it hasn't run yet it only flags those cases for the admin.
 CREATE TABLE IF NOT EXISTS tcd_once (k TEXT PRIMARY KEY, at TIMESTAMPTZ DEFAULT now());
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM tcd_once WHERE k = 'close_final_v2') THEN
     INSERT INTO tcd_once(k) VALUES ('close_final_v2') ON CONFLICT DO NOTHING;
-    UPDATE cases SET stage_before_close = stage, stage = 'Closed', closed_at = now(), closed_why = 'Court status: ' || status
-      WHERE stage IS DISTINCT FROM 'Closed' AND status ~* '(dispos|dismiss|final judgment|judgment (signed|entered|rendered)|non-?suit|\\mclosed\\M)'
-        AND status !~* '(reopen|re-open|not |pending|motion|proposed|undispos|in part|partial|as to|interlocutory|docket|intent|hearing|reinstat)';
+    UPDATE cases SET close_ready_at = now(), close_ready_why = 'Court status: ' || status
+      WHERE stage IS DISTINCT FROM 'Closed' AND close_ready_at IS NULL AND tcd_final_status(status);
   END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS audit_firm ON audit_log(firm_id, at DESC);
@@ -527,6 +543,22 @@ ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS direction TEXT;          -- in 
 ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS minutes INT;             -- how long it took
 ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS time_id INT REFERENCES time_entries(id) ON DELETE SET NULL;   -- billed as time
 ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS task_id INT REFERENCES tasks(id) ON DELETE SET NULL;         -- follow-up task
+-- The log can't be used to cover a mistake (Steve, Nov 20, 2026): only a firm admin deletes, and a delete only hides the entry
+-- (admins still see it, greyed); every edit keeps the wording it replaced.
+ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS deleted_by INT REFERENCES users(id) ON DELETE SET NULL;
+CREATE TABLE IF NOT EXISTS case_convo_versions (
+  id SERIAL PRIMARY KEY,
+  convo_id INT NOT NULL REFERENCES case_convos(id) ON DELETE CASCADE,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  at TIMESTAMPTZ, kind TEXT, with_name TEXT, contact_id INT, direction TEXT, minutes INT, body TEXT,   -- the entry as it was
+  logged_by INT REFERENCES users(id) ON DELETE SET NULL,    -- who first logged the entry
+  written_by INT REFERENCES users(id) ON DELETE SET NULL,   -- who wrote this wording (the logger, or the editor before)
+  written_at TIMESTAMPTZ,                                   -- when this wording was written
+  edited_by INT REFERENCES users(id) ON DELETE SET NULL,    -- who made the edit that replaced it
+  saved_at TIMESTAMPTZ DEFAULT now()                        -- when it was replaced (kept here)
+);
+CREATE INDEX IF NOT EXISTS case_convo_versions_convo ON case_convo_versions(convo_id, id DESC);
 -- Activity log: case changes (stage, court status, court, type, style, cause #, lead attorney) are recorded by the database itself,
 -- whoever or whatever made them (a person, a court email, a portal sync). The app fills in "by" for changes a person made.
 ALTER TABLE case_changes ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL;
@@ -625,7 +657,10 @@ ALTER TABLE assistant_briefs ADD COLUMN IF NOT EXISTS lang TEXT;   -- the assist
 async function migrate() { await pool.query(SCHEMA); }
 // Larger indexes are built in the background after start (CONCURRENTLY: never blocks the app writing to these tables).
 const LATE_INDEXES = [
-  ["audit_case", `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_case ON audit_log(firm_id, (COALESCE(detail->>'case', detail->>'case_id')), at DESC) WHERE action IN ('case_team_added','case_team_removed','convo_edit','convo_delete','document_shared','document_deleted','event_deleted','task_deleted','discovery_set_deleted')`],
+  // the Activity log's audit rows (activity.js AUD): team, conversations (edit, delete, restore), close-outs over open items,
+  // dismissed ready-to-close flags, documents, dates, tasks, discovery (Nov 20, 2026; replaces the older audit_case)
+  ["audit_case2", `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_case2 ON audit_log(firm_id, (COALESCE(detail->>'case', detail->>'case_id')), at DESC) WHERE action IN ('case_team_added','case_team_removed','convo_edit','convo_delete','convo_restore','case_close_override','close_ready_dismissed','document_shared','document_deleted','event_deleted','task_deleted','discovery_set_deleted')`],
+  ["audit_case_old", `DROP INDEX CONCURRENTLY IF EXISTS audit_case`, "audit_case2"],   // replaced by audit_case2: dropped only once that one is built and valid
   ["audit_case_added", `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_case_added ON audit_log(firm_id, (detail->>'id')) WHERE action='case_added'`],
   ["tasks_case", `CREATE INDEX CONCURRENTLY IF NOT EXISTS tasks_case ON tasks(case_id)`],
   ["events_case", `CREATE INDEX CONCURRENTLY IF NOT EXISTS events_case ON events(case_id)`],
@@ -633,12 +668,16 @@ const LATE_INDEXES = [
   ["documents_case", `CREATE INDEX CONCURRENTLY IF NOT EXISTS documents_case ON documents(case_id)`],
 ];
 async function lateIndexes() {
-  for (const [name, sql] of LATE_INDEXES) {
-    try {   // a build that was interrupted leaves an unusable index under the same name: drop it and build again
+  for (const [name, sql, needs] of LATE_INDEXES) {
+    try {
+      if (needs && !(await pool.query("SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE c.relname=$1 AND i.indisvalid", [needs])).rowCount) continue;   // a step that needs another index waits until that one is built
+      // a build that was interrupted leaves an unusable index under the same name: drop it and build again
       if ((await pool.query("SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE c.relname=$1 AND NOT i.indisvalid", [name])).rowCount) await pool.query(`DROP INDEX CONCURRENTLY IF EXISTS ${name}`);
       await pool.query(sql);
     } catch (e) { console.warn("[db] index", name + ":", e.message); }
   }
 }
 
-module.exports = { pool, migrate, lateIndexes, q: (text, params) => pool.query(text, params) };
+// the same "court shows the case is over" test the database trigger uses (tcd_final_status), for imports
+const isFinal = async status => !!status && (await pool.query("SELECT tcd_final_status($1) AS f", [String(status)])).rows[0].f;
+module.exports = { pool, migrate, lateIndexes, isFinal, q: (text, params) => pool.query(text, params) };

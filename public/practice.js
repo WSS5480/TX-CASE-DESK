@@ -10,6 +10,7 @@
   const KIND_TAG = { hearing: ["n", "Hearing"], deadline: ["a", "Deadline"], meeting: ["k", "Meeting"], event: ["k", "Event"] };
   const go = t => { tab = t; renderNav(); show(); };
   const isLawyer = () => me.role !== "paralegal";
+  const isAdmin = () => me.role === "admin";   // closing / reopening a case and deleting a logged conversation
   const firmToggle = () => me.sees_firm && me.firm_kind !== "solo";
   let people = null, caseCache = null, caseAt = 0;
   async function loadPeople() { if (!people) people = (await api("/api/firm/people")).people; return people; }
@@ -645,7 +646,7 @@
     const groups = [...new Set(rules.map(x => x.group))];
     const back = titleOf(tab);
     if (hub.id !== id) { hub.id = id; hub.sec = "overview"; }
-    const SECS = [["overview", "Overview"], ["talk", "Conversations", cv.convos.length], ["activity", "Activity log"], ["dates", "Dates", r.events.filter(e => e.date >= t && !e.done).length], ["people", "People", r.contacts.length], ["tasks", "Tasks", r.tasks.filter(x => !x.done).length], ["docs", "Documents", r.documents.length], ["discovery", "Discovery", dsc.sets.filter(x => x.status !== "sent").length || null]];
+    const SECS = [["overview", "Overview"], ["talk", "Conversations", cv.convos.filter(x => !x.deleted).length], ["activity", "Activity log"], ["dates", "Dates", r.events.filter(e => e.date >= t && !e.done).length], ["people", "People", r.contacts.length], ["tasks", "Tasks", r.tasks.filter(x => !x.done).length], ["docs", "Documents", r.documents.length], ["discovery", "Discovery", dsc.sets.filter(x => x.status !== "sent").length || null]];
     if (isLawyer()) SECS.push(["law", "Case law"], ["billing", "Time & billing"]);
     const st = c.status || "Open", stCls = /closed|dismiss|dispos/i.test(st) ? "k" : /new/i.test(st) ? "n" : "g";
     const up = r.events.filter(e => e.date >= t && !e.done), nextH = up.find(e => e.kind === "hearing");
@@ -663,7 +664,11 @@
           <div class="chips"><span class="tag ${stCls}">${esc(st)}</span>${c.case_type ? `<span class="tag k">${esc(c.case_type)}</span>` : ""}${c.watch_dates ? `<span class="tag n">Watching court dates</span>` : ""}${c.stage === "Closed" ? `<span class="tag k">Closed${c.closed_at ? " " + esc(new Date(c.closed_at).toLocaleDateString()) : ""}${c.closed_why ? " · " + esc(c.closed_why) : ""}</span>` : ""}</div></div>
         <div class="row acts">${isLawyer() ? `<button type="button" class="btn ghost" data-act="time">${ic("clock")}Log time</button>` : ""}<button type="button" class="btn ghost" data-act="draft">${ic("file")}Draft document</button><button type="button" class="btn" data-act="date">${ic("plus", 18, 2)}Add date</button></div></div>
       <div class="qa">${qaBtns.map(([k, v, i]) => `<button type="button" data-act="${k}">${ic(i, 22)}${v}</button>`).join("")}</div>
-      <dl class="cmeta"><div><dt><label for="hbStage" style="margin:0;font:inherit;color:inherit">Stage</label></dt><dd><select id="hbStage" class="stsel"><option value="">Not set</option>${(META.stages || []).map(x => `<option ${c.stage === x ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></dd></div><div><dt>Cause No.</dt><dd>${/^PRE-/.test(c.cause_no) ? "Not filed yet" : esc(c.cause_no)}</dd></div><div><dt>Court</dt><dd>${esc([c.court, c.county ? c.county + " County" : ""].filter(Boolean).join(", "))}</dd></div><div><dt>Attorney</dt><dd>${esc(c.attorney || "—")}</dd></div><div><dt>Appeals to</dt><dd>${esc(META.appeals[c.county] || "—")}</dd></div></dl>
+      <dl class="cmeta"><div><dt><label for="hbStage" style="margin:0;font:inherit;color:inherit">Stage</label></dt><dd><select id="hbStage" class="stsel"${c.stage === "Closed" && !isAdmin() ? ' disabled aria-describedby="hbStageN"' : ""}><option value="">Not set</option>${(META.stages || []).map(x => x === "Closed" && c.stage !== "Closed" && !isAdmin() ? `<option value="Closed" disabled>Closed (firm admin only)</option>` : `<option ${c.stage === x ? "selected" : ""}>${esc(x)}</option>`).join("")}</select>${c.stage === "Closed" && !isAdmin() ? `<div class="mute" id="hbStageN" style="font-size:12.5px;margin-top:2px">Only a firm admin can reopen it.</div>` : ""}</dd></div><div><dt>Cause No.</dt><dd>${/^PRE-/.test(c.cause_no) ? "Not filed yet" : esc(c.cause_no)}</dd></div><div><dt>Court</dt><dd>${esc([c.court, c.county ? c.county + " County" : ""].filter(Boolean).join(", "))}</dd></div><div><dt>Attorney</dt><dd>${esc(c.attorney || "—")}</dd></div><div><dt>Appeals to</dt><dd>${esc(META.appeals[c.county] || "—")}</dd></div></dl>
+      ${c.close_ready_at && c.stage !== "Closed" ? `<div class="readyb" id="readyB" role="status"><span><b>Court shows final — ${isAdmin() ? "ready for admin close-out." : "ask your firm admin to close it out."}</b>${c.close_ready_why ? ` <span style="color:var(--ink2)">${esc(c.close_ready_why)}</span>` : ""}</span>${isAdmin() ? `<span class="row" style="gap:8px"><button type="button" class="btn sm" id="readyGo">Close out</button><button type="button" class="btn sm ghost" id="readyNo" aria-expanded="false" aria-controls="rdForm">Dismiss</button></span>` : ""}</div>
+        ${isAdmin() ? `<div class="cobox" id="rdForm" hidden><label for="rdWhy">Why the case stays open (required, at least 10 characters)</label><textarea id="rdWhy" maxlength="500" rows="2" placeholder="e.g. Appeal pending in the 13th Court of Appeals"></textarea><div class="err" id="rdErr"></div>
+          <div class="cobtns"><button type="button" class="btn" id="rdGo" disabled>Dismiss the flag</button><button type="button" class="btn ghost" id="rdCancel">Cancel</button></div></div>` : ""}` : ""}
+      <div id="coBox"></div>
       <nav class="secnav" aria-label="Case sections">${SECS.map(([k, v, n]) => `<button type="button" data-sec-go="${k}"${hub.sec === k ? ' aria-current="page"' : ""}>${v}${n != null ? `<span>${n}</span>` : ""}</button>`).join("")}</nav>
       <div class="secsel"><label for="secSel">Section</label><select id="secSel">${SECS.map(([k, v, n]) => `<option value="${k}"${hub.sec === k ? " selected" : ""}>${v}${n != null ? ` (${n})` : ""}</option>`).join("")}</select></div>
       <div class="cols" data-sec="overview"><div class="cmain">
@@ -747,7 +752,61 @@
     $("#bk").onclick = $("#bk2").onclick = () => { subView = false; show(); };
     if (isLawyer()) wireAnalysis(c);
     // stage: one tap, saved right away
-    $("#hbStage").onchange = async e => { try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { stage: e.target.value } }); c.stage = e.target.value || null; toast(e.target.value ? `Stage: ${e.target.value}` : "Stage cleared"); } catch (err) { fail(err); e.target.value = c.stage || ""; } };
+    // Closed: firm admins only, through the close-out checklist; reopening (moving off Closed) is firm admins only too
+    $("#hbStage").onchange = async e => { const v = e.target.value;
+      if (v === "Closed" && c.stage !== "Closed") { e.target.value = c.stage || ""; if (!isAdmin()) return toast("Only a firm admin can close a case."); return coOpen(); }
+      if (c.stage === "Closed" && !isAdmin()) { e.target.value = "Closed"; return toast("Only a firm admin can reopen a closed case."); }
+      if (c.stage === "Closed" && !confirm("Reopen this case? It goes back on the active list.")) { e.target.value = "Closed"; return; }
+      try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: { stage: v } }); if (c.stage === "Closed") { toast("Reopened — back on the active list"); return caseHub(c.id); } c.stage = v || null; toast(v ? `Stage: ${v}` : "Stage cleared"); } catch (err) { fail(err); e.target.value = c.stage || ""; } };
+    const OPENL = { trust: "money in trust", invoices: "unpaid invoices", unbilled: "unbilled time or expenses", dates: "open deadlines or dates", tasks: "open to-dos" };
+    const FIXL = { trust: "Open trust", billing: "Go to Time & billing", dates: "Go to Dates", tasks: "Go to Tasks" };
+    // Jump to a part of this case page (a section, or one conversation entry) with a way back: the close-out checklist and the
+    // Activity log use it. The section itself is scrolled into view below the top bar (phones hide the section tabs).
+    const showAt = el => { if (!el) return; const tb = $("#top"), off = (tb ? Math.max(0, tb.getBoundingClientRect().bottom) : 0) + 8; window.scrollTo({ top: Math.max(0, el.getBoundingClientRect().top + window.scrollY - off) }); };
+    const jump = (sec, { cv, label, back } = {}) => {
+      $$("#app .hbback").forEach(x => x.remove());
+      setSec(sec);
+      const host = sec === "overview" ? null : $(`#app [data-sec="${sec}"]`);
+      let target = host || $(".chead");
+      if (cv) { const row = $(`#cvList [data-cv="${cv}"]`); if (row) { target = row; row.classList.add("hl"); setTimeout(() => row.classList.remove("hl"), 2400); } }
+      if (back) { const bar = document.createElement("div"); bar.className = "hbback"; bar.innerHTML = `<button type="button" class="btn sm ghost">${ic("back", 16, 2)}${esc(label)}</button>`;
+        bar.querySelector("button").onclick = () => { bar.remove(); back(); };
+        if (host) host.prepend(bar); else $(".chead").before(bar);
+        if (!cv) target = bar; }
+      if (sec === "overview" && !cv) window.scrollTo({ top: 0 }); else showAt(target);
+      return target; };
+    const coOpen = async () => { const box = $("#coBox"); box.innerHTML = `<div class="cobox mute" role="status">Checking what's still open…</div>`;
+      let co; try { co = await api(`/api/cases/${c.id}/closeout`); } catch (e) { box.innerHTML = ""; return fail(e); }
+      if (__v !== viewSeq) return;
+      const open = co.items.filter(i => !i.clear);
+      box.innerHTML = `<section class="cobox" aria-labelledby="coH"><h3 id="coH">Close this case</h3><p class="mute" style="margin:0 0 6px;font-size:14px">Before a case is closed, everyone should be paid and nothing left open.</p>
+        <div id="coList">${(() => { const shown = new Set(); return co.items.map(i => { const fix = !i.clear && FIXL[i.fix] && (i.fix !== "billing" || isLawyer()) && !shown.has(i.fix) && shown.add(i.fix);   // one link per place (both billing checks share Time & billing)
+          return `<div class="coit ${i.clear ? "ok" : "no"}" data-co="${i.key}"><span class="coic" aria-hidden="true">${i.clear ? "✓" : "✗"}</span><div class="cot"><b>${esc(i.label)}<span class="sr">${i.clear ? ": clear" : ": not clear"}</span></b>${i.detail ? `<span class="mute">${esc(i.detail)}</span>` : ""}${i.info ? `<span class="mute coinfo">${esc(i.info)}</span>` : ""}${fix ? `<div><button type="button" class="lk" data-co-fix="${i.fix}">${FIXL[i.fix]}</button></div>` : ""}</div></div>`; }).join(""); })()}</div>
+        ${open.length ? `<div class="cowarn" role="alert" id="coWarn"><b>Still open: ${esc(open.map(i => OPENL[i.key] || i.label).join(", "))}.</b> You can close it anyway, but the reason is recorded on the case and in the Activity log.</div>
+          <label for="coWhy">Reason for closing with open items (required, at least ${co.min_reason} characters)</label><textarea id="coWhy" maxlength="500" rows="3" placeholder="e.g. Client paid in full by check; trust refund mailed 11/20"></textarea>` : `<div class="mute" style="font-size:14px;margin-top:4px">Everything is clear.</div>`}
+        <div class="err" id="coErr"></div>
+        <div class="cobtns"><button type="button" class="btn" id="coClose"${open.length ? " disabled" : ""}>Close case</button>${open.length ? `<button type="button" class="btn danger" id="coAnyway" disabled>Close anyway</button>` : ""}<button type="button" class="btn ghost" id="coCancel">Cancel</button></div></section>`;
+      const doClose = async (btn, reason) => { btn.disabled = true; $("#coErr").textContent = "";
+        try { await api(`/api/cases/${c.id}`, { method: "PATCH", body: reason ? { stage: "Closed", override_reason: reason } : { stage: "Closed" } }); toast("Case closed"); caseHub(c.id); }
+        catch (e) { if (e.code === "CLOSE_BLOCKED" && !reason) return coOpen(); $("#coErr").textContent = e.message; btn.disabled = false; } };
+      $("#coClose").onclick = () => doClose($("#coClose"));
+      if ($("#coAnyway")) { const why = $("#coWhy"), ok = () => why.value.replace(/\s+/g, " ").trim().length >= co.min_reason;
+        why.oninput = () => { $("#coAnyway").disabled = !ok(); };
+        $("#coAnyway").onclick = () => { if (ok()) doClose($("#coAnyway"), why.value.trim()); }; }
+      $("#coCancel").onclick = () => { box.innerHTML = ""; };
+      // Go to …: the checklist folds away; "Back to the close-out checklist" in that section brings it back, checked again
+      $$("#coBox [data-co-fix]").forEach(b => b.onclick = () => { if (b.dataset.coFix === "trust") return go("trust");
+        box.innerHTML = ""; jump(b.dataset.coFix, { label: "Back to the close-out checklist", back: () => coOpen() }); });
+      showAt(box); $("#coH").setAttribute("tabindex", "-1"); $("#coH").focus({ preventScroll: true }); };
+    if ($("#readyGo")) $("#readyGo").onclick = coOpen;
+    // the court shows the case final, but it stays open (an appeal, a motion for new trial): an admin dismisses the flag, with the reason
+    if ($("#readyNo")) { const f = $("#rdForm"), why = $("#rdWhy"), okW = () => why.value.replace(/\s+/g, " ").trim().length >= 10;
+      $("#readyNo").onclick = () => { f.hidden = !f.hidden; $("#readyNo").setAttribute("aria-expanded", String(!f.hidden)); if (!f.hidden) why.focus(); };
+      why.oninput = () => { $("#rdGo").disabled = !okW(); };
+      $("#rdCancel").onclick = () => { f.hidden = true; $("#readyNo").setAttribute("aria-expanded", "false"); };
+      $("#rdGo").onclick = async () => { if (!okW()) return; $("#rdGo").disabled = true; $("#rdErr").textContent = "";
+        try { await api(`/api/cases/${c.id}/close-ready/dismiss`, { method: "POST", body: { reason: why.value.trim() } }); toast("Flag dismissed"); caseHub(c.id); }
+        catch (e) { $("#rdErr").textContent = e.message; $("#rdGo").disabled = false; } }; }
     // notes: Word-style, saved with the button (and kept safe if you leave with unsaved changes)
     const nb = $("#hbNotesSave").closest(".box"); wireRte(nb);
     const nEd = nb.querySelector(".rta"), nSt = $("#hbNotesSt"); let nSaved = c.notes || "";
@@ -759,14 +818,18 @@
     const pad = n => String(n).padStart(2, "0"), localDT = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
     const when = v => { const d = new Date(v); return isNaN(d) ? "" : d.toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", year: d.getFullYear() !== new Date().getFullYear() ? "numeric" : undefined, hour: "numeric", minute: "2-digit" }); };
     const DIR = { in: "Incoming", out: "Outgoing" }, hrs = m => (Math.round(m / 6) / 10).toFixed(1) + " h";
-    const cvRow = (x, full) => `<div class="cvrow" data-cv="${x.id}"><div class="cvh"><span class="tag ${x.kind === "court" ? "k" : x.kind === "note" ? "k" : "n"}">${esc(CVK[x.kind] || x.kind)}</span>${x.direction ? `<span class="mute">${DIR[x.direction]}</span>` : ""}${x.with_name ? `<b>${esc(x.with_name)}</b>` : ""}<span class="mute">${esc(when(x.at))}${x.minutes ? " · " + x.minutes + " min" : ""}</span></div>
+    const cvRow = (x, full) => `<div class="cvrow${x.deleted ? " cvdel" : ""}" data-cv="${x.id}"><div class="cvh"><span class="tag ${x.kind === "court" ? "k" : x.kind === "note" ? "k" : "n"}">${esc(CVK[x.kind] || x.kind)}</span>${x.direction ? `<span class="mute">${DIR[x.direction]}</span>` : ""}${x.with_name ? `<b>${esc(x.with_name)}</b>` : ""}<span class="mute">${esc(when(x.at))}${x.minutes ? " · " + x.minutes + " min" : ""}</span></div>
       <div class="cvb">${full ? renderNotes(x.body) : esc(clip(txt(x.body), 160))}</div>
       ${full && (x.time_id || x.task_id) ? `<div class="cvx">${x.time_id && isLawyer() ? `<span class="tag g">Billed ${hrs(x.billed_minutes || 0)}${x.billed_invoice ? " · invoiced" : ""}</span>` : ""}${x.task_id ? `<span class="tag ${x.follow_done ? "k" : "n"}">Follow-up${x.follow_due ? " " + esc(niceDate(x.follow_due)) : ""}${x.follow_done ? " · done" : ""}</span>` : ""}</div>` : ""}
-      ${full ? `<div class="cvf mute">Logged by ${esc(x.logged_by || "—")}${x.created_at && Math.abs(new Date(x.created_at) - new Date(x.at)) > 864e5 ? ` on ${esc(when(x.created_at))}` : ""}${x.edited_by ? ` · edited by ${esc(x.edited_by)}` : ""}${x.can_edit ? ` <button type="button" class="lk" data-cv-edit="${x.id}">Edit</button> <button type="button" class="lk" data-cv-del="${x.id}">Delete</button>` : ""}</div>` : ""}</div>`;
+      ${full ? `<div class="cvf mute">Logged by ${esc(x.logged_by || "—")}${x.created_at && Math.abs(new Date(x.created_at) - new Date(x.at)) > 864e5 ? ` on ${esc(when(x.created_at))}` : ""}${x.can_edit ? ` <button type="button" class="lk" data-cv-edit="${x.id}">Edit</button>` : ""}${x.can_delete ? ` <button type="button" class="lk" data-cv-del="${x.id}">Delete</button>` : ""}${x.can_restore ? ` <button type="button" class="lk" data-cv-restore="${x.id}">Restore</button>` : ""}</div>
+        ${x.edited_by ? `<div class="cvf mute" data-cv-edited>Edited by ${esc(x.edited_by)}${x.updated_at ? ` · ${esc(when(x.updated_at))}` : ""}${x.versions ? ` · <button type="button" class="lk" data-cv-ver="${x.id}" aria-expanded="false">See earlier versions (${x.versions})</button>` : ""}</div><div class="cvvers" id="cvVer${x.id}" hidden></div>` : ""}
+        ${x.deleted ? `<div class="cvdeln">Deleted by ${esc(x.deleted_by_name || "—")}${x.deleted_at ? ` on ${esc(when(x.deleted_at))}` : ""}. Only firm admins see it.</div>` : ""}` : ""}</div>`;
+    const cvVer = v => `<div class="cvver"><div class="cvvh"><span>${esc(CVK[v.kind] || v.kind)}${v.with_name ? " with " + esc(v.with_name) : ""} · ${esc(when(v.at))}${v.minutes ? " · " + v.minutes + " min" : ""}</span></div>
+      <div class="cvvh"><span>Written by ${esc(v.written_by || v.logged_by || "—")}${v.written_at ? " · " + esc(when(v.written_at)) : ""}</span><span>Replaced by ${esc(v.edited_by || "—")} · ${esc(when(v.saved_at))}</span></div><div class="cvb">${renderNotes(v.body)}</div></div>`;
     const clip = (t, n) => (t = String(t).replace(/\s+/g, " ").trim()).length > n ? t.slice(0, n - 1) + "…" : t;
     const cvF = $("#cvF"); wireRte(cvF);
     const txt = h => !h ? "" : /<\w/.test(h) ? new DOMParser().parseFromString(h, "text/html").body.textContent : String(h);
-    const cvDraw = () => { const L = cv.convos;
+    const cvDraw = () => { const L = cv.convos, live = L.filter(x => !x.deleted);   // deleted entries come back for firm admins only (greyed)
       const fk = $("#cvFk").value, fw = $("#cvFw").value, fq = $("#cvFq").value.trim().toLowerCase();
       const kinds = [...new Set(L.map(x => x.kind))], names = [...new Set(L.map(x => x.with_name).filter(Boolean))].sort();
       $("#cvFk").innerHTML = `<option value="">All types</option>` + kinds.map(k => `<option value="${esc(k)}"${k === fk ? " selected" : ""}>${esc(CVK[k] || k)}</option>`).join("");
@@ -774,11 +837,23 @@
       $(".cvfilt").hidden = L.length < 4;
       const F = L.filter(x => (!fk || x.kind === fk) && (!fw || x.with_name === fw) && (!fq || (txt(x.body) + " " + (x.with_name || "") + " " + (x.logged_by || "")).toLowerCase().includes(fq)));
       $("#cvList").innerHTML = F.map(x => cvRow(x, true)).join("") || `<div class="empty">${L.length ? "Nothing matches." : "No conversations logged yet."}</div>`;
-      $("#cvRecent").innerHTML = L.slice(0, 3).map(x => cvRow(x, false)).join("") + (L.length ? `<button type="button" class="lk" data-sec-go="talk" style="margin-top:6px">All ${L.length}</button>` : `<div class="mute">None logged yet.</div>`);
-      $$(".secnav [data-sec-go=talk] span").forEach(e => e.textContent = L.length); const o = $("#secSel option[value=talk]"); if (o) o.textContent = `Conversations (${L.length})`;
+      $("#cvRecent").innerHTML = live.slice(0, 3).map(x => cvRow(x, false)).join("") + (live.length ? `<button type="button" class="lk" data-sec-go="talk" style="margin-top:6px">All ${live.length}</button>` : `<div class="mute">None logged yet.</div>`);
+      $$(".secnav [data-sec-go=talk] span").forEach(e => e.textContent = live.length); const o = $("#secSel option[value=talk]"); if (o) o.textContent = `Conversations (${live.length})`;
       $$("#cvRecent [data-sec-go]").forEach(b => b.onclick = () => { setSec("talk"); $(".secnav").scrollIntoView({ block: "start" }); });
       $$("#cvList [data-cv-edit]").forEach(b => b.onclick = () => cvOpen(cv.convos.find(x => x.id === +b.dataset.cvEdit)));
-      $$("#cvList [data-cv-del]").forEach(b => b.onclick = async () => { if (!confirm("Delete this conversation entry? Its time entry and follow-up task stay (delete those separately if needed).")) return; try { await api(`/api/convos/${b.dataset.cvDel}`, { method: "DELETE" }); cv.convos = cv.convos.filter(x => x.id !== +b.dataset.cvDel); cvDraw(); toast("Deleted"); } catch (e) { fail(e); } });
+      $$("#cvList [data-cv-del]").forEach(b => b.onclick = async () => { if (!confirm("Delete this conversation entry? It is hidden from everyone but firm admins, who can still read and restore it. Its time entry and follow-up task stay.")) return; try { const r2 = await api(`/api/convos/${b.dataset.cvDel}`, { method: "DELETE" }); cv.convos = cv.convos.map(x => x.id === +b.dataset.cvDel ? r2.convo || { ...x, deleted: true } : x); cvDraw(); toast("Deleted"); } catch (e) { fail(e); } });
+      $$("#cvList [data-cv-restore]").forEach(b => b.onclick = async () => { try { const r2 = await api(`/api/convos/${b.dataset.cvRestore}/restore`, { method: "POST" }); cv.convos = cv.convos.map(x => x.id === +b.dataset.cvRestore ? r2.convo : x); cvDraw(); toast("Restored"); } catch (e) { fail(e); } });
+      // earlier versions of an edited entry, newest first (everyone who can see the case)
+      $$("#cvList [data-cv-ver]").forEach(b => b.onclick = async () => { const box = $(`#cvVer${b.dataset.cvVer}`); if (!box) return;
+        if (!box.hidden) { box.hidden = true; b.setAttribute("aria-expanded", "false"); return; }
+        box.hidden = false; b.setAttribute("aria-expanded", "true"); box.innerHTML = `<div class="mute" style="font-size:13px">Loading…</div>`;
+        try { const vs = (await api(`/api/convos/${b.dataset.cvVer}/versions`)).versions;
+          // the newest 5, "Show all n" for the rest, and a Hide button at the bottom too
+          const draw = all => { box.innerHTML = (vs.map(cvVer).slice(0, all ? vs.length : 5).join("") || `<div class="mute" style="font-size:13px">No earlier versions.</div>`)
+            + `<div class="cvvb">${!all && vs.length > 5 ? `<button type="button" class="lk" data-vall>Show all ${vs.length}</button>` : ""}<button type="button" class="lk" data-vhide>Hide earlier versions</button></div>`;
+            const a = box.querySelector("[data-vall]"); if (a) a.onclick = () => draw(true);
+            box.querySelector("[data-vhide]").onclick = () => { box.hidden = true; b.setAttribute("aria-expanded", "false"); b.focus(); }; };
+          draw(false); } catch (e) { box.innerHTML = ""; box.hidden = true; fail(e); } });
     };
     const cvOther = () => { $("#cvOtherW").hidden = !!$("#cvWho").value; };
     const cvOpen = x => { cvF.reset(); cvF.id.value = x ? x.id : ""; $("#cvKind").value = x ? x.kind : "call"; $("#cvAt").value = $("#cvAt").dataset.dflt = localDT(x ? new Date(x.at) : new Date());
@@ -850,7 +925,7 @@
       } else { let day = ""; html = L.map(x => { const d = acDay(x.at), h = d !== day ? `<h4 class="acday">${esc(d)}</h4>` : ""; day = d; return h + acRow(x, x.i); }).join(""); }
       $("#acList").innerHTML = html || `<div class="empty">${ac.items.length ? "Nothing matches." : "No activity yet."}</div>`;
       $$("#acList [data-ac]").forEach(el => { const go = ac.items[+el.dataset.ac].go; const open = e => { if (e.target.closest("a")) return;
-        if (go.sec) { setSec(go.sec); acTop(); } else if (go.email) { tab = "inbox"; renderNav(); emailView(go.email); } };
+        if (go.sec) { const row = el.dataset.ac; jump(go.sec, { cv: go.cv, label: "Back to the Activity log", back: () => { setSec("activity"); const r = $(`#acList [data-ac="${row}"]`); if (r) { showAt(r); r.focus(); } else acTop(); } }); } else if (go.email) { tab = "inbox"; renderNav(); emailView(go.email); } };
         el.onclick = open; el.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(e); } }; });
     };
     const acLoad = async () => { const mine = ++ac.seq, view = viewSeq; const gone = () => mine !== ac.seq || view !== viewSeq || hub.id !== c.id || !$("#acList");   // left the case, or a newer load

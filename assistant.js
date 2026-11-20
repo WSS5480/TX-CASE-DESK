@@ -156,7 +156,7 @@ async function runTool(user, name, input, run) {
         q("SELECT title, status, due_on, served_on FROM discovery_sets WHERE case_id=$1 ORDER BY created_at DESC LIMIT 10", [c.id]).catch(() => ({ rows: [] })),
       ]);
       return { ...caseRef(c), county: c.county, court: c.court, type: c.case_type, filed: d10(c.filed_date), stage: c.stage, court_status: c.status, next_setting: c.next_setting,
-        lead_attorney: c.attorney, team: team.rows, closed: c.closed_at ? { on: d10(c.closed_at), why: c.closed_why } : null, ...(billingOk(user) ? { billing_type: c.billing || null } : {}),
+        lead_attorney: c.attorney, team: team.rows, closed: c.closed_at ? untrusted("closing note", { on: d10(c.closed_at), why: c.closed_why }) : null, ready_for_admin_close_out: c.close_ready_at ? untrusted("court status", { since: d10(c.close_ready_at), why: c.close_ready_why }) : null, ...(billingOk(user) ? { billing_type: c.billing || null } : {}),
         parties: parties.rows.map(x => untrusted("party", x)), notes: untrusted("case notes", { text: txt(c.notes, 6000) }), open_tasks: tasks.rows[0].open, overdue_tasks: tasks.rows[0].overdue, documents: docs.rows[0].n,
         discovery: sets.rows.map(s => ({ title: s.title, status: s.status, due: d10(s.due_on), served: d10(s.served_on) })) };
     }
@@ -182,7 +182,7 @@ async function runTool(user, name, input, run) {
     case "list_conversations": {
       const c = await needCase(); if (!c) return { error: "No case with that id that this person can open." };
       const lim = Math.min(50, Math.max(1, +i.limit || 20));
-      const rows = (await q(`SELECT v.at, v.kind, v.with_name, v.direction, v.minutes, v.body, u.name AS who FROM case_convos v LEFT JOIN users u ON u.id=v.user_id WHERE v.case_id=$1 AND v.firm_id=$2 ORDER BY v.at DESC LIMIT ${lim}`, [c.id, user.firm_id])).rows;
+      const rows = (await q(`SELECT v.at, v.kind, v.with_name, v.direction, v.minutes, v.body, u.name AS who FROM case_convos v LEFT JOIN users u ON u.id=v.user_id WHERE v.case_id=$1 AND v.firm_id=$2 AND v.deleted_at IS NULL ORDER BY v.at DESC LIMIT ${lim}`, [c.id, user.firm_id])).rows;
       return { case: caseRef(c), conversations: rows.map(v => untrusted("conversation note", { at: v.at, kind: v.kind, with: v.with_name, direction: v.direction, minutes: v.minutes, by: v.who, text: txt(v.body, 1500) })) };
     }
     case "list_court_emails": {
