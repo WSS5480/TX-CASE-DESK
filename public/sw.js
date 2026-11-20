@@ -1,5 +1,5 @@
 // TX Case Desk service worker: makes the app installable and opens the last-loaded screens offline.
-// Always tries the network first so new versions load right away; private data (/api, payments, portal) is never cached.
+// Always tries the network first so new versions load right away; private data (/api, payments, portal, client and co-counsel pages) is never cached.
 const CACHE = "tcd-shell-v1";
 const SHELL = ["/", "/app.js", "/practice.js", "/manifest.json", "/icon-192.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).catch(() => {})); self.skipWaiting(); });
@@ -7,7 +7,7 @@ self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Pr
 self.addEventListener("fetch", e => {
   const u = new URL(e.request.url);
   if (e.request.method !== "GET" || u.origin !== location.origin) return;
-  if (/^\/(api|cal|pay|portal|export|invoice)\b/.test(u.pathname)) return;
+  if (/^\/(api|cal|pay|portal|export|invoice)\b/.test(u.pathname) || /^\/(c|cc)\//.test(u.pathname)) return;   // /c/… client and /cc/… co-counsel pages too
   e.respondWith(fetch(e.request).then(r => { if (r.ok && SHELL.includes(u.pathname)) { const copy = r.clone(); caches.open(CACHE).then(c => c.put(u.pathname, copy)); } return r; })
     .catch(() => caches.match(u.pathname).then(m => m || caches.match("/"))));
 });

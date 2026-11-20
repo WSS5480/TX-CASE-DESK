@@ -18,6 +18,8 @@ const today = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/
 const addDays = (d, n) => new Date(Date.parse(d + "T12:00:00Z") + n * 864e5).toISOString().slice(0, 10);
 const p2 = n => String(n).padStart(2, "0");
 const ds = v => v instanceof Date ? `${v.getFullYear()}-${p2(v.getMonth() + 1)}-${p2(v.getDate())}` : v ? String(v).slice(0, 10) : "";
+// strict policy for the public client pages (no scripts, styles inline, images from here, forms post here, never framed)
+const PUBLIC_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 const clean = (v, n = 500) => typeof v === "string" ? v.trim().slice(0, n) : v;
 
 // ---- court settings already on cases ("12/02/2026 1:30 PM – Hearing on …" or "2026-11-18 – …") → calendar items
@@ -108,7 +110,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     if (caseId) { p.push(caseId); w += ` AND e.case_id=$${p.length}`; }
     if (county) { p.push(county); w += ` AND c.county=$${p.length}`; }
     const ev = (await q(`SELECT e.*, c.cause_no, c.style, c.county, c.court, u.name AS who FROM events e LEFT JOIN cases c ON c.id=e.case_id LEFT JOIN users u ON u.id=COALESCE(e.user_id, c.user_id) WHERE ${w} ORDER BY e.on_date, e.at_time NULLS FIRST`, p)).rows
-      .map(e => ({ id: e.id, src: "event", kind: e.kind, title: e.title, date: ds(e.on_date), time: e.at_time, done: e.done, cite: e.cite, rule: e.rule, confirmed: !!e.confirmed_at, notes: e.notes, location: e.location, who: e.who,
+      .map(e => ({ id: e.id, src: "event", kind: e.kind, title: e.title, date: ds(e.on_date), time: e.at_time, done: e.done, cite: e.cite, rule: e.rule, confirmed: !!e.confirmed_at, notes: e.notes, location: e.location, who: e.who, client_visible: !!e.client_visible,
         case: e.case_id ? { id: e.case_id, cause_no: e.cause_no, style: e.style, county: e.county } : null }));
     const cp = [firmId]; let cw = "c.firm_id=$1 AND c.next_setting IS NOT NULL AND c.next_setting <> ''";
     if (lim) cw += " AND " + access.caseCond(viewer, "c", cp);
@@ -133,7 +135,8 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     res.json({ items: await calendarItems(req.user.firm_id, { from, to, userId, caseId: +req.query.case_id || null, county: req.query.county || null, viewer: req.user }), from, to });
   }));
   const cleanEvent = b => ({ kind: ["hearing", "deadline", "meeting", "event"].includes(b.kind) ? b.kind : "event", title: clean(b.title, 200), on_date: isDate(b.on_date) ? b.on_date : null,
-    at_time: clean(b.at_time, 20) || null, location: clean(b.location, 200) || null, notes: clean(b.notes, 2000) || null });
+    at_time: clean(b.at_time, 20) || null, location: clean(b.location, 200) || null, notes: clean(b.notes, 2000) || null,
+    client_visible: [true, 1, "1", "on", "true"].includes(b.client_visible) });   // "Show on client page" (only with a case)
   R.post("/events", requireAuth, wrap(async (req, res) => {
     const e = cleanEvent(req.body || {});
     if (!e.title || !e.on_date) return res.status(400).json({ error: "Title and date are required." });
@@ -147,8 +150,8 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
       if (!ok) return res.status(403).json({ error: "You can put this on your own calendar, or on the calendar of someone on this case." });
       owner = want;
     }
-    const { rows } = await q(`INSERT INTO events(firm_id, case_id, user_id, kind, title, on_date, at_time, location, notes, created_by, confirmed_at, confirmed_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$10) RETURNING *`,
-      [req.user.firm_id, +req.body.case_id || null, owner, e.kind, e.title, e.on_date, e.at_time, e.location, e.notes, req.user.id]);
+    const { rows } = await q(`INSERT INTO events(firm_id, case_id, user_id, kind, title, on_date, at_time, location, notes, created_by, confirmed_at, confirmed_by, client_visible) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$10,$11) RETURNING *`,
+      [req.user.firm_id, +req.body.case_id || null, owner, e.kind, e.title, e.on_date, e.at_time, e.location, e.notes, req.user.id, !!(+req.body.case_id && e.client_visible)]);
     res.json({ event: rows[0] });
   }));
   const eventOk = async (req, id) => { const pr = [+id, req.user.firm_id, req.user.id]; const cond = access.caseCond(req.user, "c", pr);
@@ -159,6 +162,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const e = cleanEvent({ kind: b.kind || "event", ...b });
     for (const k of ["title", "on_date", "at_time", "location", "notes"]) if (b[k] !== undefined && (k !== "on_date" || e.on_date) && (k !== "title" || e.title)) { p.push(e[k]); sets.push(`${k}=$${p.length}`); }
     if (b.done !== undefined) { p.push(!!b.done); sets.push(`done=$${p.length}`); }
+    if (b.client_visible !== undefined) { p.push(e.client_visible); sets.push(`client_visible=($${p.length} AND case_id IS NOT NULL)`); }
     if (b.confirm !== undefined) { if (b.confirm) { p.push(req.user.id); sets.push(`confirmed_at=now(), confirmed_by=$${p.length}`); } else sets.push("confirmed_at=NULL, confirmed_by=NULL"); }
     if (!sets.length) return res.json({ ok: true });
     const { rowCount } = await q(`UPDATE events SET ${sets.join(",")} WHERE id=$1 AND firm_id=$2`, p);
@@ -242,8 +246,9 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     if (req.query.q) { p.push(`%${String(req.query.q).toLowerCase()}%`); w += ` AND (lower(ct.name) LIKE $${p.length} OR lower(coalesce(ct.company,'')) LIKE $${p.length} OR lower(coalesce(ct.email,'')) LIKE $${p.length} OR coalesce(ct.phone,'') LIKE $${p.length})`; }
     if (KINDS.includes(req.query.kind)) { p.push(req.query.kind); w += ` AND ct.kind=$${p.length}`; }
     w += " AND " + contactCond(req.user, "ct", p);
-    const { rows } = await q(`SELECT ct.id, ct.kind, ct.name, ct.company, ct.email, ct.phone, count(cc.case_id)::int AS cases,
-      coalesce((SELECT sum(amount) FROM trust_tx t WHERE t.contact_id=ct.id),0) AS trust
+    // trust balances: trust access only (never paralegals without it)
+    const { rows } = await q(`SELECT ct.id, ct.kind, ct.name, ct.company, ct.email, ct.phone, count(cc.case_id)::int AS cases
+      ${access.trustOk(req.user) ? ", coalesce((SELECT sum(amount) FROM trust_tx t WHERE t.contact_id=ct.id),0) AS trust" : ""}
       FROM contacts ct LEFT JOIN case_contacts cc ON cc.contact_id=ct.id WHERE ${w} GROUP BY ct.id ORDER BY lower(ct.name) LIMIT 500`, p);
     res.json({ contacts: rows });
   }));
@@ -257,9 +262,13 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const c = await contactOf(req, req.params.id); if (!c) return res.status(404).json({ error: "Not found" });
     const cpr = [c.id]; const ccond = access.caseCond(req.user, "c", cpr);
     const cases = (await q(`SELECT c.id, c.cause_no, c.style, c.county, c.status, c.next_setting, cc.role FROM case_contacts cc JOIN cases c ON c.id=cc.case_id WHERE cc.contact_id=$1 AND ${ccond} ORDER BY c.id DESC`, cpr)).rows;
-    const invoices = (await q("SELECT id, number, issued, due, status, total, paid FROM invoices WHERE contact_id=$1 AND firm_id=$2 ORDER BY id DESC", [c.id, req.user.firm_id])).rows;
-    const trust = (await q("SELECT coalesce(sum(amount),0) AS bal FROM trust_tx WHERE contact_id=$1", [c.id])).rows[0].bal;
-    res.json({ contact: { ...c, portal_url: c.portal_token ? `${APP()}/portal/${c.portal_token}` : null }, cases, invoices, trust });
+    // invoices and the older client-page link: attorneys and admins only (never paralegals; never the link in developer view);
+    // the trust balance: trust access only. The token itself is never sent.
+    const law = req.user.role !== "paralegal";
+    const invoices = law ? (await q("SELECT id, number, issued, due, status, total, paid FROM invoices WHERE contact_id=$1 AND firm_id=$2 ORDER BY id DESC", [c.id, req.user.firm_id])).rows : [];
+    const trust = access.trustOk(req.user) ? (await q("SELECT coalesce(sum(amount),0) AS bal FROM trust_tx WHERE contact_id=$1", [c.id])).rows[0].bal : null;
+    const { portal_token, ...pub } = c;
+    res.json({ contact: { ...pub, has_portal: !!portal_token, portal_url: portal_token && law && !req.devView ? `${APP()}/portal/${portal_token}` : null }, cases, invoices, trust });
   }));
   R.patch("/contacts/:id", requireAuth, wrap(async (req, res) => {
     const c = await contactOf(req, req.params.id); if (!c) return res.status(404).json({ error: "Not found" });
@@ -270,17 +279,28 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
   R.delete("/contacts/:id", requireAuth, wrap(async (req, res) => {
     const c = await contactOf(req, req.params.id); if (!c) return res.status(404).json({ error: "Not found" });
     if ((await q("SELECT 1 FROM trust_tx WHERE contact_id=$1 LIMIT 1", [c.id])).rowCount) return res.status(400).json({ error: "This client has trust history, so they can't be deleted." });
+    await revokeClientLinks(req, null, c.id, "contact deleted");
     await q("DELETE FROM contacts WHERE id=$1", [c.id]); await audit(req, "contact_deleted", { id: c.id }); res.json({ ok: true });
   }));
+  // A client taken off a case (removed, made another role, or the contact deleted) loses their client page on it: the live
+  // client link is turned off (audited) and never comes back by itself if they're added again (links.js).
+  async function revokeClientLinks(req, caseId, contactId, why) {
+    const rows = (await q(`UPDATE case_links SET revoked_at=now(), revoked_by=$4 WHERE firm_id=$1 AND kind='client' AND contact_id=$2 AND revoked_at IS NULL ${caseId ? "AND case_id=$3" : "AND $3::int IS NULL"} RETURNING id, case_id, name`,
+      [req.user.firm_id, contactId, caseId || null, req.user.id])).rows;
+    for (const l of rows) await audit(req, "link_revoked", { case_id: l.case_id, link_id: l.id, kind: "client", name: l.name, why });
+  }
   R.post("/cases/:id/contacts", requireAuth, wrap(async (req, res) => {
     const c = await caseOf(req, req.params.id); if (!c) return res.status(404).json({ error: "Case not found" });
     const ct = await contactOf(req, req.body.contact_id); if (!ct) return res.status(404).json({ error: "Contact not found" });
-    await q("INSERT INTO case_contacts(case_id, contact_id, role) VALUES($1,$2,$3) ON CONFLICT(case_id, contact_id) DO UPDATE SET role=$3", [c.id, ct.id, clean(req.body.role, 40) || ct.kind]);
+    const role = clean(req.body.role, 40) || ct.kind;
+    await q("INSERT INTO case_contacts(case_id, contact_id, role) VALUES($1,$2,$3) ON CONFLICT(case_id, contact_id) DO UPDATE SET role=$3", [c.id, ct.id, role]);
+    if (role !== "client") await revokeClientLinks(req, c.id, ct.id, "no longer a client on this case");
     res.json({ ok: true, conflicts: await conflicts(req.user.firm_id, ct.name + " " + (ct.company || ""), ct.id, req.user) });
   }));
   R.delete("/cases/:id/contacts/:cid", requireAuth, wrap(async (req, res) => {
     const c = await caseOf(req, req.params.id); if (!c) return res.status(404).json({ error: "Case not found" });
-    await q("DELETE FROM case_contacts WHERE case_id=$1 AND contact_id=$2", [c.id, +req.params.cid]); res.json({ ok: true });
+    await q("DELETE FROM case_contacts WHERE case_id=$1 AND contact_id=$2", [c.id, +req.params.cid]);
+    await revokeClientLinks(req, c.id, +req.params.cid || 0, "client removed from case"); res.json({ ok: true });
   }));
 
   // ===================== Case hub (everything about one case) =====================
@@ -289,7 +309,8 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const c = (await q(`SELECT c.*, u.name AS attorney FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE c.id=$1 AND c.firm_id=$2 AND ${hcond}`, hp)).rows[0];
     if (!c) return res.status(404).json({ error: "Not found" });
     const [contacts, tasks, docs, time, invoices, team, emails] = await Promise.all([
-      q("SELECT ct.*, cc.role, coalesce((SELECT sum(amount) FROM trust_tx t WHERE t.contact_id=ct.id),0) AS trust FROM case_contacts cc JOIN contacts ct ON ct.id=cc.contact_id WHERE cc.case_id=$1 ORDER BY cc.role, ct.name", [c.id]),
+      // columns listed by name: the older client-page token (portal_token) is never sent
+      q("SELECT ct.id, ct.kind, ct.name, ct.company, ct.email, ct.phone, ct.address, ct.notes, ct.created_by, ct.created_at, (ct.portal_token IS NOT NULL) AS has_portal, cc.role, coalesce((SELECT sum(amount) FROM trust_tx t WHERE t.contact_id=ct.id),0) AS trust FROM case_contacts cc JOIN contacts ct ON ct.id=cc.contact_id WHERE cc.case_id=$1 ORDER BY cc.role, ct.name", [c.id]),
       q("SELECT t.*, u.name AS assignee_name FROM tasks t LEFT JOIN users u ON u.id=t.assignee WHERE t.case_id=$1 ORDER BY t.done, t.due_date NULLS LAST, t.id", [c.id]),
       q("SELECT id, name, mime, size, shared, created_at FROM documents WHERE case_id=$1 ORDER BY id DESC", [c.id]),
       q("SELECT te.*, u.name AS who FROM time_entries te LEFT JOIN users u ON u.id=te.user_id WHERE te.case_id=$1 ORDER BY te.on_date DESC, te.id DESC LIMIT 200", [c.id]),
@@ -348,7 +369,7 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const tp = [+req.params.id, req.user.firm_id], tcond = access.caseCond(req.user, "c", tp);   // only a case this person may see
     const c = (await q(`SELECT c.*, u.name AS attorney, u.bar_number, u.email AS attorney_email FROM cases c LEFT JOIN users u ON u.id=c.user_id WHERE c.id=$1 AND c.firm_id=$2 AND ${tcond}`, tp)).rows[0];
     if (!c) return res.status(404).send("Not found");
-    const contacts = (await q("SELECT ct.*, cc.role FROM case_contacts cc JOIN contacts ct ON ct.id=cc.contact_id WHERE cc.case_id=$1", [c.id])).rows;
+    const contacts = (await q("SELECT ct.id, ct.kind, ct.name, ct.company, ct.email, ct.phone, ct.address, ct.notes, ct.created_by, ct.created_at, cc.role FROM case_contacts cc JOIN contacts ct ON ct.id=cc.contact_id WHERE cc.case_id=$1", [c.id])).rows;
     const events = await calendarItems(req.user.firm_id, { from: today(), to: addDays(today(), 1500), caseId: c.id });
     const f = (await q("SELECT name, address, phone, fax, website, logo, logo_mime, logo_w, logo_h FROM firms WHERE id=$1", [req.user.firm_id])).rows[0] || {};
     const signer = { name: req.user.name, bar: req.user.bar_number, email: req.user.doc_email || req.user.email, firm: f.name || req.user.firm_name, title: req.user.title, phone: req.user.phone,
@@ -695,10 +716,13 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     await audit(req, "trust_reconciled", { asOf, ok }); res.json({ as_of: asOf, bank, book, ledgers, ok, difference: money(bank - book) });
   }));
 
-  // ===================== Client portal (link per client, no password; revocable) =====================
-  R.post("/contacts/:id/portal", requireAuth, wrap(async (req, res) => {
+  // ===================== Client portal, older per-client links (no password; revocable). New links: per case, links.js =====================
+  R.post("/contacts/:id/portal", requireAuth, notPara, wrap(async (req, res) => {
     const c = await contactOf(req, req.params.id); if (!c) return res.status(404).json({ error: "Not found" });
-    const t = req.body.revoke ? null : tok();
+    // Since Nov 20, 2026 client links are made on each case (links.js, Case → People → Client page). A link already made here
+    // keeps working until it's turned off, and it can still be turned off here.
+    if (!req.body.revoke) return res.status(400).json({ error: "Client links are now made on each case: open the case, then People → Client page.", code: "PER_CASE" });
+    const t = null;
     await q("UPDATE contacts SET portal_token=$2 WHERE id=$1", [c.id, t]); await audit(req, t ? "portal_link_made" : "portal_link_revoked", { contact: c.id });
     res.json({ url: t ? `${APP()}/portal/${t}` : null });
   }));
@@ -708,7 +732,8 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     const cases = (await q("SELECT c.* FROM case_contacts cc JOIN cases c ON c.id=cc.case_id WHERE cc.contact_id=$1 AND cc.role='client' ORDER BY c.id DESC", [ct.id])).rows;
     const blocks = [];
     for (const c of cases) {
-      const ev = (await calendarItems(ct.firm_id, { from: today(), to: addDays(today(), 365), caseId: c.id })).filter(i => i.kind === "hearing" || i.kind === "meeting");
+      // the same rule as the per-case client page: court dates always, anything else only when marked "Show on client page"; never notes
+      const ev = (await calendarItems(ct.firm_id, { from: today(), to: addDays(today(), 365), caseId: c.id })).filter(i => !i.done && (i.kind === "hearing" || i.client_visible));
       const docs = (await q("SELECT id, name FROM documents WHERE case_id=$1 AND shared ORDER BY id DESC", [c.id])).rows;
       blocks.push(`<div class="card"><div class="mute">${esc(c.county)} County${c.court ? " · " + esc(c.court) : ""} · Cause ${esc(c.cause_no)}</div><h2>${esc(c.style || c.cause_no)}</h2>
         ${c.status ? `<p><b>Status:</b> ${esc(c.status)}</p>` : ""}
@@ -718,13 +743,13 @@ function mount(app, { requireAuth, requireAdmin, wrap, audit }) {
     }
     const invs = (await q("SELECT number, total, paid, pay_token, due, status FROM invoices WHERE contact_id=$1 AND status IN ('sent','paid') ORDER BY id DESC LIMIT 20", [ct.id])).rows;
     const inv = invs.length ? `<div class="card"><h2>Invoices</h2>${invs.map(i => `<p>#${esc(i.number)} — ${usd(i.total)} · ${Number(i.total) - Number(i.paid) > 0 ? `balance ${usd(Number(i.total) - Number(i.paid))} · <a href="/pay/${esc(i.pay_token)}">View and pay</a>` : "Paid"}</p>`).join("")}</div>` : "";
-    res.set({ "Content-Type": "text/html; charset=utf-8", "X-Robots-Tag": "noindex", "Cache-Control": "no-store" }).send(page(`${ct.firm_name} — client page`,
+    res.set({ "Content-Type": "text/html; charset=utf-8", "X-Robots-Tag": "noindex", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "Content-Security-Policy": PUBLIC_CSP }).send(page(`${ct.firm_name} — client page`,
       `${brandHead({ name: ct.firm_name, address: ct.firm_address, phone: ct.firm_phone, email: ct.firm_email, website: ct.firm_website, logo_token: ct.logo_token })}<h1>Hello, ${esc(ct.name.split(" ")[0])}</h1><p class="mute">Your case updates from ${esc(ct.firm_name)}. Questions? Contact your attorney directly.</p>${blocks.join("") || `<div class="card">No active cases to show yet.</div>`}${inv}`));
   }));
   app.get("/portal/:token/doc/:id", wrap(async (req, res) => {
     const d = (await q(`SELECT d.* FROM documents d JOIN case_contacts cc ON cc.case_id=d.case_id AND cc.role='client' JOIN contacts ct ON ct.id=cc.contact_id JOIN firms f ON f.id=d.firm_id AND f.demo_until IS NULL WHERE ct.portal_token=$1 AND d.id=$2 AND d.shared`, [String(req.params.token), +req.params.id])).rows[0];
     if (!d) return res.status(404).send("Not found");
-    res.set({ "Content-Type": d.mime || "application/octet-stream", "Content-Disposition": dispo("attachment", d.name) }).send(d.data);
+    res.set({ "Content-Type": d.mime || "application/octet-stream", "Content-Disposition": dispo("attachment", d.name), "Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; sandbox" }).send(d.data);
   }));
 
   // ===================== Export / import =====================
@@ -812,9 +837,13 @@ h1{font-family:Georgia,serif;font-size:22px}h2{font-size:17px;margin:4px 0 8px}.
 @media print{.noprint{display:none}body{background:#fff}.card{border:0}}</style></head><body><main>${body}</main></body></html>`;
 }
 // firm header for invoices and the client page (logo + name + contact line)
+// phone and email are tappable (tel: / mailto:); only digits and + go into the tel: link, only a plain address into mailto:
 function brandHead(f) {
-  const contact = [String(f.address || "").split(/\n+/).map(s => s.trim()).filter(Boolean).join(", "), f.phone, f.email, f.website].filter(Boolean);
-  return `<header class="brand">${f.logo_token ? `<img src="/brand/${esc(f.logo_token)}" alt="${esc(f.name)}">` : ""}<div><div class="bn">${esc(f.name)}</div>${contact.length ? `<div class="mute">${contact.map(esc).join(" · ")}</div>` : ""}</div></header>`;
+  const tel = String(f.phone || "").replace(/[^\d+]/g, ""), mail = /^[^\s@<>"'?&]+@[^\s@<>"'?&]+\.[^\s@<>"'?&]+$/.test(String(f.email || "").trim()) ? String(f.email).trim() : "";
+  const contact = [String(f.address || "").split(/\n+/).map(s => s.trim()).filter(Boolean).join(", ") && esc(String(f.address).split(/\n+/).map(s => s.trim()).filter(Boolean).join(", ")),
+    f.phone && (tel.length >= 7 ? `<a href="tel:${esc(tel)}">${esc(f.phone)}</a>` : esc(f.phone)),
+    f.email && (mail ? `<a href="mailto:${esc(mail)}">${esc(f.email)}</a>` : esc(f.email)), f.website && esc(f.website)].filter(Boolean);
+  return `<header class="brand">${f.logo_token ? `<img src="/brand/${esc(f.logo_token)}" alt="${esc(f.name)}">` : ""}<div><div class="bn">${esc(f.name)}</div>${contact.length ? `<div class="mute">${contact.join(" · ")}</div>` : ""}</div></header>`;
 }
 function invoiceHtml(inv, { pay, print, note } = {}) {
   const d = ds;
@@ -832,4 +861,4 @@ function invoiceHtml(inv, { pay, print, note } = {}) {
   ${print ? `<p class="noprint mute">To save a PDF: use your browser's Print, then choose Save as PDF.</p>` : ""}`);
 }
 
-module.exports = { mount, onCaseCreated, parseSetting, SHARED };
+module.exports = { mount, onCaseCreated, parseSetting, SHARED, page, brandHead, PUBLIC_CSP };

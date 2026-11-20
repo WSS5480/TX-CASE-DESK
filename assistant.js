@@ -182,8 +182,9 @@ async function runTool(user, name, input, run) {
     case "list_conversations": {
       const c = await needCase(); if (!c) return { error: "No case with that id that this person can open." };
       const lim = Math.min(50, Math.max(1, +i.limit || 20));
-      const rows = (await q(`SELECT v.at, v.kind, v.with_name, v.direction, v.minutes, v.body, u.name AS who FROM case_convos v LEFT JOIN users u ON u.id=v.user_id WHERE v.case_id=$1 AND v.firm_id=$2 AND v.deleted_at IS NULL ORDER BY v.at DESC LIMIT ${lim}`, [c.id, user.firm_id])).rows;
-      return { case: caseRef(c), conversations: rows.map(v => untrusted("conversation note", { at: v.at, kind: v.kind, with: v.with_name, direction: v.direction, minutes: v.minutes, by: v.who, text: txt(v.body, 1500) })) };
+      // an entry added through a co-counsel link (links.js) is written by someone outside the firm: named so, and untrusted like the rest
+      const rows = (await q(`SELECT v.at, v.kind, v.with_name, v.direction, v.minutes, v.body, u.name AS who, v.link_id, l.name AS link_name FROM case_convos v LEFT JOIN users u ON u.id=v.user_id LEFT JOIN case_links l ON l.id=v.link_id WHERE v.case_id=$1 AND v.firm_id=$2 AND v.deleted_at IS NULL ORDER BY v.at DESC LIMIT ${lim}`, [c.id, user.firm_id])).rows;
+      return { case: caseRef(c), conversations: rows.map(v => untrusted("conversation note", { at: v.at, kind: v.kind, with: v.with_name, direction: v.direction, minutes: v.minutes, by: v.link_id ? `${v.link_name || "Co-counsel"} (co-counsel link, outside the firm)` : v.who, text: txt(v.body, 1500) })) };
     }
     case "list_court_emails": {
       const p = [user.firm_id]; let w = "e.firm_id=$1 AND e.dismissed_at IS NULL AND coalesce(e.kind,'') <> 'forward_confirm' AND " + emailCond(user, p);

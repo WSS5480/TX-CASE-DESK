@@ -750,17 +750,32 @@ app.post("/api/cases/watch-all", requireAuth, wrap(async (req, res) => {
   res.json({ updated: r.rowCount });
 }));
 // Deleting a case: firm admins only, and only a case with nothing that must be kept (Nov 20, 2026). A closed case, or one with
-// logged conversations, invoices, time or trust entries, is closed instead, never deleted.
+// logged conversations (deleted ones and entries added through a co-counsel link included), invoices, time or trust entries,
+// documents or served discovery responses, is closed instead, never deleted. The check and the delete run in one transaction
+// that locks the case first, so nothing can be added to it in between.
 const KEEP = "This case has a record that must be kept. Close it instead.";
 app.delete("/api/cases/:id", requireAuth, wrap(async (req, res) => {
   const cs = await caseSeen(req.user, req.params.id); if (!cs) return res.status(404).json(NOT_FOUND);
   if (req.user.role !== "admin") return res.status(403).json({ error: "Only a firm admin can delete a case.", code: "ADMIN_ONLY" });
-  const kept = cs.stage === "Closed" || (await q(`SELECT EXISTS (SELECT 1 FROM case_convos WHERE case_id=$1) OR EXISTS (SELECT 1 FROM invoices WHERE case_id=$1)
-    OR EXISTS (SELECT 1 FROM time_entries WHERE case_id=$1) OR EXISTS (SELECT 1 FROM trust_tx WHERE case_id=$1) AS k`, [cs.id])).rows[0].k;
-  if (kept) return res.status(400).json({ error: KEEP, code: "KEEP_RECORD" });
-  const r = await q("DELETE FROM cases WHERE id=$1 AND firm_id=$2", [cs.id, req.user.firm_id]);
-  await audit(req, "case_deleted", { id: +req.params.id });
-  res.json({ ok: r.rowCount > 0 });
+  const cl = await pool.connect(); let rbErr, out;
+  try {
+    await cl.query("BEGIN");
+    const cur = (await cl.query("SELECT id, stage FROM cases WHERE id=$1 AND firm_id=$2 FOR UPDATE", [cs.id, req.user.firm_id])).rows[0];
+    if (!cur) out = [404, NOT_FOUND];
+    else {
+      const kept = cur.stage === "Closed" || (await cl.query(`SELECT EXISTS (SELECT 1 FROM case_convos WHERE case_id=$1) OR EXISTS (SELECT 1 FROM invoices WHERE case_id=$1)
+        OR EXISTS (SELECT 1 FROM time_entries WHERE case_id=$1) OR EXISTS (SELECT 1 FROM trust_tx WHERE case_id=$1) OR EXISTS (SELECT 1 FROM documents WHERE case_id=$1)
+        OR EXISTS (SELECT 1 FROM discovery_sets WHERE case_id=$1 AND (status='sent' OR sent_at IS NOT NULL)) AS k`, [cur.id])).rows[0].k;
+      if (kept) out = [400, { error: KEEP, code: "KEEP_RECORD" }];
+      else { const r = await cl.query("DELETE FROM cases WHERE id=$1 AND firm_id=$2", [cur.id, req.user.firm_id]);
+        // the audit row is written in the same transaction: no delete without its record
+        await cl.query("INSERT INTO audit_log(user_id, firm_id, action, detail, ip) VALUES($1,$2,'case_deleted',$3,$4)", [req.user.id, req.user.firm_id, { id: cur.id, ...(req.devView ? { dev: true } : {}) }, req.ip]);
+        out = [200, { ok: r.rowCount > 0 }]; }
+    }
+    await cl.query(out[0] === 200 ? "COMMIT" : "ROLLBACK");
+  } catch (e) { await cl.query("ROLLBACK").catch(x => { rbErr = x; }); throw e; }
+  finally { cl.release(rbErr); }   // a connection that couldn't roll back is closed, not reused
+  res.status(out[0]).json(out[1]);
 }));
 
 // CSV import: header row with any of county,cause_no,court,style,case_type,filed_date,status,next_setting,notes
@@ -789,17 +804,22 @@ app.post("/api/cases/import", requireAuth, wrap(async (req, res) => {
     const county = COUNTIES.find(x => x.toLowerCase() === String(c.county || "").toLowerCase().replace(/\s*county$/, ""));
     if (!county || !c.cause_no) { skipped.push(`${c.cause_no || "?"}: missing county/cause #`); continue; }
     if (!(req.user.counties || []).includes(county)) { skipped.push(`${c.cause_no}: ${county} not in your counties`); continue; }
-    if (c.stage === "Closed" && req.user.role !== "admin") { skipped.push(`${c.cause_no}: only a firm admin can add a closed case`); continue; }
     // a final court status in the file (Closed, Disposed…): a firm admin's import is closed; anyone else's stays active,
-    // flagged for the admin's close-out by the database, without the new-case to-dos
-    const fin = await isFinal(c.status);
+    // flagged for the admin's close-out by the database, without the new-case to-dos.
+    // A non-admin's row with the stage Closed is treated the same way (Nov 20, 2026): imported active, flagged, no to-dos.
+    let closedRow = false;
+    if (c.stage === "Closed" && req.user.role !== "admin") { closedRow = true; delete c.stage; }
+    const fin = await isFinal(c.status) || closedRow;
     if (fin && req.user.role === "admin" && c.stage !== "Closed") { if (c.stage) c.stage_before_close = c.stage; c.stage = "Closed"; }
     if (c.stage === "Closed") c.closed_why = `Imported as closed by ${req.user.name}`;
     c.county = county;
     const cols = Object.keys(c);
     const ins = await q(`INSERT INTO cases(firm_id,user_id,source,${cols.join(",")}) VALUES($1,$2,'csv',${cols.map((_, i) => "$" + (i + 3)).join(",")}) ON CONFLICT DO NOTHING RETURNING *`,
       [req.user.firm_id, req.user.id, ...cols.map(k => c[k])]);
-    if (ins.rowCount) { added++; if (ins.rows[0].stage !== "Closed" && !fin) await practice.onCaseCreated(ins.rows[0], req.user.id); } else skipped.push(`${c.cause_no}: already in list`);
+    if (ins.rowCount) { added++;
+      // the flag for the admin's close-out (the database sets it itself for a final court status)
+      if (closedRow && !ins.rows[0].close_ready_at) await q("UPDATE cases SET close_ready_at=now(), close_ready_why=$2 WHERE id=$1", [ins.rows[0].id, `Imported as Closed by ${req.user.name}`]);
+      if (ins.rows[0].stage !== "Closed" && !fin) await practice.onCaseCreated(ins.rows[0], req.user.id); } else skipped.push(`${c.cause_no}: already in list`);
   }
   await audit(req, "cases_imported", { added, skipped: skipped.length });
   res.json({ added, skipped });
@@ -1241,6 +1261,7 @@ require("./mailbox").mount(app, { requireAuth, wrap, audit });   // full mail cl
 require("./discovery").mount(app, { requireAuth, wrap, audit });   // discovery responses: split, AI draft, attorney approves, serve
 require("./dictate").mount(app, { requireAuth, wrap });   // dictation: AI fixes grammar, the person chooses to insert it
 require("./convos").mount(app, { requireAuth, wrap, audit });   // conversation log on each case
+require("./links").mount(app, { requireAuth, wrap, audit });   // client page and co-counsel links per case (public /c/… and /cc/… pages)
 closeout.mount(app, { requireAuth, wrap });   // close-out checklist before a firm admin closes a case
 require("./activity").mount(app, { requireAuth, wrap });   // activity log: everything on a case in one timeline
 require("./ai").mount(app, { requireAuth, requireAdmin, wrap, audit });   // Firm Settings → AI (Claude): the firm's key, Test key, usage per person, limits
@@ -1248,11 +1269,13 @@ require("./assistant").mount(app, { requireAuth, requireAdmin, wrap, audit });  
 demo.mount(app, { wrap, audit, terms: TERMS });   // "Try the demo": a sample firm per visitor, nothing leaves the app
 
 // ---------- static + errors ----------
+// a link's token never goes into the logs (client / co-counsel pages, older client pages, pay pages, calendar feeds)
+const redactPath = p => String(p || "").replace(/\/(c|cc|portal|pay|cal)\/[^/?#\s]+/gi, "/$1/[token]");
 app.use(express.static(path.join(__dirname, "public"), { index: "index.html", setHeaders: r => r.setHeader("Cache-Control", "no-cache") }));
 app.use((req, res) => req.path.startsWith("/api") ? res.status(404).json({ error: "Not found" }) : res.sendFile(path.join(__dirname, "public", "index.html")));
 app.use((err, req, res, next) => {
   if (err instanceof cl.CLError) return res.status(err.status || 502).json({ error: err.message });
-  if (err && (err.type === "entity.parse.failed" || err.type === "entity.too.large")) { console.warn(`[http] ${err.type} on ${req.method} ${req.path}`); return res.status(err.status || 400).json({ error: "Bad request" }); }
+  if (err && (err.type === "entity.parse.failed" || err.type === "entity.too.large")) { console.warn(`[http] ${err.type} on ${req.method} ${redactPath(req.path)}`); return res.status(err.status || 400).json({ error: "Bad request" }); }
   if (err && err.status >= 400 && err.status < 500 && err.message && !err.type) return res.status(err.status).json({ error: err.message });   // a plain-English refusal raised on purpose
   if (err && err.status === 503 && err.message && !err.type) return res.status(503).json({ error: err.message, code: err.code });   // "AI isn't on" and similar, raised on purpose
   console.error(err);

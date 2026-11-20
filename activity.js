@@ -11,7 +11,7 @@ const KIND = { call: "Call", meeting: "Meeting", voicemail: "Voicemail", email: 
 const clip = (s, n) => { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
 const d10 = d => d ? (d instanceof Date ? d.toISOString() : String(d)).slice(0, 10) : "";
 const mdy = d => { const s = d10(d); return /^\d{4}-\d\d-\d\d$/.test(s) ? `${s.slice(5, 7)}/${s.slice(8, 10)}/${s.slice(0, 4)}` : s; };
-const AUD = ["case_team_added", "case_team_removed", "convo_edit", "convo_delete", "convo_restore", "case_close_override", "close_ready_dismissed", "document_shared", "document_deleted", "event_deleted", "task_deleted", "discovery_set_deleted"];
+const AUD = ["case_team_added", "case_team_removed", "convo_edit", "convo_delete", "convo_restore", "case_close_override", "close_ready_dismissed", "document_shared", "document_deleted", "event_deleted", "task_deleted", "discovery_set_deleted", "link_made", "link_revoked"];
 const SRC = "Court email or sync";   // a change no person made
 const OPEN = { trust: "money in trust", invoices: "unpaid invoices", unbilled: "unbilled time or expenses", dates: "open deadlines or dates", tasks: "open to-dos" };   // close-out items (closeout.js), named without amounts
 const hrs = m => (Math.round((+m || 0) / 6) / 10).toFixed(1) + " h";
@@ -25,7 +25,9 @@ async function build(user, caseId) {
   const none = { rows: [] }, safe = p => p.catch(e => { console.warn("[activity]", e.message); return none; });
   const [users, convos, gone, emails, docs, tasks, events, time, invoices, disc, changes, audits, moved] = await Promise.all([
     safe(q("SELECT id, name FROM users WHERE firm_id=$1", [F])),
-    safe(q(`SELECT id, at, kind, with_name, direction, minutes, body, user_id, deleted_at FROM case_convos WHERE case_id=$1 AND firm_id=$2 ${user.role === "admin" ? "" : "AND deleted_at IS NULL"} ORDER BY at DESC LIMIT 1000`, [id, F])),   // deleted entries: firm admins only
+    // deleted entries: firm admins only; an entry added through a co-counsel link carries that person's name (links.js)
+    safe(q(`SELECT v.id, v.at, v.kind, v.with_name, v.direction, v.minutes, v.body, v.user_id, v.deleted_at, v.link_id, l.name AS link_name FROM case_convos v LEFT JOIN case_links l ON l.id=v.link_id
+      WHERE v.case_id=$1 AND v.firm_id=$2 ${user.role === "admin" ? "" : "AND v.deleted_at IS NULL"} ORDER BY v.at DESC LIMIT 1000`, [id, F])),
     safe(q("SELECT id FROM case_convos WHERE case_id=$1 AND firm_id=$2 AND deleted_at IS NOT NULL", [id, F])),   // entries deleted now: their words and history stay with admins
     safe(q(`SELECT id, subject, from_addr, received_at FROM inbound_emails WHERE firm_id=$2 AND dismissed_at IS NULL
         AND ($3 = ANY(matched_case_ids) OR ($1 = ANY(causes) AND (lower(parsed->>'county') = lower($4) OR user_id=$5))) ORDER BY received_at DESC LIMIT 500`,
@@ -51,7 +53,7 @@ async function build(user, caseId) {
   const out = [], add = (cat, at, title, detail, who, go) => { if (at) out.push({ cat, at: new Date(at).toISOString(), title, detail: detail || "", by: who || null, go: go || null }); };
 
   for (const v of convos.rows) add("conversations", v.at, `${v.deleted_at ? "Deleted entry · " : ""}${KIND[v.kind] || "Conversation"}${v.direction === "in" ? " (incoming)" : v.direction === "out" ? " (outgoing)" : ""}${v.with_name ? " with " + v.with_name : ""}${v.minutes ? " · " + v.minutes + " min" : ""}`,
-    clip(rt.toText(v.body || ""), 220), by(v.user_id), { sec: "talk", cv: v.id });
+    clip(rt.toText(v.body || ""), 220) + (v.link_id ? " · via co-counsel link" : ""), v.link_id ? `${v.link_name || "Co-counsel"} (co-counsel link)` : by(v.user_id), { sec: "talk", cv: v.id });
   for (const e of emails.rows) add("court", e.received_at, clip(e.subject || "(no subject)", 200), e.from_addr ? "From " + clip(e.from_addr, 120) : "", SRC, { email: e.id });
   for (const d of docs.rows) add("documents", d.created_at, "Document added: " + clip(d.name, 160), "", by(d.uploaded_by), { doc: d.id });
   for (const t of tasks.rows) {
@@ -93,6 +95,8 @@ async function build(user, caseId) {
     else if (a.action === "document_deleted") add("documents", a.at, "Document deleted: " + clip(d.name || "", 160), "", by(a.user_id), null);
     else if (a.action === "event_deleted") add("dates", a.at, `${d.kind === "hearing" ? "Hearing" : d.kind === "deadline" ? "Deadline" : "Date"} removed: ${clip(d.title, 160)}`, d.on ? "Was on " + mdy(d.on) : "", by(a.user_id), null);
     else if (a.action === "task_deleted") add("tasks", a.at, "Task deleted: " + clip(d.title, 160), "", by(a.user_id), null);
+    else if (a.action === "link_made") add("changes", a.at, d.kind === "client" ? `Client page link made${d.name ? " for " + clip(d.name, 120) : ""}${d.replaced ? " (the old one was turned off)" : ""}` : `Co-counsel link made for ${clip(d.name || "—", 120)}`, d.kind === "client" ? "" : d.role ? clip(d.role, 60) : "", by(a.user_id), { sec: "people" });
+    else if (a.action === "link_revoked" && !d.replaced_by) add("changes", a.at, d.kind === "client" ? `Client page link turned off${d.name ? " for " + clip(d.name, 120) : ""}` : `Co-counsel link turned off: ${clip(d.name || "—", 120)}`, d.why ? "Why: " + clip(d.why, 120) : "", by(a.user_id), { sec: "people" });
     else if (a.action === "discovery_set_deleted") add("discovery", a.at, "Discovery draft deleted" + (d.title ? ": " + clip(d.title, 160) : ""), "", by(a.user_id), null);
   }
   if (!audits.rows.some(a => a.action === "case_added") && c.created_at) add("changes", c.created_at, "Case added", "", SRC, null);

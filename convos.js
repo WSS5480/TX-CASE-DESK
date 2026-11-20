@@ -12,7 +12,7 @@ const KINDS = ["call", "meeting", "voicemail", "email", "text", "court", "note"]
 const fail = (status, error) => Object.assign(new Error(error), { status });
 const LAWYER = u => u.role !== "paralegal";
 const ADMIN = u => u.role === "admin";
-const MSG = { del: "Only a firm admin can delete a logged conversation.", restore: "Only a firm admin can restore a logged conversation.", deleted: "This entry was deleted. Restore it first to edit it." };
+const MSG = { del: "Only a firm admin can delete a logged conversation.", restore: "Only a firm admin can restore a logged conversation.", deleted: "This entry was deleted. Restore it first to edit it.", link: "This entry was added through a co-counsel link. It can't be edited." };
 const ID = v => /^\d{1,9}$/.test(String(v)) ? +v : 0;   // anything else (or past the id range) is simply not found
 
 async function caseFor(user, id) {
@@ -27,6 +27,7 @@ async function entryFor(user, id, { edit = true } = {}) {
   if (!e || (e.deleted_at && !ADMIN(user))) throw fail(404, "Not found.");
   await caseFor(user, e.case_id);
   if (edit) {
+    if (e.link_id) throw fail(403, MSG.link);
     if (e.user_id !== user.id && !LAWYER(user)) throw fail(403, "Only the person who logged this, or an attorney, can change it.");
     if (e.deleted_at) throw fail(400, MSG.deleted);
   }
@@ -63,9 +64,10 @@ async function clean(user, caseId, b, old) {
 }
 const same = (k, a, b) => k === "at" ? new Date(a).getTime() === new Date(b).getTime() : (a == null ? null : String(a)) === (b == null ? null : String(b));
 const SEL = `SELECT v.*, u.name AS logged_by, ub.name AS edited_by, ud.name AS deleted_by_name, te.minutes AS billed_minutes, te.invoice_id AS billed_invoice, tk.due_date AS follow_due, tk.done AS follow_done, tk.title AS follow_title,
-  (SELECT count(*)::int FROM case_convo_versions x WHERE x.convo_id=v.id) AS versions
-  FROM case_convos v LEFT JOIN users u ON u.id=v.user_id LEFT JOIN users ub ON ub.id=v.updated_by LEFT JOIN users ud ON ud.id=v.deleted_by LEFT JOIN time_entries te ON te.id=v.time_id LEFT JOIN tasks tk ON tk.id=v.task_id`;
-const shape = (r, user) => ({ ...r, deleted: !!r.deleted_at, can_edit: !r.deleted_at && (r.user_id === user.id || LAWYER(user)), can_delete: !r.deleted_at && ADMIN(user), can_restore: !!r.deleted_at && ADMIN(user) });
+  (SELECT count(*)::int FROM case_convo_versions x WHERE x.convo_id=v.id) AS versions, lk.name AS link_name, lk.role_label AS link_role
+  FROM case_convos v LEFT JOIN case_links lk ON lk.id=v.link_id LEFT JOIN users u ON u.id=v.user_id LEFT JOIN users ub ON ub.id=v.updated_by LEFT JOIN users ud ON ud.id=v.deleted_by LEFT JOIN time_entries te ON te.id=v.time_id LEFT JOIN tasks tk ON tk.id=v.task_id`;
+// an entry added through a co-counsel link (links.js) is that person's own record: nobody edits it (a firm admin can still delete / restore)
+const shape = (r, user) => ({ ...r, via_link: !!r.link_id, deleted: !!r.deleted_at, can_edit: !r.deleted_at && !r.link_id && (r.user_id === user.id || LAWYER(user)), can_delete: !r.deleted_at && ADMIN(user), can_restore: !!r.deleted_at && ADMIN(user) });
 const one = async (id, user) => shape((await q(`${SEL} WHERE v.id=$1`, [id])).rows[0], user);
 
 function mount(app, { requireAuth, wrap, audit }) {

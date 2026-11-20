@@ -559,6 +559,31 @@ CREATE TABLE IF NOT EXISTS case_convo_versions (
   saved_at TIMESTAMPTZ DEFAULT now()                        -- when it was replaced (kept here)
 );
 CREATE INDEX IF NOT EXISTS case_convo_versions_convo ON case_convo_versions(convo_id, id DESC);
+-- Case links (Steve, Nov 20, 2026; links.js): a read-only page per case for the client (/c/<token>, one live link per case) and
+-- one per named co-counsel / outside staff person (/cc/<token>), who may add conversation entries. The token itself is never
+-- stored: token_hash (SHA-256) finds the link, token_enc (sealed with CRED_KEY) lets the firm copy it again.
+CREATE TABLE IF NOT EXISTS case_links (
+  id SERIAL PRIMARY KEY,
+  firm_id INT NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+  case_id INT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('client', 'cocounsel')),
+  token_hash TEXT NOT NULL UNIQUE,
+  token_enc TEXT,
+  name TEXT, email TEXT, role_label TEXT,                  -- co-counsel: who the link is for (name required); client: optional name
+  created_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  revoked_at TIMESTAMPTZ, revoked_by INT REFERENCES users(id) ON DELETE SET NULL,
+  last_used_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS case_links_case ON case_links(case_id, created_at DESC);
+ALTER TABLE case_links ADD COLUMN IF NOT EXISTS contact_id INT REFERENCES contacts(id) ON DELETE SET NULL;   -- client links: the client contact the page is for
+ALTER TABLE case_links ADD COLUMN IF NOT EXISTS view_day DATE;   -- the last day a page view was audited (one audit row per link per day)
+DROP INDEX IF EXISTS case_links_client1;
+CREATE UNIQUE INDEX IF NOT EXISTS case_links_client2 ON case_links(case_id, contact_id) WHERE kind = 'client' AND revoked_at IS NULL;   -- one live client link per client on a case
+-- the client page shows court dates (hearings, court settings) plus only the calendar items marked "Show on client page"
+ALTER TABLE events ADD COLUMN IF NOT EXISTS client_visible BOOLEAN DEFAULT false;
+ALTER TABLE case_convos ADD COLUMN IF NOT EXISTS link_id INT REFERENCES case_links(id) ON DELETE SET NULL;   -- added through a co-counsel link (user_id is NULL)
+CREATE INDEX IF NOT EXISTS case_convos_link ON case_convos(link_id, created_at) WHERE link_id IS NOT NULL;
 -- Activity log: case changes (stage, court status, court, type, style, cause #, lead attorney) are recorded by the database itself,
 -- whoever or whatever made them (a person, a court email, a portal sync). The app fills in "by" for changes a person made.
 ALTER TABLE case_changes ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL;
@@ -659,8 +684,10 @@ async function migrate() { await pool.query(SCHEMA); }
 const LATE_INDEXES = [
   // the Activity log's audit rows (activity.js AUD): team, conversations (edit, delete, restore), close-outs over open items,
   // dismissed ready-to-close flags, documents, dates, tasks, discovery (Nov 20, 2026; replaces the older audit_case)
-  ["audit_case2", `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_case2 ON audit_log(firm_id, (COALESCE(detail->>'case', detail->>'case_id')), at DESC) WHERE action IN ('case_team_added','case_team_removed','convo_edit','convo_delete','convo_restore','case_close_override','close_ready_dismissed','document_shared','document_deleted','event_deleted','task_deleted','discovery_set_deleted')`],
-  ["audit_case_old", `DROP INDEX CONCURRENTLY IF EXISTS audit_case`, "audit_case2"],   // replaced by audit_case2: dropped only once that one is built and valid
+  // audit_case3 adds client / co-counsel links made and turned off (Nov 20, 2026, links.js); it replaces audit_case2, which replaced audit_case
+  ["audit_case3", `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_case3 ON audit_log(firm_id, (COALESCE(detail->>'case', detail->>'case_id')), at DESC) WHERE action IN ('case_team_added','case_team_removed','convo_edit','convo_delete','convo_restore','case_close_override','close_ready_dismissed','document_shared','document_deleted','event_deleted','task_deleted','discovery_set_deleted','link_made','link_revoked')`],
+  ["audit_case_old", `DROP INDEX CONCURRENTLY IF EXISTS audit_case`, "audit_case3"],   // older ones dropped only once audit_case3 is built and valid
+  ["audit_case2_old", `DROP INDEX CONCURRENTLY IF EXISTS audit_case2`, "audit_case3"],
   ["audit_case_added", `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_case_added ON audit_log(firm_id, (detail->>'id')) WHERE action='case_added'`],
   ["tasks_case", `CREATE INDEX CONCURRENTLY IF NOT EXISTS tasks_case ON tasks(case_id)`],
   ["events_case", `CREATE INDEX CONCURRENTLY IF NOT EXISTS events_case ON events(case_id)`],

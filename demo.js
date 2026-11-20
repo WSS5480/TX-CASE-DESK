@@ -14,7 +14,7 @@ const MSG = {
   connect: "Demo firm: email can't be connected. In your own firm you connect Outlook, Gmail or your email provider here.",
   aikey: "Demo firm: the demo uses the demo key, so there's nothing to change here. In your own firm, an admin adds the firm's Claude key here.",
   court: "Demo firm: court portals, case-law research and case-law watching are off.",
-  share: "Demo firm: client portal links and calendar subscriptions are off (nothing in a demo is published).",
+  share: "Demo firm: client and co-counsel links and calendar subscriptions are off (nothing in a demo is published).",
   files: "Demo firm: imports, logos and bar cards are off. Documents up to 1 MB, 10 per demo.",
   staff: "Demo firm: staff logins can't be added. In your own firm, add attorneys and staff here.",
   account: "Demo firm: there's no password or subscription to change.",
@@ -26,7 +26,7 @@ const BLOCK = [
   ["W", /^\/api\/mailx(\/|$)/, "send"], ["*", /^\/api\/discovery\/[^/]+\/send$/, "send"],
   ["W", /^\/api\/ai\/(key|limits)(\/|$)/, "aikey"],
   ["*", /^\/api\/law(\/|$)/, "court"], ["*", /^\/api\/admin(\/|$)/, "court"], ["*", /^\/api\/cases\/[^/]+\/(analyze|law-ack)$/, "court"], ["*", /^\/api\/court-logins(\/|$)/, "court"], ["*", /^\/api\/cases\/watch-all$/, "court"],
-  ["*", /^\/api\/contacts\/[^/]+\/portal$/, "share"], ["*", /^\/api\/calendar\/feed$/, "share"],
+  ["*", /^\/api\/contacts\/[^/]+\/portal$/, "share"], ["W", /^\/api\/cases\/[^/]+\/links(\/|$)/, "share"], ["*", /^\/api\/calendar\/feed$/, "share"],
   ["*", /^\/api\/(import\/|cases\/import$|firm\/logo$|firm\/users\/[^/]+\/bar-card$|users\/[^/]+\/bar-card$|me\/bar-card$)/, "files"],
   ["W", /^\/api\/firm\/users$/, "staff"], ["*", /^\/api\/(password|subscription|2fa|totp)(\/|$)/, "account"],
 ];
